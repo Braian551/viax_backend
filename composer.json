@@ -1,0 +1,12 @@
+{
+    "name": "pinggo/email-service",
+    "description": "Servicio de email para PingGo",
+    "require": {
+        "phpmailer/phpmailer": "^6.6"
+    },
+    "autoload": {
+        "psr-4": {
+            "PingGo\\": "src/"
+        }
+    }
+}

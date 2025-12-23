@@ -1,0 +1,26 @@
+{
+    "usuario_id": 2,
+    "latitud_origen": 4.6097,
+    "longitud_origen": -74.0817,
+    "direccion_origen": "Plaza de Bolívar, Bogotá",
+    "latitud_destino": 4.7110,
+    "longitud_destino": -74.0721,
+    "direccion_destino": "Centro Comercial Andino, Bogotá",
+    "tipo_servicio": "viaje",
+    "tipo_vehiculo": "carro",
+    "distancia_km": 12.5,
+    "duracion_minutos": 35,
+    "precio_estimado": 25000,
+    "paradas": [
+        {
+            "latitud": 4.6584,
+            "longitud": -74.0939,
+            "direccion": "Parque Simón Bolívar"
+        },
+        {
+            "latitud": 4.6243,
+            "longitud": -74.1678,
+            "direccion": "Aeropuerto El Dorado"
+        }
+    ]
+}

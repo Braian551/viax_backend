@@ -1,0 +1,9 @@
+# Protección de archivos
+<Files *.php>
+    Deny from all
+</Files>
+
+# Proteger archivos sensibles
+<FilesMatch "\.(sql|log|txt)$">
+    Deny from all
+</FilesMatch>

@@ -1,0 +1,41 @@
+# Dependencias de Composer
+/vendor/
+composer.lock
+
+# Variables de entorno (contienen credenciales)
+.env
+.env.local
+.env.*.local
+config/.env
+
+# Logs
+*.log
+logs/
+
+# Cache
+/cache/
+*.cache
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Archivos temporales
+*.tmp
+*.temp
+/tmp/
+
+# Uploads de usuarios (no versionar archivos subidos)
+/uploads/temp/
+
+# PHPUnit
+/phpunit.xml
+/.phpunit.result.cache
+/coverage/

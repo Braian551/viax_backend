@@ -49,18 +49,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     // Asegurar tabla user_devices
                     $pdo->query('SELECT 1 FROM user_devices LIMIT 1');
                 } catch (Exception $e) {
+                    // Sintaxis PostgreSQL
                     $pdo->exec("CREATE TABLE IF NOT EXISTS user_devices (
-                        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                        user_id BIGINT UNSIGNED NOT NULL,
+                        id BIGSERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
                         device_uuid VARCHAR(100) NOT NULL,
-                        first_seen TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
-                        last_seen TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
-                        trusted TINYINT(1) NOT NULL DEFAULT 0,
+                        first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        last_seen TIMESTAMP DEFAULT NULL,
+                        trusted SMALLINT NOT NULL DEFAULT 0,
                         fail_attempts INT NOT NULL DEFAULT 0,
-                        locked_until TIMESTAMP NULL DEFAULT NULL,
-                        PRIMARY KEY (id),
-                        UNIQUE KEY idx_user_device_unique (user_id, device_uuid)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+                        locked_until TIMESTAMP DEFAULT NULL,
+                        UNIQUE (user_id, device_uuid)
+                    )");
                 }
 
                 // Obtener usuario

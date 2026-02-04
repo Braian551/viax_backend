@@ -12,7 +12,7 @@ header('Access-Control-Allow-Methods: POST, GET, OPTIONS, DELETE, PUT');
 header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With');
 
 // Manejar preflight OPTIONS request
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+if (isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit(0);
 }
 
@@ -43,4 +43,3 @@ function sendJsonResponse($success, $message, $data = []) {
     echo json_encode($response);
     exit;
 }
-?>

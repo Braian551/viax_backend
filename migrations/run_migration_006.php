@@ -57,33 +57,9 @@ try {
     echo "\nTabla creada:\n";
     echo "  - documentos_conductor_historial\n";
     
-    // Crear directorio de uploads si no existe
-    $uploadsDir = __DIR__ . '/../uploads';
-    $documentosDir = $uploadsDir . '/documentos';
-    
-    if (!file_exists($uploadsDir)) {
-        mkdir($uploadsDir, 0755, true);
-        echo "\n✓ Directorio uploads creado\n";
-    }
-    
-    if (!file_exists($documentosDir)) {
-        mkdir($documentosDir, 0755, true);
-        echo "✓ Directorio documentos creado\n";
-    }
-    
-    // Crear .htaccess para protección
-    $htaccess = $uploadsDir . '/.htaccess';
-    if (!file_exists($htaccess)) {
-        file_put_contents($htaccess, "# Protección de archivos\n<Files *.php>\n    Deny from all\n</Files>\n");
-        echo "✓ Archivo .htaccess creado\n";
-    }
-    
-    // Crear .gitignore
-    $gitignore = $uploadsDir . '/.gitignore';
-    if (!file_exists($gitignore)) {
-        file_put_contents($gitignore, "*\n!.gitignore\n!.htaccess\n");
-        echo "✓ Archivo .gitignore creado\n";
-    }
+    // NOTA: Ya no se crean directorios locales de uploads
+    // Todos los archivos se guardan en Cloudflare R2
+    echo "\n✓ Todos los documentos se almacenan en Cloudflare R2\n";
     
 } catch (Exception $e) {
     if (isset($db) && $db->inTransaction()) {

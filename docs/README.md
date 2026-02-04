@@ -1,8 +1,8 @@
-# Backend PingGo - Arquitectura de Microservicios
+# Backend Viax - Arquitectura de Microservicios
 
 ## 📋 Descripción
 
-Backend de PingGo organizado en **microservicios modulares** para facilitar el escalamiento, mantenimiento y desarrollo paralelo.
+Backend de Viax organizado en **microservicios modulares** para facilitar el escalamiento, mantenimiento y desarrollo paralelo.
 
 ---
 
@@ -116,22 +116,23 @@ backend/
 
 ### Desarrollo Local
 
-**Base URL**: `http://10.0.2.2/pingo/backend` (Android Emulator)  
-**Base URL**: `http://localhost/pingo/backend` (Navegador/Postman)
+**Base URL**: `http://10.0.2.2/viax/backend` (Android Emulator)  
+**Base URL**: `http://localhost/viax/backend` (Navegador/Postman)
+**Base URL**: `http://192.168.18.68/viax/backend` (Dispositivo Físico)
 
 #### Ejemplos de uso:
 
 ```bash
 # Login
-curl -X POST http://localhost/pingo/backend/auth/login.php \
+curl -X POST http://localhost/viax/backend/auth/login.php \
   -H "Content-Type: application/json" \
   -d '{"email":"test@test.com","password":"123456"}'
 
 # Perfil de conductor
-curl http://localhost/pingo/backend/conductor/get_profile.php?conductor_id=1
+curl http://localhost/viax/backend/conductor/get_profile.php?conductor_id=1
 
 # Stats de admin
-curl http://localhost/pingo/backend/admin/dashboard_stats.php?admin_id=1
+curl http://localhost/viax/backend/admin/dashboard_stats.php?admin_id=1
 ```
 
 ---
@@ -144,82 +145,9 @@ Configurar en `config/database.php`:
 
 ```php
 define('DB_HOST', 'localhost');
-define('DB_NAME', 'pingo');
-define('DB_USER', 'root');
-define('DB_PASS', 'root');
-```
-
-### Variables de Entorno
-
-```php
-// config/config.php
-define('ENV', 'development'); // development, staging, production
-define('DEBUG_MODE', true);
-define('API_VERSION', 'v1');
-```
-
----
-
-## 📦 Migraciones
-
-Ejecutar migraciones en orden:
-
-```bash
-# 1. Crear tablas de admin
-mysql -u root -p pingo < migrations/001_create_admin_tables.sql
-
-# 2. Agregar campos de conductor
-mysql -u root -p pingo < migrations/002_conductor_fields.sql
-
-# 3. Fix columnas de usuarios
-mysql -u root -p pingo < migrations/003_fix_usuarios_columns.sql
-```
-
-📚 [Guía completa de migraciones](./migrations/README.md)
-
----
-
-## 🧪 Testing
-
-### Postman Collection
-
-Importar colección de Postman:
-- Auth endpoints: [auth_collection.json]
-- Conductor endpoints: [conductor_collection.json]
-- Admin endpoints: [admin_collection.json]
-
-### Tests PHP
-
-```bash
-# Instalar PHPUnit
-composer install
-
-# Ejecutar tests
-./vendor/bin/phpunit tests/
-```
-
----
-
-## 🔐 Seguridad
-
-### Headers Requeridos
-
-```
-Content-Type: application/json
-Accept: application/json
-```
-
-### Autenticación
-
-- **Actual**: Sin tokens (desarrollo)
-- **Próximo**: JWT tokens en header `Authorization: Bearer <token>`
-
-### CORS
-
-Configurado en cada endpoint PHP:
-```php
-header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE');
+define('DB_NAME', 'viax');
+define('DB_USER', 'viax_user');
+define('DB_PASS', 'password');
 ```
 
 ---
@@ -248,79 +176,13 @@ header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE');
 
 ---
 
-## 🎯 Migración a Producción
-
-### Cambios Necesarios
-
-1. **URLs**: Cambiar base URL en Flutter (`AppConfig`)
-2. **Base de datos**: Usar credenciales de producción
-3. **CORS**: Restringir orígenes permitidos
-4. **JWT**: Implementar autenticación con tokens
-5. **HTTPS**: Usar certificados SSL
-6. **Logs**: Configurar logging a archivos
-
-### Deploy Recomendado
-
-```
-API Gateway (nginx/kong)
-    ↓
-┌─────────────┬──────────────┬──────────────┐
-│ Auth        │ Conductor    │ Admin        │
-│ Service     │ Service      │ Service      │
-│ (Port 8001) │ (Port 8002)  │ (Port 8003)  │
-└─────────────┴──────────────┴──────────────┘
-```
-
----
-
-## 🔄 Roadmap
-
-### Fase 1: Modularización ✅
-- [x] Separar código en microservicios
-- [x] Documentar cada servicio
-- [x] Centralizar configuración
-
-### Fase 2: Preparación
-- [ ] Implementar JWT
-- [ ] Agregar rate limiting
-- [ ] Tests unitarios e integración
-- [ ] CI/CD pipeline
-
-### Fase 3: Separación Real
-- [ ] Servidores separados por servicio
-- [ ] API Gateway
-- [ ] Bases de datos separadas
-- [ ] Monitoreo (ELK, Prometheus)
-
----
-
-## 📚 Documentación Adicional
-
-- [Clean Architecture Flutter](../../docs/architecture/CLEAN_ARCHITECTURE.md)
-- [Guía de Migración a Microservicios](../../docs/architecture/MIGRATION_TO_MICROSERVICES.md)
-- [Limpieza de Microservicios](../../docs/architecture/MICROSERVICES_CLEANUP.md)
-- [Guía Rápida de Rutas](../../docs/architecture/GUIA_RAPIDA_RUTAS.md)
-
----
-
-## 🤝 Contribuir
-
-1. Cada microservicio debe tener su README
-2. Documentar endpoints con ejemplos
-3. Usar el formato de respuesta estándar
-4. Agregar validaciones y manejo de errores
-5. Actualizar migraciones cuando cambies BD
-
----
-
 ## 📞 Soporte
 
-- **Documentación completa**: `/docs/architecture/`
-- **Issues**: GitHub Issues
-- **Equipo**: Ping Go Development Team
+- **Documentación completa**: `/docs/`
+- **Equipo**: Viax Development Team
 
 ---
 
-**Última actualización**: Octubre 2025  
-**Versión**: 1.0.0  
+**Última actualización**: Enero 2026
+**Versión**: 1.0.1
 **Estado**: ✅ Microservicios organizados y documentados

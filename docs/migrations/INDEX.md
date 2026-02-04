@@ -10,14 +10,14 @@ Corregir el error `Unknown column 'es_activo' in 'field list'` mediante la migra
 ### ✅ Archivos de Migración (Backend)
 
 #### 1. **003_fix_usuarios_columns.sql** ⭐ PRINCIPAL
-- **Ubicación**: `pingo/backend/migrations/003_fix_usuarios_columns.sql`
+- **Ubicación**: `viax/backend/migrations/003_fix_usuarios_columns.sql`
 - **Propósito**: Script de migración SQL para renombrar columnas
 - **Tamaño**: ~3 KB
 - **Tiempo de ejecución**: < 1 segundo
 - **Descripción**: Renombra 5 columnas de la tabla usuarios con verificación dinámica
 
 #### 2. **run_migration_003.sql** 🛡️ SEGURO
-- **Ubicación**: `pingo/backend/migrations/run_migration_003.sql`
+- **Ubicación**: `viax/backend/migrations/run_migration_003.sql`
 - **Propósito**: Script wrapper que incluye backup automático
 - **Características**:
   - Crea backup antes de migrar
@@ -26,7 +26,7 @@ Corregir el error `Unknown column 'es_activo' in 'field list'` mediante la migra
   - Muestra estructura final
 
 #### 3. **setup_admin_user.sql** 🔧 ACTUALIZADO
-- **Ubicación**: `pingo/backend/admin/setup_admin_user.sql`
+- **Ubicación**: `viax/backend/admin/setup_admin_user.sql`
 - **Propósito**: Script de configuración de administrador
 - **Cambios**: Actualizado para usar nuevos nombres de columnas
 
@@ -35,7 +35,7 @@ Corregir el error `Unknown column 'es_activo' in 'field list'` mediante la migra
 ### 📚 Documentación
 
 #### 4. **LEER_PRIMERO.md** 🚨 URGENTE
-- **Ubicación**: `pingo/backend/migrations/LEER_PRIMERO.md`
+- **Ubicación**: `viax/backend/migrations/LEER_PRIMERO.md`
 - **Propósito**: Guía urgente con instrucciones paso a paso
 - **Contenido**:
   - Descripción del problema
@@ -45,7 +45,7 @@ Corregir el error `Unknown column 'es_activo' in 'field list'` mediante la migra
   - Plan de recuperación
 
 #### 5. **GUIA_RAPIDA.md** ⚡ EXPRESS
-- **Ubicación**: `pingo/backend/migrations/GUIA_RAPIDA.md`
+- **Ubicación**: `viax/backend/migrations/GUIA_RAPIDA.md`
 - **Propósito**: Comandos listos para copiar y pegar
 - **Contenido**:
   - Script SQL directo (5 líneas)
@@ -54,7 +54,7 @@ Corregir el error `Unknown column 'es_activo' in 'field list'` mediante la migra
   - Lista de archivos para servidor
 
 #### 6. **RESUMEN_CAMBIOS.md** 📊 COMPLETO
-- **Ubicación**: `pingo/backend/migrations/RESUMEN_CAMBIOS.md`
+- **Ubicación**: `viax/backend/migrations/RESUMEN_CAMBIOS.md`
 - **Propósito**: Documentación técnica detallada
 - **Contenido**:
   - Diagnóstico del problema
@@ -65,7 +65,7 @@ Corregir el error `Unknown column 'es_activo' in 'field list'` mediante la migra
   - Impacto y estadísticas
 
 #### 7. **CHECKLIST_PRODUCCION.md** ✅ CHECKLIST
-- **Ubicación**: `pingo/backend/migrations/CHECKLIST_PRODUCCION.md`
+- **Ubicación**: `viax/backend/migrations/CHECKLIST_PRODUCCION.md`
 - **Propósito**: Checklist interactivo para deployment
 - **Contenido**:
   - Pre-migración (preparación)
@@ -76,7 +76,7 @@ Corregir el error `Unknown column 'es_activo' in 'field list'` mediante la migra
   - Contactos de emergencia
 
 #### 8. **DIAGRAMA.txt** 🎨 VISUAL
-- **Ubicación**: `pingo/backend/migrations/DIAGRAMA.txt`
+- **Ubicación**: `viax/backend/migrations/DIAGRAMA.txt`
 - **Propósito**: Representación visual del problema y solución
 - **Contenido**:
   - Diagrama de arquitectura
@@ -85,7 +85,7 @@ Corregir el error `Unknown column 'es_activo' in 'field list'` mediante la migra
   - FAQs visuales
 
 #### 9. **INDEX.md** 📋 ESTE ARCHIVO
-- **Ubicación**: `pingo/backend/migrations/INDEX.md`
+- **Ubicación**: `viax/backend/migrations/INDEX.md`
 - **Propósito**: Índice de todos los archivos generados
 - **Contenido**: Este resumen
 
@@ -134,18 +134,18 @@ Cuando vayas a desplegar en producción, **SUBE ESTOS ARCHIVOS**:
 
 ```
 ✅ OBLIGATORIOS:
-  📄 pingo/backend/migrations/003_fix_usuarios_columns.sql
-  📄 pingo/backend/admin/setup_admin_user.sql
+  📄 viax/backend/migrations/003_fix_usuarios_columns.sql
+  📄 viax/backend/admin/setup_admin_user.sql
 
 ✅ RECOMENDADOS:
-  📄 pingo/backend/migrations/run_migration_003.sql
-  📄 pingo/backend/migrations/LEER_PRIMERO.md
-  📄 pingo/backend/migrations/GUIA_RAPIDA.md
+  📄 viax/backend/migrations/run_migration_003.sql
+  📄 viax/backend/migrations/LEER_PRIMERO.md
+  📄 viax/backend/migrations/GUIA_RAPIDA.md
 
 ⚠️ OPCIONALES (para referencia):
-  📄 pingo/backend/migrations/RESUMEN_CAMBIOS.md
-  📄 pingo/backend/migrations/CHECKLIST_PRODUCCION.md
-  📄 pingo/backend/migrations/DIAGRAMA.txt
+  📄 viax/backend/migrations/RESUMEN_CAMBIOS.md
+  📄 viax/backend/migrations/CHECKLIST_PRODUCCION.md
+  📄 viax/backend/migrations/DIAGRAMA.txt
 ```
 
 ---
@@ -154,19 +154,19 @@ Cuando vayas a desplegar en producción, **SUBE ESTOS ARCHIVOS**:
 
 ### Opción 1: Todo en uno (MySQL Workbench)
 ```sql
-USE pingo;
-SOURCE c:/Flutter/ping_go/pingo/backend/migrations/run_migration_003.sql;
+USE viax;
+SOURCE c:/Flutter/ping_go/viax/backend/migrations/run_migration_003.sql;
 ```
 
 ### Opción 2: Manual (PowerShell)
 ```powershell
-cd c:\Flutter\ping_go\pingo\backend\migrations
-mysql -u root -p pingo < 003_fix_usuarios_columns.sql
+cd c:\Flutter\ping_go\viax\backend\migrations
+mysql -u root -p viax < 003_fix_usuarios_columns.sql
 ```
 
 ### Opción 3: Ultra rápido (Copiar-Pegar SQL)
 ```sql
-USE pingo;
+USE viax;
 CREATE TABLE usuarios_backup_20251023 AS SELECT * FROM usuarios;
 ALTER TABLE usuarios CHANGE COLUMN activo es_activo TINYINT(1) DEFAULT 1;
 ALTER TABLE usuarios CHANGE COLUMN verificado es_verificado TINYINT(1) DEFAULT 0;
@@ -245,12 +245,12 @@ Después de ejecutar la migración, verifica:
 ```sql
 -- Debe retornar 5 filas (las nuevas columnas)
 SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_SCHEMA = 'pingo' AND TABLE_NAME = 'usuarios'
+WHERE TABLE_SCHEMA = 'viax' AND TABLE_NAME = 'usuarios'
 AND COLUMN_NAME IN ('es_activo', 'es_verificado', 'foto_perfil', 'fecha_registro', 'fecha_actualizacion');
 
 -- Debe retornar 0 filas (columnas antiguas eliminadas)
 SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_SCHEMA = 'pingo' AND TABLE_NAME = 'usuarios'
+WHERE TABLE_SCHEMA = 'viax' AND TABLE_NAME = 'usuarios'
 AND COLUMN_NAME IN ('activo', 'verificado', 'url_imagen_perfil', 'creado_en', 'actualizado_en');
 ```
 
@@ -273,5 +273,5 @@ Este paquete contiene **TODO** lo necesario para:
 
 **Creado**: 23 de Octubre, 2025  
 **Versión**: 1.0  
-**Proyecto**: PinGo Backend  
+**Proyecto**: viax Backend  
 **Migración**: 003_fix_usuarios_columns

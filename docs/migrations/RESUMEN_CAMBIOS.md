@@ -29,7 +29,7 @@ El backend PHP está intentando acceder a columnas que no existen en la base de 
 
 ### 1. Migración de Base de Datos
 
-**Archivo creado**: `pingo/backend/migrations/003_fix_usuarios_columns.sql`
+**Archivo creado**: `viax/backend/migrations/003_fix_usuarios_columns.sql`
 
 Esta migración renombra las columnas de la tabla `usuarios`:
 
@@ -43,7 +43,7 @@ actualizado_en     → fecha_actualizacion
 
 ### 2. Script de Ejecución Seguro
 
-**Archivo creado**: `pingo/backend/migrations/run_migration_003.sql`
+**Archivo creado**: `viax/backend/migrations/run_migration_003.sql`
 
 Este script:
 - ✅ Crea un backup automático de la tabla `usuarios`
@@ -52,7 +52,7 @@ Este script:
 
 ### 3. Corrección del Script de Setup
 
-**Archivo modificado**: `pingo/backend/admin/setup_admin_user.sql`
+**Archivo modificado**: `viax/backend/admin/setup_admin_user.sql`
 
 - Actualizado para usar los nuevos nombres de columnas
 - Añadido `actualizado_en = CURRENT_TIMESTAMP` en el UPDATE
@@ -69,7 +69,7 @@ Este script:
 
 ### Nuevos Archivos:
 ```
-pingo/backend/migrations/
+viax/backend/migrations/
   ├── 003_fix_usuarios_columns.sql      ← MIGRACIÓN PRINCIPAL
   ├── run_migration_003.sql             ← SCRIPT SEGURO
   └── LEER_PRIMERO.md                   ← GUÍA URGENTE
@@ -77,7 +77,7 @@ pingo/backend/migrations/
 
 ### Archivos Modificados:
 ```
-pingo/backend/admin/
+viax/backend/admin/
   └── setup_admin_user.sql              ← Actualizado con nuevos nombres
 ```
 
@@ -94,16 +94,16 @@ CREATE TABLE usuarios_backup_20251023 AS SELECT * FROM usuarios;
 ### Paso 2: Subir Archivos al Servidor
 Sube estos archivos a tu servidor:
 ```
-/pingo/backend/migrations/003_fix_usuarios_columns.sql
-/pingo/backend/migrations/run_migration_003.sql
-/pingo/backend/admin/setup_admin_user.sql
+/viax/backend/migrations/003_fix_usuarios_columns.sql
+/viax/backend/migrations/run_migration_003.sql
+/viax/backend/admin/setup_admin_user.sql
 ```
 
 ### Paso 3: Ejecutar Migración
 
 **Opción A - MySQL Command Line** (en el servidor):
 ```bash
-cd /ruta/a/pingo/backend/migrations
+cd /ruta/a/viax/backend/migrations
 mysql -u usuario_db -p nombre_db < 003_fix_usuarios_columns.sql
 ```
 
@@ -179,7 +179,7 @@ DESCRIBE usuarios;
 Los siguientes archivos PHP ya están usando los nombres correctos (no necesitan modificación):
 
 ```
-pingo/backend/admin/
+viax/backend/admin/
   ├── dashboard_stats.php      ← Usa es_activo, fecha_registro
   ├── user_management.php      ← Usa es_activo, es_verificado, foto_perfil
   └── setup_admin_user.sql     ← ✅ YA CORREGIDO

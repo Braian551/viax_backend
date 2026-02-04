@@ -8,7 +8,7 @@ Este microservicio maneja todas las operaciones relacionadas con conductores: pe
 
 ### Base URL
 ```
-http://localhost/pingo/backend/conductor/
+http://localhost/viax/backend/conductor/
 ```
 
 ---
@@ -468,8 +468,8 @@ Todas las respuestas de error siguen este formato:
 ## 🚀 Migración a Microservicios
 
 ### Fase 1 (Actual)
-- Endpoints monolíticos en `/pingo/backend/conductor/`
-- Conectados a la base de datos `pingo` compartida
+- Endpoints monolíticos en `/viax/backend/conductor/`
+- Conectados a la base de datos `viax` compartida
 
 ### Fase 2 (Planeada)
 Estructura propuesta:
@@ -513,19 +513,19 @@ Estructura propuesta:
 
 **Obtener perfil:**
 ```bash
-curl "http://localhost/pingo/backend/conductor/get_profile.php?conductor_id=123"
+curl "http://localhost/viax/backend/conductor/get_profile.php?conductor_id=123"
 ```
 
 **Actualizar disponibilidad:**
 ```bash
-curl -X POST http://localhost/pingo/backend/conductor/update_availability.php \
+curl -X POST http://localhost/viax/backend/conductor/update_availability.php \
   -H "Content-Type: application/json" \
   -d '{"conductor_id": 123, "disponible": 1}'
 ```
 
 **Obtener ganancias del día:**
 ```bash
-curl "http://localhost/pingo/backend/conductor/get_ganancias.php?conductor_id=123&periodo=hoy"
+curl "http://localhost/viax/backend/conductor/get_ganancias.php?conductor_id=123&periodo=hoy"
 ```
 
 ---

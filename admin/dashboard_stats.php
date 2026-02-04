@@ -59,7 +59,7 @@ try {
         SUM(CASE WHEN tipo_usuario = 'conductor' THEN 1 ELSE 0 END) as total_conductores,
         SUM(CASE WHEN tipo_usuario = 'administrador' THEN 1 ELSE 0 END) as total_administradores,
         SUM(CASE WHEN es_activo = 1 THEN 1 ELSE 0 END) as usuarios_activos,
-        SUM(CASE WHEN DATE(fecha_registro) = CURDATE() THEN 1 ELSE 0 END) as registros_hoy
+        SUM(CASE WHEN DATE(fecha_registro) = CURRENT_DATE THEN 1 ELSE 0 END) as registros_hoy
     FROM usuarios";
     
     $stmtUsers = $db->query($queryUsers);
@@ -73,7 +73,7 @@ try {
         SUM(CASE WHEN estado = 'completado' THEN 1 ELSE 0 END) as completadas,
         SUM(CASE WHEN estado = 'cancelado' THEN 1 ELSE 0 END) as canceladas,
         SUM(CASE WHEN estado = 'en_proceso' THEN 1 ELSE 0 END) as en_proceso,
-        SUM(CASE WHEN DATE(fecha_creacion) = CURDATE() THEN 1 ELSE 0 END) as solicitudes_hoy
+        SUM(CASE WHEN DATE(fecha_creacion) = CURRENT_DATE THEN 1 ELSE 0 END) as solicitudes_hoy
     FROM solicitudes_servicio";
     
     $stmtSolicitudes = $db->query($querySolicitudes);
@@ -82,7 +82,7 @@ try {
     // Ingresos (de tabla transacciones si existe)
     $queryIngresos = "SELECT 
         COALESCE(SUM(CASE WHEN estado = 'completado' THEN monto_total ELSE 0 END), 0) as ingresos_totales,
-        COALESCE(SUM(CASE WHEN estado = 'completado' AND DATE(fecha_creacion) = CURDATE() THEN monto_total ELSE 0 END), 0) as ingresos_hoy
+        COALESCE(SUM(CASE WHEN estado = 'completado' AND DATE(fecha_creacion) = CURRENT_DATE THEN monto_total ELSE 0 END), 0) as ingresos_hoy
     FROM transacciones";
     
     try {

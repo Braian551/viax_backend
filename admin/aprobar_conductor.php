@@ -15,19 +15,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 require_once __DIR__ . '/../config/database.php';
 
-// Crear conexión mysqli
-$conn = new mysqli('localhost', 'root', 'root', 'viax');
-if ($conn->connect_error) {
-    http_response_code(500);
-    echo json_encode([
-        'success' => false,
-        'message' => 'Error de conexión a la base de datos: ' . $conn->connect_error
-    ], JSON_UNESCAPED_UNICODE);
-    exit;
-}
-$conn->set_charset("utf8");
-
 try {
+    // Crear conexión PDO
+    $database = new Database();
+    $conn = $database->getConnection();
+
     // Validar método
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
         throw new Exception('Método no permitido');
@@ -51,31 +43,27 @@ try {
 
     // Verificar que es admin
     $stmt = $conn->prepare("SELECT tipo_usuario FROM usuarios WHERE id = ? AND tipo_usuario = 'administrador'");
-    $stmt->bind_param("i", $admin_id);
-    $stmt->execute();
-    $result = $stmt->get_result();
+    $stmt->execute([$admin_id]);
 
-    if ($result->num_rows === 0) {
+    if ($stmt->rowCount() === 0) {
         http_response_code(403);
         echo json_encode([
             'success' => false,
             'message' => 'Acceso denegado. Solo administradores pueden aprobar conductores.'
-        ]);
+        ], JSON_UNESCAPED_UNICODE);
         exit;
     }
 
     // Verificar que el conductor existe
     $stmt = $conn->prepare("SELECT id FROM detalles_conductor WHERE usuario_id = ?");
-    $stmt->bind_param("i", $conductor_id);
-    $stmt->execute();
-    $result = $stmt->get_result();
+    $stmt->execute([$conductor_id]);
 
-    if ($result->num_rows === 0) {
+    if ($stmt->rowCount() === 0) {
         throw new Exception('Conductor no encontrado');
     }
 
     // Iniciar transacción
-    $conn->begin_transaction();
+    $conn->beginTransaction();
 
     try {
         // Actualizar estado del conductor
@@ -88,13 +76,11 @@ try {
                 actualizado_en = CURRENT_TIMESTAMP
             WHERE usuario_id = ?
         ");
-        $stmt->bind_param("i", $conductor_id);
-        $stmt->execute();
+        $stmt->execute([$conductor_id]);
 
         // Actualizar usuario como verificado
         $stmt = $conn->prepare("UPDATE usuarios SET es_verificado = 1 WHERE id = ?");
-        $stmt->bind_param("i", $conductor_id);
-        $stmt->execute();
+        $stmt->execute([$conductor_id]);
 
         // Registrar en logs de auditoría (opcional, no debe bloquear la operación)
         try {
@@ -105,11 +91,10 @@ try {
             }
             
             $stmt = $conn->prepare("
-                INSERT INTO logs_auditoria (usuario_id, accion, tabla_afectada, registro_id, descripcion, fecha_creacion)
+                INSERT INTO logs_auditoria (usuario_id, accion, entidad, entidad_id, descripcion, fecha_creacion)
                 VALUES (?, ?, 'detalles_conductor', ?, ?, CURRENT_TIMESTAMP)
             ");
-            $stmt->bind_param("isis", $admin_id, $accion, $conductor_id, $descripcion);
-            $stmt->execute();
+            $stmt->execute([$admin_id, $accion, $conductor_id, $descripcion]);
         } catch (Exception $log_error) {
             // No lanzar error si falla el log, solo registrar
             error_log("Error al registrar log de auditoría: " . $log_error->getMessage());
@@ -117,6 +102,33 @@ try {
 
         // Confirmar transacción
         $conn->commit();
+
+        // Enviar correo de aprobación
+        try {
+            $stmt = $conn->prepare("
+                SELECT u.email, u.nombre, u.apellido, dc.licencia_conduccion, v.placa
+                FROM usuarios u
+                JOIN detalles_conductor dc ON u.id = dc.usuario_id
+                LEFT JOIN vehiculos v ON dc.vehiculo_id = v.id
+                WHERE u.id = ?
+            ");
+            $stmt->execute([$conductor_id]);
+            $conductorData = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if ($conductorData) {
+                $nombreCompleto = trim($conductorData['nombre'] . ' ' . $conductorData['apellido']);
+                require_once __DIR__ . '/../utils/Mailer.php';
+                
+                $mailData = [
+                    'licencia' => $conductorData['licencia_conduccion'] ?? 'N/A',
+                    'placa' => $conductorData['placa'] ?? 'N/A'
+                ];
+                
+                Mailer::sendConductorApprovedEmail($conductorData['email'], $nombreCompleto, $mailData);
+            }
+        } catch (Exception $mailError) {
+            error_log("Error enviando email de aprobación a conductor $conductor_id: " . $mailError->getMessage());
+        }
 
         http_response_code(200);
         echo json_encode([
@@ -129,14 +141,14 @@ try {
         ], JSON_UNESCAPED_UNICODE);
 
     } catch (Exception $e) {
-        $conn->rollback();
+        $conn->rollBack();
         throw $e;
     }
 
-} catch (Exception $e) {
-    http_response_code(400);
+} catch (Throwable $e) {
+    http_response_code(500);
     echo json_encode([
         'success' => false,
-        'message' => $e->getMessage()
+        'message' => 'Error interno del servidor: ' . $e->getMessage()
     ], JSON_UNESCAPED_UNICODE);
 }

@@ -48,6 +48,7 @@ try {
     $stmt->bindParam(':conductor_id', $conductor_id, PDO::PARAM_INT);
     $stmt->execute();
 
+    // Actualizar detalles_conductor (existente)
     if ($stmt->rowCount() === 0) {
         // Si no existe, crear registro
         $query_insert = "INSERT INTO detalles_conductor 
@@ -59,6 +60,32 @@ try {
         $stmt_insert->bindParam(':latitud', $latitud);
         $stmt_insert->bindParam(':longitud', $longitud);
         $stmt_insert->execute();
+    }
+
+    // --- NUEVO: Actualizar datos del viaje activo si se proporcionan ---
+    $solicitud_id = isset($input['solicitud_id']) ? intval($input['solicitud_id']) : 0;
+    $distancia_recorrida = isset($input['distancia_recorrida']) ? floatval($input['distancia_recorrida']) : null;
+    $tiempo_transcurrido = isset($input['tiempo_transcurrido']) ? intval($input['tiempo_transcurrido']) : null;
+
+    if ($solicitud_id > 0 && ($distancia_recorrida !== null || $tiempo_transcurrido !== null)) {
+        $update_parts = [];
+        $params = [':solicitud_id' => $solicitud_id];
+
+        if ($distancia_recorrida !== null) {
+            $update_parts[] = "distancia_recorrida = :distancia";
+            $params[':distancia'] = $distancia_recorrida;
+        }
+
+        if ($tiempo_transcurrido !== null) {
+            $update_parts[] = "tiempo_transcurrido = :tiempo";
+            $params[':tiempo'] = $tiempo_transcurrido;
+        }
+
+        if (!empty($update_parts)) {
+            $sql_trip = "UPDATE solicitudes_servicio SET " . implode(', ', $update_parts) . " WHERE id = :solicitud_id";
+            $stmt_trip = $db->prepare($sql_trip);
+            $stmt_trip->execute($params);
+        }
     }
 
     echo json_encode([

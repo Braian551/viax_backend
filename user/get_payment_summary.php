@@ -34,7 +34,7 @@ try {
     }
     
     // Construir condiciones
-    $whereClause = "WHERE usuario_id = :usuario_id AND estado IN ('completada', 'entregado')";
+    $whereClause = "WHERE cliente_id = :usuario_id AND estado IN ('completada', 'entregado')";
     $params = [':usuario_id' => $usuario_id];
     
     if ($fecha_inicio) {
@@ -71,7 +71,7 @@ try {
             estado,
             COUNT(*) as cantidad
         FROM solicitudes_servicio
-        WHERE usuario_id = :usuario_id
+        WHERE cliente_id = :usuario_id
         GROUP BY estado
     ";
     

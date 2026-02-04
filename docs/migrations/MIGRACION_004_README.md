@@ -25,20 +25,20 @@ Agregar la columna `fecha_creacion` a ambas tablas y copiar los datos existentes
 
 ### Opción 1: Usar el script batch (Windows)
 ```cmd
-cd c:\Flutter\ping_go\pingo\backend\migrations
+cd c:\Flutter\ping_go\viax\backend\migrations
 ejecutar_migraciones.bat
 ```
 
 ### Opción 2: Ejecutar PHP directamente
 ```cmd
-cd c:\Flutter\ping_go\pingo\backend
+cd c:\Flutter\ping_go\viax\backend
 php migrations/run_migrations.php
 ```
 
 ### Opción 3: MySQL Workbench o línea de comandos
 Ejecuta el archivo `run_migration_004.sql` directamente:
 ```bash
-mysql -u root -p pingo < migrations/run_migration_004.sql
+mysql -u root -p viax < migrations/run_migration_004.sql
 ```
 
 O copia y pega el contenido en MySQL Workbench.

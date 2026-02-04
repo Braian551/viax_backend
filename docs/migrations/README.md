@@ -1,4 +1,4 @@
-# Migraciones de Base de Datos - PinGo
+# Migraciones de Base de Datos - viax
 
 Este directorio contiene las migraciones SQL para actualizar la base de datos del sistema.
 
@@ -12,12 +12,12 @@ Las migraciones deben ejecutarse en orden numérico:
 
 ### Opción 1: MySQL Command Line
 ```bash
-mysql -u root -p pingo < migrations/001_create_admin_tables.sql
+mysql -u root -p viax < migrations/001_create_admin_tables.sql
 ```
 
 ### Opción 2: phpMyAdmin
 1. Abre phpMyAdmin
-2. Selecciona la base de datos `pingo`
+2. Selecciona la base de datos `viax`
 3. Ve a la pestaña SQL
 4. Copia y pega el contenido del archivo de migración
 5. Ejecuta la consulta

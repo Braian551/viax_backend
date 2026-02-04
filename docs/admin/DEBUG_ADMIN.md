@@ -18,18 +18,18 @@ UPDATE usuarios SET tipo_usuario = 'administrador' WHERE id = 1;
 
 Abre en tu navegador (reemplaza el ID con el de tu admin):
 ```
-http://localhost/pingo/backend/admin/test_dashboard.php
+http://localhost/viax/backend/admin/test_dashboard.php
 ```
 
 O prueba directamente:
 ```
-http://localhost/pingo/backend/admin/dashboard_stats.php?admin_id=1
+http://localhost/viax/backend/admin/dashboard_stats.php?admin_id=1
 ```
 
 ### 3. Verificar logs de PHP
 
 Los logs se guardan en:
-- `pingo/backend/logs/error.log` (si existe)
+- `viax/backend/logs/error.log` (si existe)
 - Logs de Apache/PHP según tu configuración de servidor
 
 ### 4. Verificar en Flutter
@@ -45,10 +45,10 @@ AdminService: Response Body: ...
 ### 5. Verificar conectividad
 
 Desde el emulador Android, verifica que puedas acceder:
-- `http://10.0.2.2/pingo/backend/admin/dashboard_stats.php?admin_id=1`
+- `http://10.0.2.2/viax/backend/admin/dashboard_stats.php?admin_id=1`
 
 Si usas dispositivo físico, usa la IP de tu PC:
-- `http://192.168.X.X/pingo/backend/admin/dashboard_stats.php?admin_id=1`
+- `http://192.168.X.X/viax/backend/admin/dashboard_stats.php?admin_id=1`
 
 ## 🛠️ Soluciones comunes
 
@@ -62,8 +62,8 @@ UPDATE usuarios SET tipo_usuario = 'administrador' WHERE id = 1;
 **Causa 2:** Problemas de conexión
 - Verifica que Apache/XAMPP esté corriendo
 - Verifica la URL en `admin_service.dart` (línea 5)
-- Para emulador usa: `http://10.0.2.2/pingo/backend/admin`
-- Para dispositivo físico usa: `http://TU_IP_LOCAL/pingo/backend/admin`
+- Para emulador usa: `http://10.0.2.2/viax/backend/admin`
+- Para dispositivo físico usa: `http://TU_IP_LOCAL/viax/backend/admin`
 
 **Causa 3:** Error en la base de datos
 - Verifica que todas las tablas existan
@@ -96,7 +96,7 @@ VALUES
 ## ✅ Checklist de verificación
 
 - [ ] Apache/XAMPP corriendo
-- [ ] Base de datos `pingo` existe y está conectada
+- [ ] Base de datos `viax` existe y está conectada
 - [ ] Usuario administrador existe (tipo_usuario = 'administrador')
 - [ ] URL correcta en `admin_service.dart`
 - [ ] test_dashboard.php muestra JSON válido

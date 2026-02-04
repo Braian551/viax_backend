@@ -9,7 +9,7 @@
 3. Pega y ejecuta esto:
 
 ```sql
-USE pingo;
+USE viax;
 
 -- Backup rápido
 CREATE TABLE usuarios_backup_20251023 AS SELECT * FROM usuarios;
@@ -30,8 +30,8 @@ SELECT 'ÉXITO - Migración completada' AS resultado;
 ### En PowerShell (Windows):
 
 ```powershell
-cd c:\Flutter\ping_go\pingo\backend\migrations
-mysql -u root -p pingo < 003_fix_usuarios_columns.sql
+cd c:\Flutter\ping_go\viax\backend\migrations
+mysql -u root -p viax < 003_fix_usuarios_columns.sql
 ```
 
 ---
@@ -44,7 +44,7 @@ DESCRIBE usuarios;
 
 -- Debe retornar 5 filas
 SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_SCHEMA = 'pingo' AND TABLE_NAME = 'usuarios'
+WHERE TABLE_SCHEMA = 'viax' AND TABLE_NAME = 'usuarios'
 AND COLUMN_NAME IN ('es_activo', 'es_verificado', 'foto_perfil', 'fecha_registro', 'fecha_actualizacion');
 ```
 
@@ -65,13 +65,13 @@ RENAME TABLE usuarios_backup_20251023 TO usuarios;
 Cuando vayas a subir al servidor, lleva estos archivos:
 
 ```
-📁 pingo/backend/migrations/
+📁 viax/backend/migrations/
   ├── 003_fix_usuarios_columns.sql       ← Script de migración
   ├── run_migration_003.sql              ← Script con backup automático
   ├── LEER_PRIMERO.md                    ← Guía detallada
   └── RESUMEN_CAMBIOS.md                 ← Documentación completa
 
-📁 pingo/backend/admin/
+📁 viax/backend/admin/
   └── setup_admin_user.sql               ← Script actualizado
 ```
 

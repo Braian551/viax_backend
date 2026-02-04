@@ -35,7 +35,7 @@ try {
     }
 
     // Verify conductor exists
-    $checkQuery = "SELECT id FROM usuarios WHERE id = :conductor_id AND tipo_usuario = 'conductor'";
+    $checkQuery = "SELECT id FROM usuarios WHERE id = :conductor_id";
     $checkStmt = $db->prepare($checkQuery);
     $checkStmt->bindParam(':conductor_id', $conductor_id, PDO::PARAM_INT);
     $checkStmt->execute();
@@ -52,10 +52,10 @@ try {
     $vehiculo_color = isset($input['vehiculo_color']) ? $input['vehiculo_color'] : null;
     $vehiculo_placa = isset($input['vehiculo_placa']) ? strtoupper($input['vehiculo_placa']) : '';
     
-    // Insurance data
-    $aseguradora = isset($input['aseguradora']) ? $input['aseguradora'] : null;
-    $numero_poliza_seguro = isset($input['numero_poliza_seguro']) ? $input['numero_poliza_seguro'] : null;
-    $vencimiento_seguro = isset($input['vencimiento_seguro']) ? date('Y-m-d', strtotime($input['vencimiento_seguro'])) : null;
+    // Insurance data - REMOVED as per requirement
+    // $aseguradora = isset($input['aseguradora']) ? $input['aseguradora'] : null;
+    // $numero_poliza_seguro = isset($input['numero_poliza_seguro']) ? $input['numero_poliza_seguro'] : null;
+    // $vencimiento_seguro = isset($input['vencimiento_seguro']) ? date('Y-m-d', strtotime($input['vencimiento_seguro'])) : null;
     
     // SOAT data
     $soat_numero = isset($input['soat_numero']) ? $input['soat_numero'] : null;
@@ -89,9 +89,6 @@ try {
                         vehiculo_anio = :vehiculo_anio,
                         vehiculo_color = :vehiculo_color,
                         vehiculo_placa = :vehiculo_placa,
-                        aseguradora = :aseguradora,
-                        numero_poliza_seguro = :numero_poliza_seguro,
-                        vencimiento_seguro = :vencimiento_seguro,
                         soat_numero = :soat_numero,
                         soat_vencimiento = :soat_vencimiento,
                         tecnomecanica_numero = :tecnomecanica_numero,
@@ -107,9 +104,6 @@ try {
         $updateStmt->bindParam(':vehiculo_anio', $vehiculo_anio, PDO::PARAM_INT);
         $updateStmt->bindParam(':vehiculo_color', $vehiculo_color);
         $updateStmt->bindParam(':vehiculo_placa', $vehiculo_placa);
-        $updateStmt->bindParam(':aseguradora', $aseguradora);
-        $updateStmt->bindParam(':numero_poliza_seguro', $numero_poliza_seguro);
-        $updateStmt->bindParam(':vencimiento_seguro', $vencimiento_seguro);
         $updateStmt->bindParam(':soat_numero', $soat_numero);
         $updateStmt->bindParam(':soat_vencimiento', $soat_vencimiento);
         $updateStmt->bindParam(':tecnomecanica_numero', $tecnomecanica_numero);
@@ -129,9 +123,6 @@ try {
             vehiculo_anio,
             vehiculo_color,
             vehiculo_placa,
-            aseguradora,
-            numero_poliza_seguro,
-            vencimiento_seguro,
             soat_numero,
             soat_vencimiento,
             tecnomecanica_numero,
@@ -141,7 +132,7 @@ try {
             actualizado_en
         ) VALUES (
             :usuario_id,
-            'TEMP',
+            'PENDIENTE',
             DATE_ADD(NOW(), INTERVAL 1 YEAR),
             :vehiculo_tipo,
             :vehiculo_marca,
@@ -149,9 +140,6 @@ try {
             :vehiculo_anio,
             :vehiculo_color,
             :vehiculo_placa,
-            :aseguradora,
-            :numero_poliza_seguro,
-            :vencimiento_seguro,
             :soat_numero,
             :soat_vencimiento,
             :tecnomecanica_numero,
@@ -169,15 +157,59 @@ try {
         $insertStmt->bindParam(':vehiculo_anio', $vehiculo_anio, PDO::PARAM_INT);
         $insertStmt->bindParam(':vehiculo_color', $vehiculo_color);
         $insertStmt->bindParam(':vehiculo_placa', $vehiculo_placa);
-        $insertStmt->bindParam(':aseguradora', $aseguradora);
-        $insertStmt->bindParam(':numero_poliza_seguro', $numero_poliza_seguro);
-        $insertStmt->bindParam(':vencimiento_seguro', $vencimiento_seguro);
+        // $insertStmt->bindParam(':aseguradora', $aseguradora);
+        // $insertStmt->bindParam(':numero_poliza_seguro', $numero_poliza_seguro);
+        // $insertStmt->bindParam(':vencimiento_seguro', $vencimiento_seguro);
         $insertStmt->bindParam(':soat_numero', $soat_numero);
         $insertStmt->bindParam(':soat_vencimiento', $soat_vencimiento);
         $insertStmt->bindParam(':tecnomecanica_numero', $tecnomecanica_numero);
         $insertStmt->bindParam(':tecnomecanica_vencimiento', $tecnomecanica_vencimiento);
         $insertStmt->bindParam(':tarjeta_propiedad_numero', $tarjeta_propiedad_numero);
         $insertStmt->execute();
+    }
+
+    // Update empresa_id in usuarios table - OBLIGATORIO para conductores
+    if (array_key_exists('empresa_id', $input)) {
+        $empresa_id = $input['empresa_id'];
+        
+        // Validar que empresa_id no sea null - conductores DEBEN tener empresa
+        if ($empresa_id === null || $empresa_id === '' || $empresa_id <= 0) {
+            throw new Exception('Debes seleccionar una empresa de transporte. Los conductores independientes ya no están permitidos.');
+        }
+        
+        // Verificar que la empresa existe y está activa
+        $checkEmpresaQuery = "SELECT id, estado FROM empresas_transporte WHERE id = :empresa_id";
+        $checkEmpresaStmt = $db->prepare($checkEmpresaQuery);
+        $checkEmpresaStmt->bindParam(':empresa_id', $empresa_id, PDO::PARAM_INT);
+        $checkEmpresaStmt->execute();
+        $empresa = $checkEmpresaStmt->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$empresa) {
+            throw new Exception('La empresa seleccionada no existe');
+        }
+        
+        if ($empresa['estado'] !== 'activo') {
+            throw new Exception('La empresa seleccionada no está activa');
+        }
+        
+        // Crear solicitud de vinculación
+        $solicitudQuery = "INSERT INTO solicitudes_vinculacion_conductor (conductor_id, empresa_id, estado, mensaje_conductor, creado_en)
+                          VALUES (:conductor_id, :empresa_id, 'pendiente', 'Solicitud desde registro de conductor', NOW())
+                          ON CONFLICT (conductor_id, empresa_id, estado) DO NOTHING";
+        $solicitudStmt = $db->prepare($solicitudQuery);
+        $solicitudStmt->bindParam(':conductor_id', $conductor_id, PDO::PARAM_INT);
+        $solicitudStmt->bindParam(':empresa_id', $empresa_id, PDO::PARAM_INT);
+        $solicitudStmt->execute();
+        
+        // Actualizar usuario con empresa_id y estado pendiente de aprobación
+        $updateEmpresaQuery = "UPDATE usuarios SET empresa_id = :empresa_id, estado_vinculacion = 'pendiente_aprobacion' WHERE id = :id";
+        $updateEmpresaStmt = $db->prepare($updateEmpresaQuery);
+        $updateEmpresaStmt->bindParam(':empresa_id', $empresa_id, PDO::PARAM_INT);
+        $updateEmpresaStmt->bindParam(':id', $conductor_id, PDO::PARAM_INT);
+        $updateEmpresaStmt->execute();
+    } else {
+        // Si no envía empresa_id, es un error
+        throw new Exception('Debes seleccionar una empresa de transporte');
     }
 
     $db->commit();

@@ -14,11 +14,11 @@ try {
     }
 
     if ($userId) {
-        $q = "SELECT id, uuid, nombre, apellido, email, telefono, tipo_usuario, fecha_registro as creado_en FROM usuarios WHERE id = ? LIMIT 1";
+        $q = "SELECT id, uuid, nombre, apellido, email, telefono, tipo_usuario, empresa_id, foto_perfil, calificacion_promedio, fecha_registro as creado_en FROM usuarios WHERE id = ? LIMIT 1";
         $stmt = $db->prepare($q);
         $stmt->execute([$userId]);
     } else {
-        $q = "SELECT id, uuid, nombre, apellido, email, telefono, tipo_usuario, fecha_registro as creado_en FROM usuarios WHERE email = ? LIMIT 1";
+        $q = "SELECT id, uuid, nombre, apellido, email, telefono, tipo_usuario, empresa_id, foto_perfil, calificacion_promedio, fecha_registro as creado_en FROM usuarios WHERE email = ? LIMIT 1";
         $stmt = $db->prepare($q);
         $stmt->execute([$email]);
     }

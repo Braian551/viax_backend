@@ -40,17 +40,17 @@ Los emojis han sido reemplazados por iconos nativos de Material Design:
 1. **`cleanup_vehicle_types.php`**
    - Elimina configuraciones de carro, moto_carga y carro_carga
    - Actualiza el ENUM de tipo_vehiculo
-   - Ubicación: `pingo/backend/migrations/`
+   - Ubicación: `viax/backend/migrations/`
 
 2. **`consolidate_moto_config.php`**
    - Consolida configuraciones duplicadas de moto
    - Mantiene solo la más reciente
-   - Ubicación: `pingo/backend/migrations/`
+   - Ubicación: `viax/backend/migrations/`
 
 3. **`verify_configs.php`**
    - Verifica las configuraciones actuales
    - Muestra resumen de precios activos
-   - Ubicación: `pingo/backend/migrations/`
+   - Ubicación: `viax/backend/migrations/`
 
 ## Estado Actual de la Base de Datos
 
@@ -67,7 +67,7 @@ Tarifa Mínima: $6000.00
 
 ```bash
 # 1. Eliminar tipos no utilizados
-cd pingo/backend/migrations
+cd viax/backend/migrations
 php cleanup_vehicle_types.php
 
 # 2. Consolidar duplicados de moto
@@ -81,7 +81,7 @@ php verify_configs.php
 
 Para nuevas instalaciones, usar el archivo actualizado:
 ```
-pingo/backend/migrations/007_create_configuracion_precios_moto_only.sql
+viax/backend/migrations/007_create_configuracion_precios_moto_only.sql
 ```
 
 Este archivo:
@@ -107,10 +107,10 @@ Para verificar que todo funciona correctamente:
 ## Archivos Modificados
 
 ### Backend
-- `pingo/backend/migrations/cleanup_vehicle_types.php` (nuevo)
-- `pingo/backend/migrations/consolidate_moto_config.php` (nuevo)
-- `pingo/backend/migrations/verify_configs.php` (nuevo)
-- `pingo/backend/migrations/007_create_configuracion_precios_moto_only.sql` (nuevo)
+- `viax/backend/migrations/cleanup_vehicle_types.php` (nuevo)
+- `viax/backend/migrations/consolidate_moto_config.php` (nuevo)
+- `viax/backend/migrations/verify_configs.php` (nuevo)
+- `viax/backend/migrations/007_create_configuracion_precios_moto_only.sql` (nuevo)
 
 ### Frontend
 - `lib/src/features/admin/presentation/screens/pricing_management_screen.dart` (modificado)

@@ -4,7 +4,7 @@ header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Accept');
 
-require_once '../config/database.php';
+require_once __DIR__ . '/../config/database.php';
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
@@ -58,16 +58,21 @@ try {
                 dc.tecnomecanica_foto_url,
                 dc.tarjeta_propiedad_numero,
                 dc.tarjeta_propiedad_foto_url,
+                dc.foto_vehiculo,
                 dc.calificacion_promedio,
                 dc.total_viajes,
                 dc.disponible,
                 dc.estado_verificacion,
                 dc.fecha_ultima_verificacion,
                 dc.aprobado,
-                dc.estado_aprobacion
+                dc.estado_aprobacion,
+                dc.razon_rechazo,
+                et.id as empresa_id,
+                et.nombre as empresa_nombre
               FROM usuarios u
-              LEFT JOIN detalles_conductor dc ON u.id = dc.usuario_id
-              WHERE u.id = :conductor_id AND u.tipo_usuario = 'conductor'";
+              INNER JOIN detalles_conductor dc ON u.id = dc.usuario_id
+              LEFT JOIN empresas_transporte et ON u.empresa_id = et.id
+              WHERE u.id = :conductor_id";
     
     $stmt = $db->prepare($query);
     $stmt->bindParam(':conductor_id', $conductor_id, PDO::PARAM_INT);
@@ -76,7 +81,12 @@ try {
     $conductor = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$conductor) {
-        throw new Exception('Conductor no encontrado');
+        // No driver registration found for this user
+        echo json_encode([
+            'success' => false,
+            'message' => 'No se encontró registro de conductor para este usuario'
+        ]);
+        exit();
     }
 
     // Build profile response
@@ -93,6 +103,9 @@ try {
         'fecha_ultima_verificacion' => $conductor['fecha_ultima_verificacion'],
         'aprobado' => (int)($conductor['aprobado'] ?? 0),
         'estado_aprobacion' => $conductor['estado_aprobacion'] ?? 'pendiente',
+        'razon_rechazo' => $conductor['razon_rechazo'],
+        'empresa_id' => $conductor['empresa_id'],
+        'empresa_nombre' => $conductor['empresa_nombre'],
         
         // License information
         'licencia' => null,
@@ -142,7 +155,7 @@ try {
             'tecnomecanica_foto_url' => $conductor['tecnomecanica_foto_url'],
             'tarjeta_propiedad_numero' => $conductor['tarjeta_propiedad_numero'],
             'tarjeta_propiedad_foto_url' => $conductor['tarjeta_propiedad_foto_url'],
-            'foto_vehiculo' => null // Not yet implemented
+            'foto_vehiculo' => $conductor['foto_vehiculo']
         ];
     }
 

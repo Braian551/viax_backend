@@ -225,7 +225,7 @@ try {
         
         // Registrar en logs de auditoría
         $logQuery = "INSERT INTO logs_auditoria 
-                    (usuario_id, accion, tabla_afectada, registro_id, descripcion, fecha_hora)
+                    (usuario_id, accion, entidad, entidad_id, descripcion, fecha_creacion)
                     VALUES (NULL, 'update', 'configuracion_precios', :id, :descripcion, NOW())";
         
         try {

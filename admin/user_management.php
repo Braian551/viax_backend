@@ -101,7 +101,7 @@ function handleGetUsers($db, $input) {
         $params = [];
 
         if ($search) {
-            $whereConditions[] = "(nombre LIKE ? OR apellido LIKE ? OR email LIKE ? OR telefono LIKE ?)";
+            $whereConditions[] = "(u.nombre LIKE ? OR u.apellido LIKE ? OR u.email LIKE ? OR u.telefono LIKE ?)";
             $params[] = $search;
             $params[] = $search;
             $params[] = $search;
@@ -109,19 +109,19 @@ function handleGetUsers($db, $input) {
         }
 
         if ($tipoUsuario) {
-            $whereConditions[] = "tipo_usuario = ?";
+            $whereConditions[] = "u.tipo_usuario = ?";
             $params[] = $tipoUsuario;
         }
 
         if ($esActivo !== null) {
-            $whereConditions[] = "es_activo = ?";
+            $whereConditions[] = "u.es_activo = ?";
             $params[] = $esActivo;
         }
 
         $whereClause = empty($whereConditions) ? '' : 'WHERE ' . implode(' AND ', $whereConditions);
 
         // Contar total
-        $countQuery = "SELECT COUNT(*) as total FROM usuarios $whereClause";
+        $countQuery = "SELECT COUNT(*) as total FROM usuarios u $whereClause";
         error_log("handleGetUsers - Query count: $countQuery");
         error_log("handleGetUsers - Params count: " . json_encode($params));
         
@@ -132,13 +132,16 @@ function handleGetUsers($db, $input) {
         error_log("handleGetUsers - Total usuarios: $total");
 
         // Obtener usuarios
+        // Update query to include company info
         $query = "SELECT 
-            id, uuid, nombre, apellido, email, telefono, 
-            tipo_usuario, foto_perfil, es_verificado, es_activo, 
-            fecha_registro, fecha_actualizacion
-        FROM usuarios 
+            u.id, u.uuid, u.nombre, u.apellido, u.email, u.telefono, 
+            u.tipo_usuario, u.foto_perfil, u.es_verificado, u.es_activo, 
+            u.fecha_registro, u.fecha_actualizacion,
+            u.empresa_id, e.nombre as empresa_nombre
+        FROM usuarios u
+        LEFT JOIN empresas_transporte e ON u.empresa_id = e.id
         $whereClause
-        ORDER BY fecha_registro DESC
+        ORDER BY u.fecha_registro DESC
         LIMIT $perPage OFFSET $offset";
         
         error_log("handleGetUsers - Query: $query");
@@ -149,6 +152,9 @@ function handleGetUsers($db, $input) {
         $usuarios = $stmt->fetchAll(PDO::FETCH_ASSOC);
         
         error_log("handleGetUsers - Usuarios obtenidos: " . count($usuarios));
+        if (!empty($usuarios)) {
+            error_log("handleGetUsers - Keys primer usuario: " . json_encode(array_keys($usuarios[0])));
+        }
 
         sendJsonResponse(true, 'Usuarios obtenidos exitosamente', [
             'usuarios' => $usuarios,
@@ -181,13 +187,13 @@ function handleUpdateUser($db, $input) {
         $params = [];
 
         // Campos actualizables
-        $allowedFields = ['nombre', 'apellido', 'telefono', 'tipo_usuario', 'es_activo', 'es_verificado'];
+        $allowedFields = ['nombre', 'apellido', 'telefono', 'tipo_usuario', 'es_activo', 'es_verificado', 'empresa_id'];
         
         foreach ($allowedFields as $field) {
-            if (isset($input[$field])) {
+            if (array_key_exists($field, $input)) {
                 $updates[] = "$field = ?";
                 $params[] = $input[$field];
-                error_log("handleUpdateUser - Campo a actualizar: $field = " . $input[$field]);
+                error_log("handleUpdateUser - Campo a actualizar: $field = " . json_encode($input[$field]));
             }
         }
 

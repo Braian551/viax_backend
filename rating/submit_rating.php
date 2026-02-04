@@ -67,38 +67,85 @@ try {
         throw new Exception('Solicitud no encontrada');
     }
     
-    // Verificar que no exista ya una calificación del mismo tipo para esta solicitud
+    // Verificar si ya existe una calificación del usuario para esta solicitud
+    // Esto previene duplicados: un usuario solo puede tener UNA calificación por viaje
     $stmt = $db->prepare("
-        SELECT id FROM calificaciones
+        SELECT id, calificacion as calificacion_anterior, comentarios as comentario_anterior
+        FROM calificaciones
         WHERE solicitud_id = ? AND usuario_calificador_id = ?
     ");
     $stmt->execute([$solicitudId, $calificadorId]);
+    $existingRating = $stmt->fetch(PDO::FETCH_ASSOC);
     
-    if ($stmt->fetch()) {
-        throw new Exception('Ya has calificado este viaje');
+    if ($existingRating) {
+        // UPDATE: Actualizar la calificación existente (reemplaza la anterior)
+        $stmt = $db->prepare("
+            UPDATE calificaciones SET
+                calificacion = ?,
+                comentarios = ?,
+                creado_en = NOW()
+            WHERE id = ?
+        ");
+        $stmt->execute([$calificacion, $comentario, $existingRating['id']]);
+        $calificacionId = $existingRating['id'];
+        $wasUpdated = true;
+        $previousRating = intval($existingRating['calificacion_anterior']);
+    } else {
+        // INSERT: Nueva calificación
+        // Usamos INSERT ... ON CONFLICT como respaldo en caso de condición de carrera
+        try {
+            $stmt = $db->prepare("
+                INSERT INTO calificaciones (
+                    solicitud_id,
+                    usuario_calificador_id,
+                    usuario_calificado_id,
+                    calificacion,
+                    comentarios,
+                    creado_en
+                ) VALUES (?, ?, ?, ?, ?, NOW())
+                ON CONFLICT (solicitud_id, usuario_calificador_id) 
+                DO UPDATE SET
+                    calificacion = EXCLUDED.calificacion,
+                    comentarios = EXCLUDED.comentarios,
+                    creado_en = NOW()
+                RETURNING id
+            ");
+            
+            $stmt->execute([
+                $solicitudId,
+                $calificadorId,
+                $calificadoId,
+                $calificacion,
+                $comentario
+            ]);
+            
+            $result = $stmt->fetch(PDO::FETCH_ASSOC);
+            $calificacionId = $result['id'];
+        } catch (PDOException $e) {
+            // Si ON CONFLICT no funciona (constraint no existe), usar INSERT simple
+            $stmt = $db->prepare("
+                INSERT INTO calificaciones (
+                    solicitud_id,
+                    usuario_calificador_id,
+                    usuario_calificado_id,
+                    calificacion,
+                    comentarios,
+                    creado_en
+                ) VALUES (?, ?, ?, ?, ?, NOW())
+            ");
+            
+            $stmt->execute([
+                $solicitudId,
+                $calificadorId,
+                $calificadoId,
+                $calificacion,
+                $comentario
+            ]);
+            $calificacionId = $db->lastInsertId();
+        }
+        $wasUpdated = false;
+        $previousRating = null;
     }
-    
-    // Insertar calificación
-    $stmt = $db->prepare("
-        INSERT INTO calificaciones (
-            solicitud_id,
-            usuario_calificador_id,
-            usuario_calificado_id,
-            calificacion,
-            comentarios,
-            creado_en
-        ) VALUES (?, ?, ?, ?, ?, NOW())
-    ");
-    
-    $stmt->execute([
-        $solicitudId,
-        $calificadorId,
-        $calificadoId,
-        $calificacion,
-        $comentario
-    ]);
-    
-    $calificacionId = $db->lastInsertId();
     
     // Actualizar promedio de calificaciones del usuario calificado
     if ($tipoCalificador === 'cliente') {
@@ -118,6 +165,46 @@ try {
             WHERE usuario_id = ?
         ");
         $stmt->execute([$calificadoId, $calificadoId, $calificadoId]);
+        
+        // Actualizar promedio de calificaciones de la EMPRESA del conductor
+        $stmtEmpresa = $db->prepare("SELECT empresa_id FROM usuarios WHERE id = ?");
+        $stmtEmpresa->execute([$calificadoId]);
+        $empresaId = $stmtEmpresa->fetchColumn();
+        
+        if ($empresaId) {
+            // Calcular promedio de todos los conductores de la empresa
+            $stmtPromedioEmpresa = $db->prepare("
+                SELECT 
+                    AVG(c.calificacion) as promedio,
+                    COUNT(c.id) as total
+                FROM calificaciones c
+                JOIN usuarios u ON c.usuario_calificado_id = u.id
+                WHERE u.empresa_id = ?
+                AND u.tipo_usuario = 'conductor'
+            ");
+            $stmtPromedioEmpresa->execute([$empresaId]);
+            $statsEmpresa = $stmtPromedioEmpresa->fetch(PDO::FETCH_ASSOC);
+            
+            $promedioEmpresa = $statsEmpresa['promedio'] ?? 0;
+            $totalCalificacionesEmpresa = $statsEmpresa['total'] ?? 0;
+            
+            // Actualizar empresas_metricas
+            $stmt = $db->prepare("
+                INSERT INTO empresas_metricas (empresa_id, calificacion_promedio, total_calificaciones, ultima_actualizacion)
+                VALUES (?, ?, ?, NOW())
+                ON CONFLICT (empresa_id) DO UPDATE SET
+                    calificacion_promedio = ?,
+                    total_calificaciones = ?,
+                    ultima_actualizacion = NOW()
+            ");
+            $stmt->execute([
+                $empresaId, 
+                $promedioEmpresa, 
+                $totalCalificacionesEmpresa,
+                $promedioEmpresa, 
+                $totalCalificacionesEmpresa
+            ]);
+        }
     }
     // Nota: No actualizamos promedio de cliente ya que la tabla usuarios no tiene esa columna
     
@@ -136,9 +223,12 @@ try {
     
     echo json_encode([
         'success' => true,
-        'message' => 'Calificación enviada correctamente',
+        'message' => $wasUpdated ? 'Calificación actualizada correctamente' : 'Calificación enviada correctamente',
         'calificacion_id' => $calificacionId,
-        'nuevo_promedio' => round(floatval($nuevoPromedio), 1)
+        'nuevo_promedio' => round(floatval($nuevoPromedio), 1),
+        'updated' => $wasUpdated,
+        'previous_rating' => $previousRating,
+        'current_rating' => $calificacion
     ]);
     
 } catch (Exception $e) {

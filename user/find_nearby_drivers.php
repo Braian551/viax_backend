@@ -1,4 +1,14 @@
 <?php
+/**
+ * Endpoint: Buscar Conductores Cercanos Disponibles
+ * 
+ * Filtra conductores por:
+ * - Tipo de vehículo solicitado
+ * - Empresa seleccionada (si se proporciona)
+ * - Distancia al punto de recogida
+ * - Estado activo y disponible
+ */
+
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
@@ -22,6 +32,7 @@ try {
     $latitud = $data['latitud'];
     $longitud = $data['longitud'];
     $tipoVehiculo = $data['tipo_vehiculo'];
+    $empresaId = isset($data['empresa_id']) ? intval($data['empresa_id']) : null;
     $radioKm = $data['radio_km'] ?? 5.0;
     
     $database = new Database();
@@ -35,15 +46,15 @@ try {
     ];
     $vehiculoTipoBD = $vehiculoTipoMap[$tipoVehiculo] ?? 'moto';
     
-    // Buscar conductores cercanos disponibles usando la fórmula de Haversine
-    // Nota: Compatible con PostgreSQL - usa WHERE en lugar de HAVING
-    $stmt = $db->prepare("
+    // Construir query base para buscar conductores cercanos
+    $query = "
         SELECT 
             u.id,
             u.nombre,
             u.apellido,
             u.telefono,
             u.foto_perfil,
+            u.empresa_id,
             dc.vehiculo_tipo,
             dc.vehiculo_marca,
             dc.vehiculo_modelo,
@@ -71,12 +82,10 @@ try {
             cos(radians(?)) * cos(radians(dc.latitud_actual)) *
             cos(radians(dc.longitud_actual) - radians(?)) +
             sin(radians(?)) * sin(radians(dc.latitud_actual))
-        )) <= ?
-        ORDER BY distancia_km ASC
-        LIMIT 20
-    ");
+        )) <= ?";
     
-    $stmt->execute([
+    // Agregar filtro de empresa si se proporciona
+    $params = [
         $latitud,
         $longitud,
         $latitud,
@@ -85,14 +94,46 @@ try {
         $longitud,
         $latitud,
         $radioKm
-    ]);
+    ];
+    
+    if ($empresaId !== null) {
+        $query .= " AND u.empresa_id = ?";
+        $params[] = $empresaId;
+    }
+    
+    $query .= " ORDER BY distancia_km ASC LIMIT 20";
+    
+    $stmt = $db->prepare($query);
+    $stmt->execute($params);
     
     $conductores = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
+    // Formatear respuesta
+    $conductoresFormateados = array_map(function($c) {
+        return [
+            'id' => (int)$c['id'],
+            'nombre' => $c['nombre'],
+            'apellido' => $c['apellido'],
+            'telefono' => $c['telefono'],
+            'foto_perfil' => $c['foto_perfil'],
+            'empresa_id' => isset($c['empresa_id']) ? (int)$c['empresa_id'] : null,
+            'vehiculo_tipo' => $c['vehiculo_tipo'],
+            'vehiculo_marca' => $c['vehiculo_marca'],
+            'vehiculo_modelo' => $c['vehiculo_modelo'],
+            'vehiculo_placa' => $c['vehiculo_placa'],
+            'vehiculo_color' => $c['vehiculo_color'],
+            'calificacion_promedio' => $c['calificacion_promedio'] ? (float)$c['calificacion_promedio'] : null,
+            'total_viajes' => (int)($c['total_viajes'] ?? 0),
+            'latitud_actual' => (float)$c['latitud_actual'],
+            'longitud_actual' => (float)$c['longitud_actual'],
+            'distancia_km' => round((float)$c['distancia_km'], 2),
+        ];
+    }, $conductores);
+    
     echo json_encode([
         'success' => true,
-        'total' => count($conductores),
-        'conductores' => $conductores
+        'total' => count($conductoresFormateados),
+        'conductores' => $conductoresFormateados
     ]);
     
 } catch (Exception $e) {

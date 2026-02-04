@@ -45,7 +45,7 @@ try {
     
     // Verificar que sea un conductor válido y disponible
     $stmt = $db->prepare("
-        SELECT u.id, dc.disponible, dc.vehiculo_tipo
+        SELECT u.id, u.empresa_id, dc.disponible, dc.vehiculo_tipo
         FROM usuarios u
         INNER JOIN detalles_conductor dc ON u.id = dc.usuario_id
         WHERE u.id = ? 
@@ -95,6 +95,9 @@ try {
             s.longitud_destino,
             s.direccion_destino,
             s.tipo_servicio,
+            s.tipo_vehiculo,
+            s.empresa_id as solicitud_empresa_id,
+            s.precio_estimado,
             s.distancia_estimada,
             s.tiempo_estimado,
             s.estado,
@@ -135,6 +138,10 @@ try {
         LEFT JOIN conductores_favoritos cf ON cf.usuario_id = s.cliente_id AND cf.conductor_id = ? AND cf.es_favorito = true";
     }
     
+    // Filtrar por tipo de vehículo y empresa del conductor
+    $conductorVehiculoTipo = $conductor['vehiculo_tipo'];
+    $conductorEmpresaId = $conductor['empresa_id'];
+    
     $queryBase .= "
         WHERE s.estado = 'pendiente'
         AND s.tipo_servicio = 'transporte'
@@ -143,7 +150,9 @@ try {
             cos(radians(?)) * cos(radians(s.latitud_recogida)) *
             cos(radians(s.longitud_recogida) - radians(?)) +
             sin(radians(?)) * sin(radians(s.latitud_recogida))
-        )) <= ?";
+        )) <= ?
+        AND (s.tipo_vehiculo IS NULL OR s.tipo_vehiculo = ?)
+        AND (s.empresa_id IS NULL OR s.empresa_id = ?)";
     
     // Orden: Primero favoritos, luego por score de confianza, finalmente por distancia
     if ($includeConfianza) {
@@ -172,7 +181,9 @@ try {
             $latitudActual,
             $longitudActual,
             $latitudActual,
-            $radioKm
+            $radioKm,
+            $conductorVehiculoTipo,  // Filtro por tipo de vehículo
+            $conductorEmpresaId      // Filtro por empresa
         ]);
     } else {
         $stmt->execute([
@@ -182,7 +193,9 @@ try {
             $latitudActual,
             $longitudActual,
             $latitudActual,
-            $radioKm
+            $radioKm,
+            $conductorVehiculoTipo,  // Filtro por tipo de vehículo
+            $conductorEmpresaId      // Filtro por empresa
         ]);
     }
     
@@ -190,8 +203,10 @@ try {
     
     // Formatear las solicitudes
     $solicitudesFormateadas = array_map(function($solicitud) use ($includeConfianza) {
-        // Calcular precio estimado (provisional - deberia venir del sistema de precios)
-        $precioEstimado = 5000 + ($solicitud['distancia_estimada'] * 2000);
+        // Usar precio_estimado de la solicitud o calcular fallback
+        $precioEstimado = isset($solicitud['precio_estimado']) && $solicitud['precio_estimado'] > 0 
+            ? (float)$solicitud['precio_estimado']
+            : 5000 + ($solicitud['distancia_estimada'] * 2000);
         
         $resultado = [
             'id' => (int)$solicitud['id'],
@@ -207,12 +222,13 @@ try {
             'longitud_destino' => (float)$solicitud['longitud_destino'],
             'direccion_destino' => $solicitud['direccion_destino'],
             'tipo_servicio' => $solicitud['tipo_servicio'],
-            'tipo_vehiculo' => 'moto', // Por ahora fijo
+            'tipo_vehiculo' => $solicitud['tipo_vehiculo'] ?? 'moto',
+            'empresa_id' => isset($solicitud['solicitud_empresa_id']) ? (int)$solicitud['solicitud_empresa_id'] : null,
             'distancia_km' => (float)$solicitud['distancia_estimada'],
             'duracion_minutos' => (int)$solicitud['tiempo_estimado'],
-            'precio_estimado' => (float)$precioEstimado,
+            'precio_estimado' => $precioEstimado,
             'distancia_conductor_origen' => round((float)$solicitud['distancia_conductor_origen'], 2),
-            'fecha_solicitud' => $solicitud['fecha_solicitud'],
+            'fecha_solicitud' => to_iso8601($solicitud['fecha_solicitud']),
         ];
         
         // Agregar info de confianza si esta disponible

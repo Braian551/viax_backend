@@ -74,9 +74,8 @@ try {
             usuario_calificador_id, 
             usuario_calificado_id, 
             calificacion, 
-            comentario,
-            fecha_creacion
-        ) VALUES (?, ?, ?, ?, ?, NOW())
+            comentarios
+        ) VALUES (?, ?, ?, ?, ?)
     ");
     
     $stmt->execute([
@@ -98,6 +97,58 @@ try {
         WHERE usuario_id = ?
     ");
     $stmt->execute([$trip['conductor_id'], $trip['conductor_id']]);
+    
+    // NUEVO: Actualizar calificación promedio de la empresa del conductor
+    // Obtener empresa_id del conductor
+    $stmtEmpresa = $db->prepare("SELECT empresa_id FROM usuarios WHERE id = ?");
+    $stmtEmpresa->execute([$trip['conductor_id']]);
+    $conductorData = $stmtEmpresa->fetch(PDO::FETCH_ASSOC);
+    
+    if ($conductorData && $conductorData['empresa_id']) {
+        $empresaId = $conductorData['empresa_id'];
+        
+        // Calcular promedio de calificaciones de TODOS los conductores de la empresa
+        $stmtPromedio = $db->prepare("
+            SELECT AVG(c.calificacion) as promedio, COUNT(c.id) as total
+            FROM calificaciones c
+            INNER JOIN usuarios u ON c.usuario_calificado_id = u.id
+            WHERE u.empresa_id = ? AND u.tipo_usuario = 'conductor'
+        ");
+        $stmtPromedio->execute([$empresaId]);
+        $promedioData = $stmtPromedio->fetch(PDO::FETCH_ASSOC);
+        
+        if ($promedioData && $promedioData['promedio'] !== null) {
+            // Actualizar calificación en empresas_transporte
+            $stmtUpdateEmpresa = $db->prepare("
+                UPDATE empresas_transporte 
+                SET calificacion_promedio = ?
+                WHERE id = ?
+            ");
+            $stmtUpdateEmpresa->execute([
+                round($promedioData['promedio'], 2),
+                $empresaId
+            ]);
+            
+            // También actualizar en empresas_metricas si existe
+            $stmtCheckMetricas = $db->prepare("SELECT id FROM empresas_metricas WHERE empresa_id = ?");
+            $stmtCheckMetricas->execute([$empresaId]);
+            if ($stmtCheckMetricas->fetch()) {
+                $stmtUpdateMetricas = $db->prepare("
+                    UPDATE empresas_metricas 
+                    SET calificacion_promedio = ?,
+                        total_calificaciones = ?
+                    WHERE empresa_id = ?
+                ");
+                $stmtUpdateMetricas->execute([
+                    round($promedioData['promedio'], 2),
+                    intval($promedioData['total']),
+                    $empresaId
+                ]);
+            }
+            
+            error_log("Empresa $empresaId: Calificación actualizada a " . round($promedioData['promedio'], 2) . " (basado en " . intval($promedioData['total']) . " calificaciones)");
+        }
+    }
     
     // NUEVO: Actualizar historial de confianza si el servicio existe
     if ($useConfianza) {

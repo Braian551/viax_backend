@@ -20,6 +20,22 @@ try {
     $lastName = trim($input['lastName']);
     $phone = trim($input['phone']);
 
+    // Validar tipo de usuario (cliente o empresa)
+    $tipoUsuario = 'cliente';
+    
+    // Si se especifica un rol, validarlo
+    if (isset($input['role']) && !empty($input['role'])) {
+        $requestedRole = trim($input['role']);
+        if (in_array($requestedRole, ['empresa', 'cliente'])) {
+            $tipoUsuario = $requestedRole;
+        }
+    } else if (isset($input['tipo_usuario']) && !empty($input['tipo_usuario'])) {
+        $requestedRole = trim($input['tipo_usuario']);
+        if (in_array($requestedRole, ['empresa', 'cliente'])) {
+            $tipoUsuario = $requestedRole;
+        }
+    }
+
     if (!$email) {
         sendJsonResponse(false, 'Email inválido');
     }
@@ -55,12 +71,12 @@ try {
     // Insertar nuevo usuario
     $uuid = uniqid('user_', true);
     $query = "
-        INSERT INTO usuarios (uuid, nombre, apellido, email, telefono, hash_contrasena) 
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO usuarios (uuid, nombre, apellido, email, telefono, hash_contrasena, tipo_usuario) 
+        VALUES (?, ?, ?, ?, ?, ?, ?)
     ";
 
     $stmt = $db->prepare($query);
-    $stmt->execute([$uuid, $name, $lastName, $email, $phone, $password]);
+    $stmt->execute([$uuid, $name, $lastName, $email, $phone, $password, $tipoUsuario]);
     $userId = $db->lastInsertId();
 
     // Si el frontend envía device_uuid, registrar el dispositivo como confiable por primera vez
@@ -70,24 +86,23 @@ try {
             // Asegurar existencia de tabla user_devices
             $db->query("SELECT 1 FROM user_devices LIMIT 1");
         } catch (Exception $e) {
-            // Crear tabla mínima si no existe (idempotente)
+            // Crear tabla mínima si no existe (sintaxis PostgreSQL)
             $db->exec("CREATE TABLE IF NOT EXISTS user_devices (
-                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                user_id BIGINT UNSIGNED NOT NULL,
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
                 device_uuid VARCHAR(100) NOT NULL,
-                first_seen TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
-                last_seen TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
-                trusted TINYINT(1) NOT NULL DEFAULT 0,
+                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_seen TIMESTAMP DEFAULT NULL,
+                trusted SMALLINT NOT NULL DEFAULT 0,
                 fail_attempts INT NOT NULL DEFAULT 0,
-                locked_until TIMESTAMP NULL DEFAULT NULL,
-                PRIMARY KEY (id),
-                UNIQUE KEY idx_user_device_unique (user_id, device_uuid)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+                locked_until TIMESTAMP DEFAULT NULL,
+                UNIQUE (user_id, device_uuid)
+            )");
         }
         
         // IMPORTANTE: Este es el primer dispositivo, así que no hay otros que invalidar
-        // Insertar como dispositivo confiable
-        $ins = $db->prepare('INSERT IGNORE INTO user_devices (user_id, device_uuid, trusted) VALUES (?, ?, 1)');
+        // Insertar como dispositivo confiable (sintaxis PostgreSQL)
+        $ins = $db->prepare('INSERT INTO user_devices (user_id, device_uuid, trusted) VALUES (?, ?, 1) ON CONFLICT (user_id, device_uuid) DO NOTHING');
         $ins->execute([$userId, $deviceUuid]);
     }
 
@@ -128,6 +143,22 @@ try {
     $stmt = $db->prepare($query);
     $stmt->execute([$userId]);
     $location = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    // Enviar correo de bienvenida (solo si es cliente o si se desea para todos)
+    // Como la función es sendClientWelcomeEmail, la usamos aquí.
+    if (!empty($email) && !empty($name)) {
+        try {
+            require_once '../utils/Mailer.php';
+            // Ejecutar en "segundo plano" idealmente, pero aquí lo haremos directo
+            // Opcional: Verificar si Mailer existe para evitar error fatal si falta el archivo
+            if (class_exists('Mailer')) {
+                 Mailer::sendClientWelcomeEmail($email, $name);
+            }
+        } catch (Exception $e) {
+            // No interrumpir el registro si falla el correo
+            error_log("Error enviando email de bienvenida: " . $e->getMessage());
+        }
+    }
 
     sendJsonResponse(true, 'Usuario registrado correctamente', [
         'user' => $user,

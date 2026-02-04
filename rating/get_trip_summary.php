@@ -27,7 +27,7 @@ try {
     $database = new Database();
     $db = $database->getConnection();
     
-    // Obtener datos completos del viaje
+    // Obtener datos completos del viaje incluyendo datos reales de tracking
     $stmt = $db->prepare("
         SELECT 
             s.id,
@@ -36,6 +36,13 @@ try {
             s.direccion_destino,
             s.distancia_estimada,
             s.tiempo_estimado,
+            -- Datos reales del viaje
+            s.distancia_recorrida,
+            s.tiempo_transcurrido,
+            s.precio_estimado,
+            s.precio_final,
+            s.metodo_pago,
+            s.pago_confirmado,
             s.fecha_creacion,
             s.completado_en,
             s.cliente_id,
@@ -47,6 +54,7 @@ try {
             u_conductor.nombre as conductor_nombre,
             u_conductor.apellido as conductor_apellido,
             u_conductor.telefono as conductor_telefono,
+            u_conductor.foto_perfil as conductor_foto,
             dc.calificacion_promedio as conductor_calificacion,
             dc.vehiculo_marca,
             dc.vehiculo_modelo,
@@ -68,12 +76,26 @@ try {
     
     // Calcular duración real si hay timestamps
     $duracionReal = null;
-    if ($viaje['completado_en'] && $viaje['fecha_creacion']) {
+    if ($viaje['tiempo_transcurrido']) {
+        // Usar tiempo_transcurrido guardado
+        $duracionReal = intval($viaje['tiempo_transcurrido']);
+    } elseif ($viaje['completado_en'] && $viaje['fecha_creacion']) {
+        // Fallback: calcular desde timestamps
         $inicio = new DateTime($viaje['fecha_creacion']);
         $fin = new DateTime($viaje['completado_en']);
         $diff = $inicio->diff($fin);
         $duracionReal = $diff->i + ($diff->h * 60);
     }
+    
+    // Usar distancia real o estimada
+    $distanciaReal = $viaje['distancia_recorrida'] 
+        ? floatval($viaje['distancia_recorrida']) 
+        : floatval($viaje['distancia_estimada']);
+        
+    // Usar precio final guardado o precio estimado
+    $precioFinal = ($viaje['precio_final'] && $viaje['precio_final'] > 0)
+        ? floatval($viaje['precio_final'])
+        : floatval($viaje['precio_estimado']);
     
     // Verificar si ya calificaron
     $stmt = $db->prepare("
@@ -101,10 +123,6 @@ try {
     $stmt->execute([$viaje['cliente_id']]);
     $clienteCalificacion = $stmt->fetchColumn() ?? 5.0;
     
-    // Calcular precio estimado basado en distancia
-    $distancia = floatval($viaje['distancia_estimada']);
-    $precioEstimado = 4500 + ($distancia * 1200);
-    
     echo json_encode([
         'success' => true,
         'viaje' => [
@@ -112,11 +130,16 @@ try {
             'estado' => $viaje['estado'],
             'origen' => $viaje['direccion_recogida'],
             'destino' => $viaje['direccion_destino'],
-            'distancia_km' => floatval($viaje['distancia_estimada']),
+            // Datos reales
+            'distancia_km' => $distanciaReal,
             'duracion_minutos' => $duracionReal ?? intval($viaje['tiempo_estimado']),
-            'precio' => $precioEstimado,
-            'metodo_pago' => 'Efectivo',
-            'pago_confirmado' => false,
+            'precio' => $precioFinal,
+            // Datos estimados para referencia
+            'distancia_estimada' => floatval($viaje['distancia_estimada']),
+            'duracion_estimada' => intval($viaje['tiempo_estimado']),
+            'precio_estimado' => floatval($viaje['precio_estimado']),
+            'metodo_pago' => $viaje['metodo_pago'] ?? 'Efectivo',
+            'pago_confirmado' => (bool)$viaje['pago_confirmado'],
         ],
         'cliente' => [
             'id' => $viaje['cliente_id'],
@@ -130,7 +153,7 @@ try {
             'nombre' => trim($viaje['conductor_nombre'] . ' ' . ($viaje['conductor_apellido'] ?? '')),
             'telefono' => $viaje['conductor_telefono'] ?? null,
             'calificacion' => floatval($viaje['conductor_calificacion'] ?? 5.0),
-            'foto' => null,
+            'foto' => $viaje['conductor_foto'] ?? null,
             'vehiculo' => [
                 'marca' => $viaje['vehiculo_marca'],
                 'modelo' => $viaje['vehiculo_modelo'],

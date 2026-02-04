@@ -8,7 +8,7 @@
 - [ ] Confirmar credenciales de MySQL (usuario con privilegios ALTER)
 - [ ] Backup completo de la base de datos:
   ```bash
-  mysqldump -u root -p pingo > backup_completo_$(date +%Y%m%d_%H%M%S).sql
+  mysqldump -u root -p viax > backup_completo_$(date +%Y%m%d_%H%M%S).sql
   ```
 - [ ] Verificar espacio en disco suficiente (al menos 2x tamaño de tabla usuarios)
 - [ ] Tener acceso al panel de control del servidor (cPanel/SSH)
@@ -29,7 +29,7 @@
 - [ ] Conectar a la base de datos de producción
 - [ ] Crear backup de tabla usuarios:
   ```sql
-  USE pingo;
+  USE viax;
   CREATE TABLE usuarios_backup_20251023 AS SELECT * FROM usuarios;
   ```
 - [ ] Verificar que el backup tiene datos:
@@ -40,7 +40,7 @@
 
 ### Paso 2: Subir Archivos (2 min)
 - [ ] Conectar al servidor vía FTP/SFTP
-- [ ] Navegar a `/ruta/a/pingo/backend/migrations/`
+- [ ] Navegar a `/ruta/a/viax/backend/migrations/`
 - [ ] Subir archivo: `003_fix_usuarios_columns.sql`
 - [ ] Verificar que el archivo se subió correctamente
 
@@ -53,7 +53,7 @@
   ```
 - [ ] Ejecutar migración:
   ```bash
-  cd /ruta/a/pingo/backend/migrations
+  cd /ruta/a/viax/backend/migrations
   mysql -u usuario_db -p nombre_db < 003_fix_usuarios_columns.sql
   ```
 - [ ] Anotar hora de inicio: _______________
@@ -61,7 +61,7 @@
 
 **Opción B - phpMyAdmin:**
 - [ ] Abrir phpMyAdmin
-- [ ] Seleccionar base de datos `pingo`
+- [ ] Seleccionar base de datos `viax`
 - [ ] Ir a pestaña SQL
 - [ ] Copiar contenido de `003_fix_usuarios_columns.sql`
 - [ ] Pegar en el editor SQL
@@ -78,7 +78,7 @@
 ### Paso 4: Verificación Inmediata (2 min)
 - [ ] Ejecutar verificación de estructura:
   ```sql
-  USE pingo;
+  USE viax;
   DESCRIBE usuarios;
   ```
 - [ ] Confirmar columnas nuevas existen:
@@ -285,4 +285,4 @@
 
 **Fecha de este checklist**: 23 de Octubre, 2025  
 **Versión**: 1.0  
-**Proyecto**: PinGo Backend - Migración 003
+**Proyecto**: viax Backend - Migración 003

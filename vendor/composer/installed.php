@@ -1,9 +1,9 @@
 <?php return array(
     'root' => array(
-        'name' => 'pinggo/email-service',
-        'pretty_version' => 'dev-master',
-        'version' => 'dev-master',
-        'reference' => '5c0ec250b543e5356f9ee7c39f01e6c5aaa7ad6c',
+        'name' => 'viax/email-service',
+        'pretty_version' => 'dev-main',
+        'version' => 'dev-main',
+        'reference' => '61de2cb7f05cfecea1edcf28ca61fef2331e30de',
         'type' => 'library',
         'install_path' => __DIR__ . '/../../',
         'aliases' => array(),
@@ -19,10 +19,19 @@
             'aliases' => array(),
             'dev_requirement' => false,
         ),
-        'pinggo/email-service' => array(
-            'pretty_version' => 'dev-master',
-            'version' => 'dev-master',
-            'reference' => '5c0ec250b543e5356f9ee7c39f01e6c5aaa7ad6c',
+        'tecnickcom/tcpdf' => array(
+            'pretty_version' => '6.10.1',
+            'version' => '6.10.1.0',
+            'reference' => '7a2701251e5d52fc3d508fd71704683eb54f5939',
+            'type' => 'library',
+            'install_path' => __DIR__ . '/../tecnickcom/tcpdf',
+            'aliases' => array(),
+            'dev_requirement' => false,
+        ),
+        'viax/email-service' => array(
+            'pretty_version' => 'dev-main',
+            'version' => 'dev-main',
+            'reference' => '61de2cb7f05cfecea1edcf28ca61fef2331e30de',
             'type' => 'library',
             'install_path' => __DIR__ . '/../../',
             'aliases' => array(),

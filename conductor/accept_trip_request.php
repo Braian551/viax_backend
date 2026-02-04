@@ -29,7 +29,7 @@ try {
     try {
         // Verificar que la solicitud existe y está pendiente
         $stmt = $db->prepare("
-            SELECT id, estado, cliente_id, tipo_servicio 
+            SELECT id, estado, cliente_id, tipo_servicio, tipo_vehiculo, empresa_id
             FROM solicitudes_servicio 
             WHERE id = ? 
             FOR UPDATE
@@ -45,9 +45,9 @@ try {
             throw new Exception('La solicitud ya fue aceptada por otro conductor');
         }
         
-        // Verificar que el conductor esté disponible
+        // Verificar que el conductor esté disponible y obtener sus datos
         $stmt = $db->prepare("
-            SELECT u.id, dc.disponible, dc.vehiculo_tipo
+            SELECT u.id, u.empresa_id, dc.disponible, dc.vehiculo_tipo
             FROM usuarios u
             INNER JOIN detalles_conductor dc ON u.id = dc.usuario_id
             WHERE u.id = ? 
@@ -63,6 +63,16 @@ try {
         
         if (!$conductor['disponible']) {
             throw new Exception('Conductor no disponible');
+        }
+        
+        // Validar que el tipo de vehículo del conductor coincide con el solicitado
+        if ($solicitud['tipo_vehiculo'] !== null && $solicitud['tipo_vehiculo'] !== $conductor['vehiculo_tipo']) {
+            throw new Exception('El tipo de vehículo del conductor no coincide con el solicitado');
+        }
+        
+        // Validar que la empresa del conductor coincide con la solicitada
+        if ($solicitud['empresa_id'] !== null && $solicitud['empresa_id'] != $conductor['empresa_id']) {
+            throw new Exception('El conductor no pertenece a la empresa solicitada');
         }
         
         // Verificar compatibilidad de vehículo según el tipo de servicio

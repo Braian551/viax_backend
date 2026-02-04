@@ -79,6 +79,8 @@ try {
             uuid_solicitud,
             cliente_id, 
             tipo_servicio,
+            tipo_vehiculo,
+            empresa_id,
             latitud_recogida, 
             longitud_recogida, 
             direccion_recogida,
@@ -92,17 +94,21 @@ try {
             estado,
             fecha_creacion,
             solicitado_en
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendiente', NOW(), NOW())
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendiente', NOW(), NOW())
     ");
     
     // Obtener precio si se proporcionó, o usar 0 por defecto
     $precioEstimado = $data['precio_estimado'] ?? $data['precio'] ?? 0;
-    $metodoPago = $data['metodo_pago'] ?? 'efectivo';
+    $metodoPago = 'efectivo'; // Solo efectivo soportado
+    $tipoVehiculo = $data['tipo_vehiculo'] ?? 'moto'; // Por defecto moto
+    $empresaId = isset($data['empresa_id']) && $data['empresa_id'] !== null ? intval($data['empresa_id']) : null;
     
     $stmt->execute([
         $uuid,
         $data['usuario_id'],
         $tipoServicio,
+        $tipoVehiculo,
+        $empresaId,
         $data['latitud_origen'],
         $data['longitud_origen'],
         $data['direccion_origen'],
@@ -163,13 +169,15 @@ try {
         ];
         $vehiculoTipo = $vehiculoTipoMap[$data['tipo_vehiculo']] ?? 'moto';
         
-        $stmt = $db->prepare("
+        // Construir query base
+        $query = "
             SELECT 
                 u.id,
                 u.nombre,
                 u.apellido,
                 u.telefono,
                 u.foto_perfil,
+                u.empresa_id,
                 dc.vehiculo_tipo,
                 dc.vehiculo_marca,
                 dc.vehiculo_modelo,
@@ -196,12 +204,10 @@ try {
                 cos(radians(?)) * cos(radians(dc.latitud_actual)) *
                 cos(radians(dc.longitud_actual) - radians(?)) +
                 sin(radians(?)) * sin(radians(dc.latitud_actual))
-            )) <= ?
-            ORDER BY distancia ASC
-            LIMIT 10
-        ");
+            )) <= ?";
         
-        $stmt->execute([
+        // Parámetros base
+        $params = [
             $data['latitud_origen'],
             $data['longitud_origen'],
             $data['latitud_origen'],
@@ -210,7 +216,18 @@ try {
             $data['longitud_origen'],
             $data['latitud_origen'],
             $radiusKm
-        ]);
+        ];
+        
+        // Agregar filtro de empresa si se proporciona
+        if ($empresaId !== null) {
+            $query .= " AND u.empresa_id = ?";
+            $params[] = $empresaId;
+        }
+        
+        $query .= " ORDER BY distancia ASC LIMIT 10";
+        
+        $stmt = $db->prepare($query);
+        $stmt->execute($params);
         
         $conductoresCercanos = $stmt->fetchAll(PDO::FETCH_ASSOC);
     }

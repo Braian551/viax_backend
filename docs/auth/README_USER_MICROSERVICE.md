@@ -22,8 +22,8 @@ backend/auth/  (User Microservice)
 ## Endpoints
 
 ### Base URL
-- **Desarrollo**: `http://localhost/pingo/backend/auth`
-- **Producción**: `https://api.pingo.com/user-service/v1`
+- **Desarrollo**: `http://localhost/viax/backend/auth`
+- **Producción**: `https://api.viax.com/user-service/v1`
 
 ### 1. Registrar Usuario
 
@@ -292,7 +292,7 @@ services:
     environment:
       - DB_HOST=mysql
       - DB_NAME=user_db
-      - DB_USER=pingo_user
+      - DB_USER=viax_user
       - DB_PASS=secret
     depends_on:
       - mysql
@@ -301,7 +301,7 @@ services:
     image: mysql:8.0
     environment:
       MYSQL_DATABASE: user_db
-      MYSQL_USER: pingo_user
+      MYSQL_USER: viax_user
       MYSQL_PASSWORD: secret
       MYSQL_ROOT_PASSWORD: root_secret
     volumes:
@@ -324,12 +324,12 @@ volumes:
 
 ```bash
 # Probar registro
-curl -X POST http://localhost/pingo/backend/auth/register.php \
+curl -X POST http://localhost/viax/backend/auth/register.php \
   -H "Content-Type: application/json" \
   -d '{"name":"Test","lastName":"User","email":"test@test.com","phone":"123456","password":"123456"}'
 
 # Probar login
-curl -X POST http://localhost/pingo/backend/auth/login.php \
+curl -X POST http://localhost/viax/backend/auth/login.php \
   -H "Content-Type: application/json" \
   -d '{"email":"test@test.com","password":"123456"}'
 ```

@@ -1,33 +1,16 @@
 <?php
-// Suprimir warnings y notices
-error_reporting(E_ERROR | E_PARSE);
-ini_set('display_errors', '0');
-
-header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Methods: GET, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type, Accept');
-header('Content-Type: application/json; charset=UTF-8');
-
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(200);
-    exit;
-}
+// backend/admin/get_documentos_historial.php
+header("Access-Control-Allow-Origin: *");
+header("Content-Type: application/json; charset=UTF-8");
+header("Access-Control-Allow-Methods: GET");
+header("Access-Control-Allow-Headers: Content-Type, Access-Control-Allow-Headers, Authorization, X-Requested-With");
 
 require_once __DIR__ . '/../config/database.php';
 
-// Crear conexión mysqli
-$conn = new mysqli('localhost', 'root', 'root', 'viax');
-if ($conn->connect_error) {
-    http_response_code(500);
-    echo json_encode([
-        'success' => false,
-        'message' => 'Error de conexión a la base de datos: ' . $conn->connect_error
-    ], JSON_UNESCAPED_UNICODE);
-    exit;
-}
-$conn->set_charset("utf8");
-
 try {
+    $database = new Database();
+    $db = $database->getConnection();
+
     // Validar método
     if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
         throw new Exception('Método no permitido');
@@ -37,47 +20,43 @@ try {
     $admin_id = isset($_GET['admin_id']) ? intval($_GET['admin_id']) : 0;
     $conductor_id = isset($_GET['conductor_id']) ? intval($_GET['conductor_id']) : 0;
 
-    // Validar admin_id
-    if ($admin_id <= 0) {
-        throw new Exception('ID de administrador inválido');
+    if ($admin_id <= 0 || $conductor_id <= 0) {
+        throw new Exception('IDs inválidos');
     }
 
-    // Validar conductor_id
-    if ($conductor_id <= 0) {
-        throw new Exception('ID de conductor inválido');
-    }
-
-    // Verificar que es admin
-    $stmt = $conn->prepare("SELECT tipo_usuario FROM usuarios WHERE id = ? AND tipo_usuario = 'administrador'");
-    $stmt->bind_param("i", $admin_id);
+    // Verificar que es admin (PostgreSQL syntax)
+    $stmt = $db->prepare("SELECT tipo_usuario FROM usuarios WHERE id = :id AND tipo_usuario = 'administrador'");
+    $stmt->bindParam(':id', $admin_id);
     $stmt->execute();
-    $result = $stmt->get_result();
 
-    if ($result->num_rows === 0) {
+    if ($stmt->rowCount() === 0) {
         http_response_code(403);
         echo json_encode([
             'success' => false,
-            'message' => 'Acceso denegado. Solo administradores pueden ver historial de documentos.'
+            'message' => 'Acceso denegado.'
         ]);
         exit;
     }
 
-    // Verificar que el conductor existe
-    $stmt = $conn->prepare("SELECT id FROM usuarios WHERE id = ? AND tipo_usuario = 'conductor'");
-    $stmt->bind_param("i", $conductor_id);
+    // Verificar que el conductor existe en detalles_conductor
+    // (usuario_id puede ser cualquier tipo de usuario que tenga detalles de conductor)
+    $stmt = $db->prepare("SELECT dc.id, dc.usuario_id, u.nombre, u.apellido 
+                          FROM detalles_conductor dc 
+                          INNER JOIN usuarios u ON dc.usuario_id = u.id 
+                          WHERE dc.usuario_id = :usuario_id");
+    $stmt->bindParam(':usuario_id', $conductor_id);
     $stmt->execute();
-    $result = $stmt->get_result();
+    
+    $conductor = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    if ($result->num_rows === 0) {
+    if (!$conductor) {
         http_response_code(404);
-        echo json_encode([
-            'success' => false,
-            'message' => 'Conductor no encontrado'
-        ], JSON_UNESCAPED_UNICODE);
+        echo json_encode(['success' => false, 'message' => "No se encontraron detalles de conductor para usuario ID $conductor_id"]);
         exit;
     }
 
-    // Obtener historial de documentos
+    // Obtener historial
+    // Postgres doesn't need quotes for identifiers usually, unless reserved keywords.
     $sql = "SELECT 
                 dch.id,
                 dch.conductor_id,
@@ -91,24 +70,15 @@ try {
                 u.email
             FROM documentos_conductor_historial dch
             INNER JOIN usuarios u ON dch.conductor_id = u.id
-            WHERE dch.conductor_id = ?
+            WHERE dch.conductor_id = :conductor_id
             ORDER BY dch.fecha_carga DESC";
 
-    $stmt = $conn->prepare($sql);
-    if (!$stmt) {
-        throw new Exception('Error al preparar consulta: ' . $conn->error);
-    }
-    
-    $stmt->bind_param("i", $conductor_id);
-    if (!$stmt->execute()) {
-        throw new Exception('Error al ejecutar consulta: ' . $stmt->error);
-    }
-    
-    $result = $stmt->get_result();
+    $stmt = $db->prepare($sql);
+    $stmt->bindParam(':conductor_id', $conductor_id);
+    $stmt->execute();
 
     $historial = [];
-    while ($row = $result->fetch_assoc()) {
-        // Determinar el estado basado en el campo 'activo'
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
         $estado = intval($row['activo']) === 1 ? 'aprobado' : 'reemplazado';
         
         $historial[] = [
@@ -122,28 +92,22 @@ try {
             'estado' => $estado,
             'activo' => intval($row['activo']),
             'reemplazado_en' => $row['reemplazado_en'] ?? null,
-            'motivo_rechazo' => null, // Esta tabla no tiene motivo de rechazo
-            'numero_documento' => null,
-            'fecha_vencimiento' => null,
         ];
     }
 
-    http_response_code(200);
     echo json_encode([
         'success' => true,
-        'message' => count($historial) > 0 
-            ? 'Historial de documentos obtenido exitosamente' 
-            : 'No hay historial de documentos para este conductor',
+        'message' => 'Historial obtenido',
         'data' => [
             'historial' => $historial,
-            'total' => count($historial),
+            'total' => count($historial)
         ]
-    ], JSON_UNESCAPED_UNICODE);
+    ]);
 
 } catch (Exception $e) {
-    http_response_code(400);
+    http_response_code(500);
     echo json_encode([
         'success' => false,
         'message' => $e->getMessage()
-    ], JSON_UNESCAPED_UNICODE);
+    ]);
 }

@@ -35,8 +35,7 @@ try {
             COUNT(licencia_foto_url) as con_licencia,
             COUNT(soat_foto_url) as con_soat,
             COUNT(tecnomecanica_foto_url) as con_tecnomecanica,
-            COUNT(tarjeta_propiedad_foto_url) as con_tarjeta,
-            COUNT(seguro_foto_url) as con_seguro
+            COUNT(tarjeta_propiedad_foto_url) as con_tarjeta
         FROM detalles_conductor
     ");
     $result2 = $stmt2->fetch();
@@ -45,9 +44,9 @@ try {
     echo "   Registros con soat_foto_url: {$result2['con_soat']}\n";
     echo "   Registros con tecnomecanica_foto_url: {$result2['con_tecnomecanica']}\n";
     echo "   Registros con tarjeta_propiedad_foto_url: {$result2['con_tarjeta']}\n";
-    echo "   Registros con seguro_foto_url: {$result2['con_seguro']}\n";
+    echo "   Registros con tarjeta_propiedad_foto_url: {$result2['con_tarjeta']}\n";
 
-    if ($result2['total_registros'] > 0 && ($result2['con_licencia'] > 0 || $result2['con_soat'] > 0 || $result2['con_tecnomecanica'] > 0 || $result2['con_tarjeta'] > 0 || $result2['con_seguro'] > 0)) {
+    if ($result2['total_registros'] > 0 && ($result2['con_licencia'] > 0 || $result2['con_soat'] > 0 || $result2['con_tecnomecanica'] > 0 || $result2['con_tarjeta'] > 0)) {
         echo "\n   ⚠️  ADVERTENCIA: Aún hay URLs de fotos en la base de datos!\n";
         echo "   Mostrando algunos ejemplos:\n";
 
@@ -56,19 +55,17 @@ try {
                    CASE WHEN licencia_foto_url IS NOT NULL THEN 'SI' ELSE 'NO' END as tiene_licencia,
                    CASE WHEN soat_foto_url IS NOT NULL THEN 'SI' ELSE 'NO' END as tiene_soat,
                    CASE WHEN tecnomecanica_foto_url IS NOT NULL THEN 'SI' ELSE 'NO' END as tiene_tecnomecanica,
-                   CASE WHEN tarjeta_propiedad_foto_url IS NOT NULL THEN 'SI' ELSE 'NO' END as tiene_tarjeta,
-                   CASE WHEN seguro_foto_url IS NOT NULL THEN 'SI' ELSE 'NO' END as tiene_seguro
+                   CASE WHEN tarjeta_propiedad_foto_url IS NOT NULL THEN 'SI' ELSE 'NO' END as tiene_tarjeta
             FROM detalles_conductor
             WHERE licencia_foto_url IS NOT NULL
                OR soat_foto_url IS NOT NULL
                OR tecnomecanica_foto_url IS NOT NULL
                OR tarjeta_propiedad_foto_url IS NOT NULL
-               OR seguro_foto_url IS NOT NULL
             LIMIT 3
         ");
         $registros = $stmt2b->fetchAll();
         foreach ($registros as $registro) {
-            echo "   - Conductor ID {$registro['conductor_id']}: Licencia={$registro['tiene_licencia']}, SOAT={$registro['tiene_soat']}, Tecnomecánica={$registro['tiene_tecnomecanica']}, Tarjeta={$registro['tiene_tarjeta']}, Seguro={$registro['tiene_seguro']}\n";
+            echo "   - Conductor ID {$registro['conductor_id']}: Licencia={$registro['tiene_licencia']}, SOAT={$registro['tiene_soat']}, Tecnomecánica={$registro['tiene_tecnomecanica']}, Tarjeta={$registro['tiene_tarjeta']}\n";
         }
     } else {
         echo "\n   ✅ Todas las URLs de fotos están limpias (NULL)\n";

@@ -35,7 +35,7 @@ Corrige los nombres de columnas en la tabla `usuarios` para que coincidan con lo
 1. **Abre MySQL Workbench**
 2. **Conéctate a tu servidor** (localhost, usuario: root)
 3. **Abre el archivo**: `run_migration_003.sql`
-   - Ubicación: `c:\Flutter\ping_go\pingo\backend\migrations\run_migration_003.sql`
+   - Ubicación: `c:\Flutter\ping_go\viax\backend\migrations\run_migration_003.sql`
 4. **Ejecuta el script completo** (Ctrl + Shift + Enter)
 5. **Verifica la salida** - debe decir "Migración completada"
 
@@ -48,16 +48,16 @@ Este método automáticamente:
 
 ```powershell
 # Abre PowerShell como Administrador
-cd c:\Flutter\ping_go\pingo\backend\migrations
+cd c:\Flutter\ping_go\viax\backend\migrations
 
 # Ejecuta la migración (te pedirá la contraseña de MySQL)
-mysql -u root -p pingo < 003_fix_usuarios_columns.sql
+mysql -u root -p viax < 003_fix_usuarios_columns.sql
 ```
 
 ### Opción 3: phpMyAdmin
 
 1. Abre phpMyAdmin en tu navegador
-2. Selecciona la base de datos `pingo`
+2. Selecciona la base de datos `viax`
 3. Ve a la pestaña **SQL**
 4. Abre el archivo `003_fix_usuarios_columns.sql` en un editor
 5. Copia TODO el contenido
@@ -72,7 +72,7 @@ Después de ejecutar la migración, verifica que funcionó:
 
 ```sql
 -- Ejecuta esto en MySQL Workbench o phpMyAdmin
-USE pingo;
+USE viax;
 
 DESCRIBE usuarios;
 ```
@@ -107,7 +107,7 @@ DESCRIBE usuarios;
 
 ```sql
 -- Si la migración falló, restaura el backup
-USE pingo;
+USE viax;
 
 -- Eliminar la tabla modificada
 DROP TABLE usuarios;
@@ -141,7 +141,7 @@ RENAME TABLE usuarios_backup_20251023 TO usuarios;
 ### El error persiste después de la migración
 1. Reinicia el servidor PHP/Apache
 2. Limpia el caché del navegador
-3. Verifica los logs en `pingo/backend/logs/`
+3. Verifica los logs en `viax/backend/logs/`
 4. Asegúrate de estar usando la base de datos correcta
 
 ### Error: "Table 'usuarios_backup_20251023' already exists"
@@ -166,8 +166,8 @@ Si tienes problemas:
 
 ```bash
 # EN MYSQL WORKBENCH O LÍNEA DE COMANDOS:
-USE pingo;
-SOURCE c:/Flutter/ping_go/pingo/backend/migrations/003_fix_usuarios_columns.sql;
+USE viax;
+SOURCE c:/Flutter/ping_go/viax/backend/migrations/003_fix_usuarios_columns.sql;
 ```
 
 **¡Eso es todo!** Después de esto, tu aplicación debería funcionar correctamente.

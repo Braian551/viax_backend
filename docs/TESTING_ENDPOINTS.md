@@ -5,7 +5,7 @@
 ### 1. Iniciar el Servidor Backend
 
 ```bash
-cd c:\Flutter\ping_go\pingo\backend
+cd c:\Flutter\ping_go\viax\backend
 php -S localhost:8000
 ```
 
@@ -50,7 +50,7 @@ WHERE id = 7; -- Cambia este ID por el de tu conductor
 
 #### A. Crear Solicitud de Viaje
 ```bash
-php c:\Flutter\ping_go\pingo\backend\user\test_create_request.php
+php c:\Flutter\ping_go\viax\backend\user\test_create_request.php
 ```
 
 **Resultado esperado:**
@@ -75,7 +75,7 @@ php c:\Flutter\ping_go\pingo\backend\user\test_create_request.php
 
 #### B. Buscar Conductores Cercanos
 ```bash
-php c:\Flutter\ping_go\pingo\backend\user\test_find_drivers.php
+php c:\Flutter\ping_go\viax\backend\user\test_find_drivers.php
 ```
 
 **Resultado esperado:**
@@ -105,7 +105,7 @@ php c:\Flutter\ping_go\pingo\backend\user\test_find_drivers.php
 
 #### C. Obtener Solicitudes Pendientes (Conductor)
 ```bash
-php c:\Flutter\ping_go\pingo\backend\conductor\test_get_requests.php
+php c:\Flutter\ping_go\viax\backend\conductor\test_get_requests.php
 ```
 
 **Resultado esperado:**
@@ -141,7 +141,7 @@ php c:\Flutter\ping_go\pingo\backend\conductor\test_get_requests.php
 
 #### D. Aceptar Solicitud (Conductor)
 ```bash
-php c:\Flutter\ping_go\pingo\backend\conductor\test_accept_request.php
+php c:\Flutter\ping_go\viax\backend\conductor\test_accept_request.php
 ```
 
 **Resultado esperado:**

@@ -53,11 +53,17 @@ try {
     $stmt->execute();
 
     $viajes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Formatear fechas a ISO8601 UTC para que el cliente convierta a hora local
+    $viajesFormateados = array_map(function($viaje) {
+        $viaje['fecha_solicitud'] = to_iso8601($viaje['fecha_solicitud']);
+        return $viaje;
+    }, $viajes);
 
     echo json_encode([
         'success' => true,
-        'viajes' => $viajes,
-        'total' => count($viajes),
+        'viajes' => $viajesFormateados,
+        'total' => count($viajesFormateados),
         'message' => 'Viajes activos obtenidos exitosamente'
     ]);
 

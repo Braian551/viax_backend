@@ -3,7 +3,7 @@
 ## Paso 1: Ejecutar Migración de Base de Datos
 
 ```bash
-cd c:\Flutter\ping_go\pingo\backend\migrations
+cd c:\Flutter\ping_go\viax\backend\migrations
 php run_migration_006.php
 ```
 
@@ -39,7 +39,7 @@ Tabla creada:
 ## Paso 2: Verificar Estructura de Carpetas
 
 ```bash
-cd c:\Flutter\ping_go\pingo\backend
+cd c:\Flutter\ping_go\viax\backend
 dir uploads /s
 ```
 
@@ -79,7 +79,7 @@ dependencies:
 
 ### Opción B: Test Manual con cURL
 ```bash
-curl -X POST http://10.0.2.2/pingo/backend/conductor/upload_documents.php \
+curl -X POST http://10.0.2.2/viax/backend/conductor/upload_documents.php \
   -F "conductor_id=7" \
   -F "tipo_documento=soat" \
   -F "documento=@/path/to/image.jpg"
@@ -117,8 +117,8 @@ curl -X POST http://10.0.2.2/pingo/backend/conductor/upload_documents.php \
 
 ### Error: "Permission denied"
 ```bash
-chmod 755 pingo/backend/uploads
-chmod 755 pingo/backend/uploads/documentos
+chmod 755 viax/backend/uploads
+chmod 755 viax/backend/uploads/documentos
 ```
 
 ### Error: "Tabla ya existe"

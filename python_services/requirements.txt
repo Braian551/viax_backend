@@ -1,0 +1,7 @@
+# face_recognition
+# dlib
+# numpy
+# opencv-python
+
+# Dependencies commented out for Mock Mode. 
+# Uncomment if you install VS C++ Build Tools and want real recognition.

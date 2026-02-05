@@ -1,8 +1,16 @@
 <?php
+/**
+ * Endpoint para crear solicitud de viaje
+ * 
+ * Incluye:
+ * - Idempotencia para evitar solicitudes duplicadas
+ * - Validación robusta de datos
+ * - Búsqueda de conductores cercanos
+ */
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type');
+header('Access-Control-Allow-Headers: Content-Type, X-Idempotency-Key');
 
 // Handle CLI environment
 if (php_sapi_name() === 'cli') {
@@ -42,6 +50,37 @@ try {
     
     $database = new Database();
     $db = $database->getConnection();
+    
+    // Obtener clave de idempotencia
+    $idempotencyKey = $_SERVER['HTTP_X_IDEMPOTENCY_KEY'] ?? $data['idempotency_key'] ?? null;
+    
+    // Si hay clave de idempotencia, verificar si ya existe una solicitud reciente
+    if ($idempotencyKey) {
+        $stmt = $db->prepare("
+            SELECT id, estado FROM solicitudes_servicio 
+            WHERE cliente_id = :user_id 
+            AND last_operation_key = :idem_key
+            AND fecha_creacion > NOW() - INTERVAL '5 minutes'
+        ");
+        $stmt->execute([
+            ':user_id' => $data['usuario_id'],
+            ':idem_key' => $idempotencyKey
+        ]);
+        $existing = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($existing) {
+            // Retornar la solicitud existente (idempotente)
+            echo json_encode([
+                'success' => true,
+                'message' => 'Solicitud ya creada previamente',
+                'solicitud_id' => $existing['id'],
+                'idempotent' => true,
+                'conductores_encontrados' => 0,
+                'conductores' => []
+            ]);
+            exit();
+        }
+    }
     
     // Iniciar transacción
     $db->beginTransaction();
@@ -92,9 +131,10 @@ try {
             precio_estimado,
             metodo_pago,
             estado,
+            last_operation_key,
             fecha_creacion,
             solicitado_en
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendiente', NOW(), NOW())
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, NOW(), NOW())
     ");
     
     // Obtener precio si se proporcionó, o usar 0 por defecto
@@ -118,7 +158,8 @@ try {
         $data['distancia_km'],
         $data['duracion_minutos'],
         $precioEstimado,
-        $metodoPago
+        $metodoPago,
+        $idempotencyKey // Clave de idempotencia para evitar duplicados
     ]);
     
     $solicitudId = $db->lastInsertId();

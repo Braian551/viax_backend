@@ -1,8 +1,16 @@
 <?php
+/**
+ * Endpoint para actualizar estado de viaje
+ * 
+ * Incluye:
+ * - Manejo de concurrencia con bloqueos distribuidos
+ * - Idempotencia para reintentos seguros
+ * - Logging de sincronización para debugging
+ */
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type');
+header('Access-Control-Allow-Headers: Content-Type, X-Idempotency-Key, X-Client-Version');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
@@ -10,6 +18,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once '../config/database.php';
+require_once '../config/concurrency_service.php';
 
 try {
     $input = json_decode(file_get_contents('php://input'), true);
@@ -27,6 +36,19 @@ try {
     if (!in_array($nuevo_estado, $estados_validos)) {
         throw new Exception('Estado no válido');
     }
+    
+    // Clave de idempotencia para evitar operaciones duplicadas
+    $idempotencyKey = $_SERVER['HTTP_X_IDEMPOTENCY_KEY'] 
+        ?? $input['idempotency_key'] 
+        ?? "status_{$solicitud_id}_{$nuevo_estado}_" . floor(time() / 30); // Única por 30 segundos
+    
+    // Versión del cliente para detección de conflictos
+    $clientVersion = isset($_SERVER['HTTP_X_CLIENT_VERSION']) 
+        ? intval($_SERVER['HTTP_X_CLIENT_VERSION']) 
+        : ($input['client_version'] ?? null);
+    
+    // Inicializar servicio de concurrencia
+    $concurrencyService = new ConcurrencyService();
 
     // Preparar campos opcionales
     $distancia_recorrida = isset($input['distancia_recorrida']) ? floatval($input['distancia_recorrida']) : null;

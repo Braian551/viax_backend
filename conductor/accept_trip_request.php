@@ -1,8 +1,16 @@
 <?php
+/**
+ * Endpoint para aceptar solicitud de viaje
+ * 
+ * Incluye:
+ * - Manejo de concurrencia con bloqueos distribuidos
+ * - Idempotencia para evitar doble aceptación
+ * - Reintentos seguros desde cliente
+ */
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type');
+header('Access-Control-Allow-Headers: Content-Type, X-Idempotency-Key');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
@@ -10,6 +18,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once '../config/database.php';
+require_once '../config/concurrency_service.php';
 
 try {
     $data = json_decode(file_get_contents('php://input'), true);
@@ -19,8 +28,25 @@ try {
         throw new Exception('Datos requeridos: solicitud_id, conductor_id');
     }
     
-    $solicitudId = $data['solicitud_id'];
-    $conductorId = $data['conductor_id'];
+    $solicitudId = intval($data['solicitud_id']);
+    $conductorId = intval($data['conductor_id']);
+    
+    // Clave de idempotencia: del header o generada
+    $idempotencyKey = $_SERVER['HTTP_X_IDEMPOTENCY_KEY'] 
+        ?? $data['idempotency_key'] 
+        ?? "accept_{$solicitudId}_{$conductorId}_" . floor(time() / 60); // Única por minuto
+    
+    // Usar servicio de concurrencia para aceptación segura
+    $concurrencyService = new ConcurrencyService();
+    $result = $concurrencyService->acceptTripConcurrent($solicitudId, $conductorId, $idempotencyKey);
+    
+    if ($result['success']) {
+        echo json_encode($result);
+        exit();
+    }
+    
+    // Si el servicio de concurrencia falla, intentar método legacy como fallback
+    // Esto mantiene compatibilidad mientras se migra completamente
     
     $database = new Database();
     $db = $database->getConnection();
@@ -29,7 +55,7 @@ try {
     try {
         // Verificar que la solicitud existe y está pendiente
         $stmt = $db->prepare("
-            SELECT id, estado, cliente_id, tipo_servicio, tipo_vehiculo, empresa_id
+            SELECT id, estado, cliente_id, tipo_servicio, tipo_vehiculo, empresa_id, last_operation_key
             FROM solicitudes_servicio 
             WHERE id = ? 
             FOR UPDATE

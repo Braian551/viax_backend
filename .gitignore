@@ -39,3 +39,7 @@ Thumbs.db
 /phpunit.xml
 /.phpunit.result.cache
 /coverage/
+
+config/.env
+.env
+*.env

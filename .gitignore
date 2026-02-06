@@ -43,3 +43,101 @@ Thumbs.db
 config/.env
 .env
 *.env
+
+# ============================================
+# Debug / Test / Diagnostic scripts
+# ============================================
+# Root-level test/check/debug/verify/fix scripts
+/test_*.php
+/check_*.php
+/debug_*.php
+/verify_*.php
+/fix_*.php
+/diagnostico_*.php
+/cleanup_*.php
+/list_*.php
+/enable_*.php
+/add_*.php
+/sync_*.php
+/run_migration_*.php
+
+# Admin debug scripts
+admin/debug_*.php
+admin/check_*.php
+admin/force_*.php
+admin/setup_admin_user.sql
+
+# Auth test/debug scripts
+auth/email_service_test.php
+auth/test_*.php
+
+# Company debug scripts
+company/debug_*.php
+
+# Conductor debug/test scripts
+conductor/debug_*.php
+conductor/check_*.php
+conductor/crear_solicitud_prueba.php
+conductor/diagnostico_completo.php
+conductor/reset_verification.php
+conductor/verificar_historial.php
+
+# User debug scripts
+user/debug_*.php
+
+# Empresa debug scripts
+empresa/debug_*.php
+
+# Database check scripts (diagnostic only)
+database/
+
+# Tests folder (dev-only scripts, not needed in production)
+tests/
+
+# Utils folder debug/test scripts (keep only Mailer, NotificationHelper, PdfGenerator)
+utils/check_*.php
+utils/clean_*.php
+utils/debug_*.php
+utils/desc_*.php
+utils/find_*.php
+utils/fix_*.php
+utils/force_*.php
+utils/get_colors.php
+utils/get_sql_func*.php
+utils/list_*.php
+utils/nuclear_reset.php
+utils/overcount_result.txt
+utils/reject_*.php
+utils/res_*.json
+utils/reset_*.php
+utils/restore_*.php
+utils/seed_*.php
+utils/simulate_*.php
+utils/test_*.php
+utils/update_reason_*.php
+utils/verify_*.php
+utils/vrf_*.php
+
+# Migration one-time scripts (keep .sql files and run_migrations.php)
+migrations/analyze_duplication.php
+migrations/cleanup_*.php
+migrations/clean_*.php
+migrations/complete_*.php
+migrations/consolidate_*.php
+migrations/execute_*.php
+migrations/final_verification.php
+migrations/find_*.php
+migrations/fix_*.php
+migrations/insert_*.php
+migrations/install_*.bat
+migrations/prepare_*.php
+migrations/rename_*.php
+migrations/reset_*.php
+migrations/run_fix*.php
+migrations/run_migration_*.php
+migrations/sync_*.php
+migrations/verify_*.php
+migrations/DIAGRAMA.txt
+
+# Debug log
+debug_path.log

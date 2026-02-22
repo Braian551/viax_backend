@@ -4,7 +4,7 @@
 -- Descripción: Actualiza los tipos de vehículos a:
 --              - auto (antes carro)
 --              - moto
---              - motocarro (nuevo tipo)
+--              - mototaxi (nuevo tipo)
 -- Fecha: 2025-12-04
 -- =====================================================
 
@@ -33,15 +33,15 @@ UPDATE configuracion_precios
 SET tipo_vehiculo = 'auto' 
 WHERE tipo_vehiculo = 'carro_carga';
 
--- Cambiar 'moto_carga' a 'motocarro'
+-- Cambiar 'moto_carga' a 'mototaxi'
 UPDATE configuracion_precios 
-SET tipo_vehiculo = 'motocarro' 
+SET tipo_vehiculo = 'mototaxi' 
 WHERE tipo_vehiculo = 'moto_carga';
 
 -- Agregar el nuevo constraint con los tipos actualizados
 ALTER TABLE configuracion_precios 
 ADD CONSTRAINT check_tipo_vehiculo 
-CHECK (tipo_vehiculo IN ('auto', 'moto', 'motocarro'));
+CHECK (tipo_vehiculo IN ('auto', 'moto', 'mototaxi'));
 
 -- Verificar que existen configuraciones para cada tipo, si no, insertarlas
 -- Insertar configuración para AUTO si no existe
@@ -104,7 +104,7 @@ WHERE NOT EXISTS (
     SELECT 1 FROM configuracion_precios WHERE tipo_vehiculo = 'moto'
 );
 
--- Insertar configuración para MOTOCARRO si no existe
+-- Insertar configuración para MOTOTAXI si no existe
 INSERT INTO configuracion_precios (
     tipo_vehiculo,
     tarifa_base,
@@ -119,7 +119,7 @@ INSERT INTO configuracion_precios (
     notas
 )
 SELECT 
-    'motocarro',
+    'mototaxi',
     5500.00,    -- Tarifa base (intermedio entre moto y auto)
     2500.00,    -- Por kilómetro
     350.00,     -- Por minuto
@@ -129,14 +129,14 @@ SELECT
     28.00,      -- Recargo festivo (28%)
     15.00,      -- Comisión plataforma (15%)
     true,
-    'Configuración para servicio de motocarro - Diciembre 2025'
+    'Configuración para servicio de mototaxi - Diciembre 2025'
 WHERE NOT EXISTS (
-    SELECT 1 FROM configuracion_precios WHERE tipo_vehiculo = 'motocarro'
+    SELECT 1 FROM configuracion_precios WHERE tipo_vehiculo = 'mototaxi'
 );
 
 -- Eliminar configuraciones de tipos antiguos que ya no se usan
 DELETE FROM configuracion_precios 
-WHERE tipo_vehiculo NOT IN ('auto', 'moto', 'motocarro');
+WHERE tipo_vehiculo NOT IN ('auto', 'moto', 'mototaxi');
 
 -- =====================================================
 -- También actualizar la tabla de solicitudes_servicio si existe
@@ -160,12 +160,12 @@ BEGIN
         -- Actualizar valores existentes
         UPDATE solicitudes_servicio SET tipo_vehiculo = 'auto' WHERE tipo_vehiculo = 'carro';
         UPDATE solicitudes_servicio SET tipo_vehiculo = 'auto' WHERE tipo_vehiculo = 'carro_carga';
-        UPDATE solicitudes_servicio SET tipo_vehiculo = 'motocarro' WHERE tipo_vehiculo = 'moto_carga';
+        UPDATE solicitudes_servicio SET tipo_vehiculo = 'mototaxi' WHERE tipo_vehiculo = 'moto_carga';
 
         -- Agregar nuevo constraint
         ALTER TABLE solicitudes_servicio 
         ADD CONSTRAINT check_tipo_vehiculo_solicitud 
-        CHECK (tipo_vehiculo IN ('auto', 'moto', 'motocarro'));
+        CHECK (tipo_vehiculo IN ('auto', 'moto', 'mototaxi'));
     END IF;
 END $$;
 
@@ -190,12 +190,12 @@ BEGIN
         -- Actualizar valores existentes
         UPDATE detalles_conductor SET tipo_vehiculo = 'auto' WHERE tipo_vehiculo = 'carro';
         UPDATE detalles_conductor SET tipo_vehiculo = 'auto' WHERE tipo_vehiculo = 'carro_carga';
-        UPDATE detalles_conductor SET tipo_vehiculo = 'motocarro' WHERE tipo_vehiculo = 'moto_carga';
+        UPDATE detalles_conductor SET tipo_vehiculo = 'mototaxi' WHERE tipo_vehiculo = 'moto_carga';
 
         -- Agregar nuevo constraint
         ALTER TABLE detalles_conductor 
         ADD CONSTRAINT check_tipo_vehiculo_conductor 
-        CHECK (tipo_vehiculo IN ('auto', 'moto', 'motocarro'));
+        CHECK (tipo_vehiculo IN ('auto', 'moto', 'mototaxi'));
     END IF;
 END $$;
 
@@ -211,6 +211,6 @@ ORDER BY tipo_vehiculo;
 -- INSTRUCCIONES DE INSTALACIÓN
 -- =====================================================
 -- 1. Ejecutar este script en la base de datos 'viax'
--- 2. Verificar que hay 3 registros: auto, moto, motocarro
+-- 2. Verificar que hay 3 registros: auto, moto, mototaxi
 -- 3. Los tipos anteriores (carro, moto_carga, carro_carga) serán migrados
 -- =====================================================

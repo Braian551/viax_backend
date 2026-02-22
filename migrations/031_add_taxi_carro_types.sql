@@ -18,7 +18,7 @@ ON CONFLICT (codigo) DO NOTHING;
 
 -- 2. Actualizar el orden de los tipos existentes para consistencia
 UPDATE catalogo_tipos_vehiculo SET orden = 1 WHERE codigo = 'moto';
-UPDATE catalogo_tipos_vehiculo SET orden = 2 WHERE codigo = 'motocarro';
+UPDATE catalogo_tipos_vehiculo SET orden = 2 WHERE codigo = 'mototaxi';
 UPDATE catalogo_tipos_vehiculo SET orden = 3 WHERE codigo = 'taxi';
 UPDATE catalogo_tipos_vehiculo SET orden = 4 WHERE codigo = 'carro';
 
@@ -47,7 +47,7 @@ AND NOT EXISTS (
 UPDATE catalogo_tipos_vehiculo SET activo = false WHERE codigo = 'auto';
 
 -- 5. Comentarios de documentación
-COMMENT ON COLUMN catalogo_tipos_vehiculo.codigo IS 'Tipos válidos: moto, motocarro, taxi, carro';
+COMMENT ON COLUMN catalogo_tipos_vehiculo.codigo IS 'Tipos válidos: moto, mototaxi, taxi, carro';
 
 -- Verificar resultado
 SELECT codigo, nombre, descripcion, orden, activo FROM catalogo_tipos_vehiculo ORDER BY orden;

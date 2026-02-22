@@ -54,7 +54,7 @@ INSERT INTO configuracion_precios (
 ON CONFLICT DO NOTHING;
 
 -- 3. Comentario de documentación
-COMMENT ON COLUMN catalogo_tipos_vehiculo.codigo IS 'Código único del tipo: moto, auto, motocarro, taxi';
+COMMENT ON COLUMN catalogo_tipos_vehiculo.codigo IS 'Código único del tipo: moto, auto, mototaxi, taxi';
 
 -- 4. Verificar inserción
 SELECT codigo, nombre, descripcion, orden FROM catalogo_tipos_vehiculo ORDER BY orden;

@@ -21,7 +21,7 @@ try {
     
     // Validar que se recibió el token de Google
     if (empty($input['id_token']) && empty($input['access_token'])) {
-        sendJsonResponse(false, 'Se requiere id_token o access_token de Google');
+        sendJsonResponse(false, 'No recibimos credenciales válidas de Google.', [], 400, 'GOOGLE_TOKEN_MISSING');
     }
     
     // Obtener información del usuario de Google
@@ -36,7 +36,7 @@ try {
     }
     
     if (!$googleUser || empty($googleUser['email'])) {
-        sendJsonResponse(false, 'No se pudo verificar la identidad con Google');
+        sendJsonResponse(false, 'No se pudo verificar tu identidad con Google. Intenta nuevamente.', [], 401, 'GOOGLE_IDENTITY_INVALID');
     }
     
     // Extraer información del usuario de Google
@@ -131,7 +131,7 @@ try {
                     'empresa_pendiente' => true,
                     'estado' => $estadoActual,
                     'mensaje' => 'Tu solicitud de registro está en revisión. Te notificaremos cuando sea aprobada.'
-                ]);
+                ], 403, 'EMPRESA_PENDIENTE');
             }
         }
         
@@ -195,10 +195,10 @@ try {
     
 } catch (PDOException $e) {
     error_log("Error de base de datos en Google callback: " . $e->getMessage());
-    sendJsonResponse(false, 'Error de base de datos: ' . $e->getMessage());
+    sendJsonResponse(false, 'No pudimos completar el inicio con Google en este momento. Intenta nuevamente.', [], 500, 'SERVER_UNAVAILABLE');
 } catch (Exception $e) {
     error_log("Error en Google callback: " . $e->getMessage());
-    sendJsonResponse(false, 'Error: ' . $e->getMessage());
+    sendJsonResponse(false, 'No pudimos completar el inicio con Google en este momento. Intenta nuevamente.', [], 500, 'SERVER_UNAVAILABLE');
 }
 
 /**

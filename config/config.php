@@ -33,8 +33,14 @@ function getJsonInput() {
 }
 
 // Función para enviar respuestas JSON
-function sendJsonResponse($success, $message, $data = []) {
+function sendJsonResponse($success, $message, $data = [], $httpStatus = 200, $errorCode = null) {
+    http_response_code($httpStatus);
+
     $response = ['success' => $success, 'message' => $message];
+
+    if (!$success && !empty($errorCode)) {
+        $response['error_code'] = $errorCode;
+    }
     
     if (!empty($data)) {
         $response['data'] = $data;

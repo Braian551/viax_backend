@@ -1,5 +1,5 @@
 <?php
-// Script simple de verificación para Railway
+// Script simple de verificación para producción VPS
 header('Content-Type: application/json');
 
 try {

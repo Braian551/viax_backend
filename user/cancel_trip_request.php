@@ -27,8 +27,8 @@ try {
     // Verificar que la solicitud existe y está en estado cancelable
     $stmt = $db->prepare("
         SELECT ss.id, ss.estado, ss.cliente_id, ac.conductor_id
-        FROM solicitudes_servicio ss
-        LEFT JOIN asignaciones_conductor ac ON ss.id = ac.solicitud_id AND ac.estado = 'asignado'
+            FROM solicitudes_servicio ss
+            LEFT JOIN asignaciones_conductor ac ON ss.id = ac.solicitud_id AND ac.estado IN ('asignado', 'llegado')
         WHERE ss.id = ?
     ");
     $stmt->execute([$solicitudId]);
@@ -40,7 +40,7 @@ try {
     
     // Verificar que la solicitud puede ser cancelada
     // Estados cancelables: pendiente, aceptada, conductor_asignado
-    $estadosCancelables = ['pendiente', 'aceptada', 'conductor_asignado'];
+        $estadosCancelables = ['pendiente', 'aceptada', 'conductor_asignado', 'conductor_llego'];
     if (!in_array($solicitud['estado'], $estadosCancelables)) {
         throw new Exception('La solicitud no puede ser cancelada en su estado actual: ' . $solicitud['estado']);
     }
@@ -51,7 +51,7 @@ try {
         $stmt = $db->prepare("
             UPDATE asignaciones_conductor 
             SET estado = 'cancelado'
-            WHERE solicitud_id = ? AND conductor_id = ? AND estado = 'asignado'
+              WHERE solicitud_id = ? AND conductor_id = ? AND estado IN ('asignado', 'llegado')
         ");
         $stmt->execute([$solicitudId, $solicitud['conductor_id']]);
         

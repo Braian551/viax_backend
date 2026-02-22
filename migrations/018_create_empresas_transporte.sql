@@ -2,7 +2,7 @@
 -- Migración 018: Sistema de Empresas de Transporte
 -- =====================================================
 -- Este sistema permite registrar empresas de transporte
--- (motos, motocarros, etc.) para que conductores y 
+-- (motos, mototaxis, etc.) para que conductores y 
 -- clientes puedan seleccionar su empresa preferida.
 -- =====================================================
 
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS empresas_transporte (
     representante_email VARCHAR(255),
     
     -- Configuración
-    tipos_vehiculo TEXT[], -- Array de tipos: 'moto', 'motocarro', 'taxi', etc.
+    tipos_vehiculo TEXT[], -- Array de tipos: 'moto', 'mototaxi', 'taxi', etc.
     logo_url VARCHAR(500),
     descripcion TEXT,
     

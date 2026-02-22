@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS catalogo_tipos_vehiculo (
 INSERT INTO catalogo_tipos_vehiculo (codigo, nombre, descripcion, icono, orden) VALUES
     ('moto', 'Moto', 'Motocicletas para transporte rápido', 'two_wheeler', 1),
     ('auto', 'Auto', 'Automóviles sedan y similares', 'directions_car', 2),
-    ('motocarro', 'Motocarro', 'Motocarros de carga y pasajeros', 'electric_rickshaw', 3)
+    ('mototaxi', 'Mototaxi', 'Mototaxis de carga y pasajeros', 'electric_rickshaw', 3)
 ON CONFLICT (codigo) DO NOTHING;
 
 -- 2. TABLA PRINCIPAL: Tipos de vehículo por empresa

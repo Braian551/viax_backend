@@ -28,6 +28,7 @@ Backend API para la aplicación Viax.
 - `/auth/login.php` - Inicio de sesión
 - `/conductor/actualizar_disponibilidad.php` - Actualización de estado
 - `/user/create_trip_request.php` - Solicitud de viajes
+- `/conductor/vehicle_catalog.php` - Catálogo de marcas/modelos por tipo de vehículo (Colombia + vPIC)
 
 ## 🛠️ Comandos Útiles
 

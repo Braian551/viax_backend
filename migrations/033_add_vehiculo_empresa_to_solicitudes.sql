@@ -134,7 +134,7 @@ BEGIN
     -- Crear nuevo constraint
     ALTER TABLE solicitudes_servicio 
     ADD CONSTRAINT check_tipo_vehiculo_solicitud 
-    CHECK (tipo_vehiculo IS NULL OR tipo_vehiculo IN ('moto', 'auto', 'motocarro', 'taxi'));
+    CHECK (tipo_vehiculo IS NULL OR tipo_vehiculo IN ('moto', 'auto', 'mototaxi', 'taxi'));
     
     RAISE NOTICE 'Constraint check_tipo_vehiculo_solicitud actualizado';
 END $$;

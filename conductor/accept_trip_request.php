@@ -19,6 +19,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 require_once '../config/database.php';
 require_once '../config/concurrency_service.php';
+require_once '../utils/NotificationHelper.php';
 
 try {
     $data = json_decode(file_get_contents('php://input'), true);
@@ -41,6 +42,40 @@ try {
     $result = $concurrencyService->acceptTripConcurrent($solicitudId, $conductorId, $idempotencyKey);
     
     if ($result['success']) {
+        try {
+            if (empty($result['idempotent'])) {
+                $database = new Database();
+                $dbNotif = $database->getConnection();
+
+                $stmtNotif = $dbNotif->prepare(
+                    "SELECT s.cliente_id, u.nombre, u.apellido
+                     FROM solicitudes_servicio s
+                     LEFT JOIN usuarios u ON u.id = :conductor_id
+                     WHERE s.id = :solicitud_id"
+                );
+                $stmtNotif->execute([
+                    ':conductor_id' => $conductorId,
+                    ':solicitud_id' => $solicitudId,
+                ]);
+                $rowNotif = $stmtNotif->fetch(PDO::FETCH_ASSOC);
+
+                if ($rowNotif && !empty($rowNotif['cliente_id'])) {
+                    $nombreConductor = trim(($rowNotif['nombre'] ?? '') . ' ' . ($rowNotif['apellido'] ?? ''));
+                    if ($nombreConductor === '') {
+                        $nombreConductor = 'Tu conductor';
+                    }
+
+                    NotificationHelper::viajeAceptado(
+                        (int)$rowNotif['cliente_id'],
+                        $solicitudId,
+                        $nombreConductor
+                    );
+                }
+            }
+        } catch (Exception $notificationError) {
+            error_log('accept_trip_request.php notification error: ' . $notificationError->getMessage());
+        }
+
         echo json_encode($result);
         exit();
     }
@@ -141,7 +176,22 @@ try {
         ");
         $stmt->execute([$conductorId]);
         
-        $db->commit();
+            $db->commit();
+
+            try {
+                $nombreConductor = trim(($conductor['nombre'] ?? '') . ' ' . ($conductor['apellido'] ?? ''));
+                if ($nombreConductor === '') {
+                    $nombreConductor = 'Tu conductor';
+                }
+
+                NotificationHelper::viajeAceptado(
+                    (int)$solicitud['cliente_id'],
+                    $solicitudId,
+                    $nombreConductor
+                );
+            } catch (Exception $notificationError) {
+                error_log('accept_trip_request.php legacy notification error: ' . $notificationError->getMessage());
+            }
         
         echo json_encode([
             'success' => true,

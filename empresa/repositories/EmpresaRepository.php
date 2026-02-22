@@ -388,7 +388,10 @@ class EmpresaRepository {
      * Get company configuration settings
      */
     public function getCompanySettings($empresaId) {
-        $query = "SELECT notificaciones_email, notificaciones_push 
+        $query = "SELECT notificaciones_email, notificaciones_push,
+                         banco_codigo, banco_nombre, tipo_cuenta,
+                         numero_cuenta, titular_cuenta, documento_titular,
+                         referencia_transferencia
                   FROM empresas_configuracion 
                   WHERE empresa_id = ?";
         $stmt = $this->db->prepare($query);
@@ -400,13 +403,33 @@ class EmpresaRepository {
         if (!$result) {
             return [
                 'notificaciones_email' => true,
-                'notificaciones_push' => true
+                'notificaciones_push' => true,
+                'has_transfer_account' => false,
+                'banco_codigo' => null,
+                'banco_nombre' => null,
+                'tipo_cuenta' => null,
+                'numero_cuenta' => null,
+                'titular_cuenta' => null,
+                'documento_titular' => null,
+                'referencia_transferencia' => null,
             ];
         }
+
+        $hasTransferAccount = !empty($result['banco_nombre'])
+            && !empty($result['tipo_cuenta'])
+            && !empty($result['numero_cuenta']);
         
         return [
             'notificaciones_email' => $result['notificaciones_email'] === true || $result['notificaciones_email'] === 't',
-            'notificaciones_push' => $result['notificaciones_push'] === true || $result['notificaciones_push'] === 't'
+            'notificaciones_push' => $result['notificaciones_push'] === true || $result['notificaciones_push'] === 't',
+            'has_transfer_account' => $hasTransferAccount,
+            'banco_codigo' => $result['banco_codigo'] ?? null,
+            'banco_nombre' => $result['banco_nombre'] ?? null,
+            'tipo_cuenta' => $result['tipo_cuenta'] ?? null,
+            'numero_cuenta' => $result['numero_cuenta'] ?? null,
+            'titular_cuenta' => $result['titular_cuenta'] ?? null,
+            'documento_titular' => $result['documento_titular'] ?? null,
+            'referencia_transferencia' => $result['referencia_transferencia'] ?? null,
         ];
     }
 
@@ -437,6 +460,41 @@ class EmpresaRepository {
             $fields[] = "notificaciones_push = ?";
             $val = $data['notificaciones_push'];
             $params[] = ($val === true || $val === 'true' || $val === 1 || $val === '1') ? 't' : 'f';
+        }
+
+        if (array_key_exists('banco_codigo', $data)) {
+            $fields[] = "banco_codigo = ?";
+            $params[] = $data['banco_codigo'] ?: null;
+        }
+
+        if (array_key_exists('banco_nombre', $data)) {
+            $fields[] = "banco_nombre = ?";
+            $params[] = $data['banco_nombre'] ?: null;
+        }
+
+        if (array_key_exists('tipo_cuenta', $data)) {
+            $fields[] = "tipo_cuenta = ?";
+            $params[] = $data['tipo_cuenta'] ?: null;
+        }
+
+        if (array_key_exists('numero_cuenta', $data)) {
+            $fields[] = "numero_cuenta = ?";
+            $params[] = $data['numero_cuenta'] ?: null;
+        }
+
+        if (array_key_exists('titular_cuenta', $data)) {
+            $fields[] = "titular_cuenta = ?";
+            $params[] = $data['titular_cuenta'] ?: null;
+        }
+
+        if (array_key_exists('documento_titular', $data)) {
+            $fields[] = "documento_titular = ?";
+            $params[] = $data['documento_titular'] ?: null;
+        }
+
+        if (array_key_exists('referencia_transferencia', $data)) {
+            $fields[] = "referencia_transferencia = ?";
+            $params[] = $data['referencia_transferencia'] ?: null;
         }
         
         if (empty($fields)) {

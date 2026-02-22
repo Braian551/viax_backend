@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS empresas_configuracion (
     id BIGSERIAL PRIMARY KEY,
     empresa_id BIGINT NOT NULL REFERENCES empresas_transporte(id) ON DELETE CASCADE,
     
-    tipos_vehiculo TEXT[], -- Array de tipos: 'moto', 'motocarro', 'taxi', etc.
+    tipos_vehiculo TEXT[], -- Array de tipos: 'moto', 'mototaxi', 'taxi', etc.
     zona_operacion TEXT[], -- Municipios donde opera
     horario_operacion JSONB, -- {"lunes": {"inicio": "06:00", "fin": "22:00"}, ...}
     

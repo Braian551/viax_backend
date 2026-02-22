@@ -57,7 +57,7 @@ class EmpresaService {
             // Update empresa with creator
             $this->repository->updateEmpresaCreador($empresaId, $userId);
             
-            // Enable default vehicle types (moto, auto, motocarro)
+            // Enable default vehicle types (moto, auto, mototaxi)
             $tiposHabilitados = $this->repository->enableDefaultVehicleTypes($empresaId, $userId);
             if ($tiposHabilitados > 0) {
                 error_log("Habilitados $tiposHabilitados tipos de vehículo para empresa $empresaId");

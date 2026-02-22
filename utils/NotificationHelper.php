@@ -5,9 +5,11 @@
  */
 
 require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/PushNotificationService.php';
 
 class NotificationHelper {
     private static $conn = null;
+    private static ?PushNotificationService $pushService = null;
     
     /**
      * Obtiene la conexión a la base de datos
@@ -18,6 +20,17 @@ class NotificationHelper {
             self::$conn = $database->getConnection();
         }
         return self::$conn;
+    }
+
+    /**
+     * Obtiene el servicio de push
+     */
+    private static function getPushService(): PushNotificationService {
+        if (self::$pushService === null) {
+            self::$pushService = new PushNotificationService();
+        }
+
+        return self::$pushService;
     }
     
     /**
@@ -54,8 +67,26 @@ class NotificationHelper {
             $stmt->bindValue(':ref_id', $referenciaId, $referenciaId ? PDO::PARAM_INT : PDO::PARAM_NULL);
             $stmt->bindValue(':data', json_encode($data));
             $stmt->execute();
-            
-            return $stmt->fetch(PDO::FETCH_ASSOC)['id'];
+
+            $notificationId = (int)($stmt->fetch(PDO::FETCH_ASSOC)['id'] ?? 0);
+
+            if ($notificationId > 0) {
+                try {
+                    self::getPushService()->sendToUser(
+                        $conn,
+                        $usuarioId,
+                        $notificationId,
+                        $tipo,
+                        $titulo,
+                        $mensaje,
+                        $data
+                    );
+                } catch (Exception $pushError) {
+                    error_log('Error enviando push: ' . $pushError->getMessage());
+                }
+            }
+
+            return $notificationId > 0 ? $notificationId : false;
         } catch (Exception $e) {
             error_log("Error creando notificación: " . $e->getMessage());
             return false;
@@ -248,6 +279,35 @@ class NotificationHelper {
             'system',
             $titulo,
             $mensaje
+        );
+    }
+
+    /**
+     * Notifica actualización del estado documental del conductor
+     */
+    public static function documentacionActualizada(
+        int $usuarioId,
+        string $estado,
+        ?string $detalle = null
+    ) {
+        $titulo = $estado === 'aprobado'
+            ? 'Documentos aprobados'
+            : 'Actualización de documentos';
+
+        $mensajeBase = $estado === 'aprobado'
+            ? 'Tu documentación fue aprobada. Ya puedes operar en la plataforma.'
+            : 'Tu documentación fue actualizada. Revisa el estado en tu perfil.';
+
+        $mensaje = $detalle ? ($mensajeBase . ' ' . $detalle) : $mensajeBase;
+
+        return self::crear(
+            $usuarioId,
+            $estado === 'aprobado' ? 'document_approved' : 'driver_document_update',
+            $titulo,
+            $mensaje,
+            'documento',
+            null,
+            ['estado' => $estado]
         );
     }
     

@@ -5,7 +5,7 @@ try {
     $input = getJsonInput();
 
     if (empty($input['email']) || empty($input['password'])) {
-        sendJsonResponse(false, 'Email y password son requeridos');
+        sendJsonResponse(false, 'Email y password son requeridos', [], 400, 'VALIDATION_ERROR');
     }
 
     $deviceUuid = isset($input['device_uuid']) ? trim($input['device_uuid']) : null;
@@ -67,7 +67,7 @@ try {
             sendJsonResponse(false, 'Dispositivo bloqueado temporalmente', [
                 'too_many_attempts' => true,
                 'locked_until' => $device['locked_until']
-            ]);
+            ], 429, 'DEVICE_LOCKED');
         }
     }
 
@@ -89,9 +89,9 @@ try {
             sendJsonResponse(false, 'Contraseña incorrecta', [
                 'fail_attempts' => $failAttempts,
                 'too_many_attempts' => $lockApplied
-            ]);
+            ], 401, 'INVALID_CREDENTIALS');
         }
-        sendJsonResponse(false, 'Contraseña incorrecta');
+        sendJsonResponse(false, 'Contraseña incorrecta', [], 401, 'INVALID_CREDENTIALS');
     }
 
     // No devolver hash
@@ -108,11 +108,11 @@ try {
         // Estado 'activo' significa que la empresa fue aprobada
         if (!$empresa || $empresa['estado'] !== 'activo') {
             $estadoActual = $empresa['estado'] ?? 'desconocido';
-            sendJsonResponse(false, 'Tu empresa aún no ha sido aprobada', [
+                sendJsonResponse(false, 'Tu empresa aún no ha sido aprobada', [
                 'empresa_pendiente' => true,
                 'estado' => $estadoActual,
                 'mensaje' => 'Tu solicitud de registro está en revisión. Te notificaremos cuando sea aprobada.'
-            ]);
+                ], 403, 'EMPRESA_PENDIENTE');
         }
     }
 
@@ -146,10 +146,8 @@ try {
     sendJsonResponse(true, 'Login exitoso', ['user' => $user]);
 
 } catch (Exception $e) {
-    http_response_code(500);
-    // Limpiar mensaje de error para evitar caracteres UTF-8 invalidos
-    $errorMsg = preg_replace('/[^\x20-\x7E]/', '', $e->getMessage());
-    sendJsonResponse(false, 'Error del servidor: ' . $errorMsg);
+    error_log('login.php error: ' . $e->getMessage());
+    sendJsonResponse(false, 'No pudimos procesar tu inicio de sesión en este momento. Intenta nuevamente.', [], 500, 'SERVER_UNAVAILABLE');
 }
 
 ?>

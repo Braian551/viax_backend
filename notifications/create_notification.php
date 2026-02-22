@@ -30,6 +30,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../utils/NotificationHelper.php';
 
 try {
     $database = new Database();
@@ -71,19 +72,20 @@ try {
         exit;
     }
     
-    // Usar la función de BD para crear la notificación
-    $query = "SELECT crear_notificacion(:usuario_id, :tipo, :titulo, :mensaje, :ref_tipo, :ref_id, :data) as id";
-    $stmt = $conn->prepare($query);
-    $stmt->bindValue(':usuario_id', $usuario_id, PDO::PARAM_INT);
-    $stmt->bindValue(':tipo', $tipo);
-    $stmt->bindValue(':titulo', $titulo);
-    $stmt->bindValue(':mensaje', $mensaje);
-    $stmt->bindValue(':ref_tipo', $referencia_tipo);
-    $stmt->bindValue(':ref_id', $referencia_id, $referencia_id ? PDO::PARAM_INT : PDO::PARAM_NULL);
-    $stmt->bindValue(':data', json_encode($data));
-    $stmt->execute();
-    
-    $notification_id = $stmt->fetch(PDO::FETCH_ASSOC)['id'];
+    // Crear notificación por helper (incluye envío push)
+    $notification_id = NotificationHelper::crear(
+        $usuario_id,
+        $tipo,
+        $titulo,
+        $mensaje,
+        $referencia_tipo,
+        $referencia_id,
+        is_array($data) ? $data : []
+    );
+
+    if (!$notification_id) {
+        throw new Exception('No se pudo crear la notificación');
+    }
     
     // Obtener la notificación creada
     $getQuery = "

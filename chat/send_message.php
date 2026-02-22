@@ -17,6 +17,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../utils/NotificationHelper.php';
 
 try {
     // Obtener datos del request
@@ -101,6 +102,26 @@ try {
     ]);
     
     $result = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    try {
+        $stmtUser = $db->prepare('SELECT nombre, apellido FROM usuarios WHERE id = ? LIMIT 1');
+        $stmtUser->execute([$remitenteId]);
+        $user = $stmtUser->fetch(PDO::FETCH_ASSOC);
+
+        $remitenteNombre = trim(($user['nombre'] ?? '') . ' ' . ($user['apellido'] ?? ''));
+        if ($remitenteNombre === '') {
+            $remitenteNombre = $tipoRemitente === 'conductor' ? 'Tu conductor' : 'Tu cliente';
+        }
+
+        NotificationHelper::nuevoMensaje(
+            $destinatarioId,
+            $solicitudId,
+            $remitenteNombre,
+            $mensaje
+        );
+    } catch (Exception $notificationError) {
+        error_log('send_message.php notification error: ' . $notificationError->getMessage());
+    }
     
     echo json_encode([
         'success' => true,

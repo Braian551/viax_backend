@@ -206,7 +206,7 @@ try {
         $vehiculoTipoMap = [
             'moto' => 'moto',
             'auto' => 'auto',
-            'motocarro' => 'motocarro'
+            'mototaxi' => 'mototaxi'
         ];
         $vehiculoTipo = $vehiculoTipoMap[$data['tipo_vehiculo']] ?? 'moto';
         

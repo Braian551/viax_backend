@@ -27,6 +27,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 require_once '../config/database.php';
 require_once 'services/AuthService.php';
+require_once '../utils/Mailer.php';
+
+function generateVerificationCode(): string {
+    return strval(random_int(1000, 9999));
+}
+
+function getUserById(PDO $db, int $userId): array {
+    $stmt = $db->prepare("SELECT id, email, nombre FROM usuarios WHERE id = ? LIMIT 1");
+    $stmt->execute([$userId]);
+    $user = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$user) {
+        throw new Exception("Usuario no encontrado");
+    }
+
+    return $user;
+}
+
+function validatePasswordChangeCode(PDO $db, string $email, string $code): int {
+    $stmt = $db->prepare("\n        SELECT id\n        FROM verification_codes\n        WHERE email = ?\n          AND code = ?\n          AND used = 0\n          AND expires_at > NOW()\n        ORDER BY created_at DESC\n        LIMIT 1\n    ");
+    $stmt->execute([$email, $code]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$row) {
+        throw new Exception("Código inválido o expirado");
+    }
+
+    return intval($row['id']);
+}
 
 try {
     // Initialize
@@ -74,6 +103,82 @@ try {
             echo json_encode([
                 'success' => true,
                 'message' => 'Contraseña actualizada exitosamente'
+            ]);
+            break;
+
+        case 'request_change_code':
+            $user = getUserById($db, intval($userId));
+            $code = generateVerificationCode();
+
+            $nextIdStmt = $db->query("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM verification_codes");
+            $nextIdRow = $nextIdStmt->fetch(PDO::FETCH_ASSOC);
+            $nextId = intval($nextIdRow['next_id'] ?? 1);
+
+            $insertCodeStmt = $db->prepare("\n                INSERT INTO verification_codes (id, email, code, created_at, expires_at, used)\n                VALUES (?, ?, ?, NOW(), NOW() + INTERVAL '10 minutes', 0)\n            ");
+            $insertCodeStmt->execute([$nextId, $user['email'], $code]);
+
+            $sent = Mailer::sendPasswordRecoveryCode(
+                $user['email'],
+                $user['nombre'] ?? 'Usuario',
+                $code
+            );
+
+            if (!$sent) {
+                throw new Exception("No se pudo enviar el código de verificación");
+            }
+
+            echo json_encode([
+                'success' => true,
+                'message' => 'Código de verificación enviado al correo'
+            ]);
+            break;
+
+        case 'change_password_with_code':
+            $currentPassword = $input['current_password'] ?? null;
+            $newPassword = $input['new_password'] ?? null;
+            $verificationCode = $input['verification_code'] ?? null;
+            $isSettingNew = isset($input['is_setting_new']) && (
+                $input['is_setting_new'] === true ||
+                $input['is_setting_new'] === 1 ||
+                $input['is_setting_new'] === '1' ||
+                $input['is_setting_new'] === 'true'
+            );
+
+            if (empty($newPassword)) {
+                throw new Exception("Nueva contraseña requerida");
+            }
+
+            if (empty($verificationCode)) {
+                throw new Exception("Código de verificación requerido");
+            }
+
+            $user = getUserById($db, intval($userId));
+            $verificationId = validatePasswordChangeCode($db, $user['email'], strval($verificationCode));
+
+            $authService->setPassword($userId, $newPassword);
+
+            $consumeCodeStmt = $db->prepare("UPDATE verification_codes SET used = 1 WHERE id = ?");
+            $consumeCodeStmt->execute([$verificationId]);
+
+            echo json_encode([
+                'success' => true,
+                'message' => 'Contraseña actualizada exitosamente'
+            ]);
+            break;
+
+        case 'verify_change_code':
+            $verificationCode = $input['verification_code'] ?? null;
+
+            if (empty($verificationCode)) {
+                throw new Exception("Código de verificación requerido");
+            }
+
+            $user = getUserById($db, intval($userId));
+            validatePasswordChangeCode($db, $user['email'], strval($verificationCode));
+
+            echo json_encode([
+                'success' => true,
+                'message' => 'Código validado'
             ]);
             break;
             

@@ -77,6 +77,35 @@ try {
             // Actually Splash separates: tripStatus['trip'] and tripStatus['conductor']
         }
 
+        // Add client info if user is conductor
+        if ($role === 'conductor' && !empty($trip['cliente_id'])) {
+            $stmtClient = $conn->prepare("SELECT id, nombre, apellido, telefono, foto_perfil, calificacion_promedio FROM usuarios WHERE id = ?");
+            $stmtClient->execute([$trip['cliente_id']]);
+            $cliente = $stmtClient->fetch(PDO::FETCH_ASSOC);
+
+            if ($cliente) {
+                $nombreCliente = trim(($cliente['nombre'] ?? '') . ' ' . ($cliente['apellido'] ?? ''));
+                if ($nombreCliente === '') {
+                    $nombreCliente = $cliente['nombre'] ?? null;
+                }
+
+                $clienteCalificacion = null;
+                if (isset($cliente['calificacion_promedio']) && $cliente['calificacion_promedio'] !== null) {
+                    $clienteCalificacion = (float)$cliente['calificacion_promedio'];
+                }
+
+                $formattedTrip['cliente'] = $cliente;
+                $formattedTrip['cliente_nombre'] = $nombreCliente;
+                $formattedTrip['cliente_foto'] = $cliente['foto_perfil'] ?? null;
+                $formattedTrip['cliente_calificacion'] = $clienteCalificacion;
+
+                // Alias para compatibilidad con consumidores existentes
+                $formattedTrip['calificacion_cliente'] = $clienteCalificacion;
+                $formattedTrip['rating_cliente'] = $clienteCalificacion;
+                $formattedTrip['cliente_rating'] = $clienteCalificacion;
+            }
+        }
+
         $response = [
             'success' => true,
             'has_active' => true,
@@ -86,6 +115,10 @@ try {
         if (isset($conductor)) {
              $response['conductor'] = $conductor;
         }
+
+           if (isset($cliente)) {
+               $response['cliente'] = $cliente;
+           }
 
         echo json_encode($response);
     } else {

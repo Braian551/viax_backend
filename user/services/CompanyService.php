@@ -320,7 +320,8 @@ class CompanyService {
         
         $tiposPorEmpresa = [];
         foreach ($results as $row) {
-            $tiposPorEmpresa[$row['empresa_id']][] = $row['tipo_vehiculo_codigo'];
+            $tipoNormalizado = $this->normalizeVehicleType($row['tipo_vehiculo_codigo']);
+            $tiposPorEmpresa[$row['empresa_id']][] = $tipoNormalizado;
         }
         return $tiposPorEmpresa;
     }
@@ -367,7 +368,9 @@ class CompanyService {
 
         $index = [];
         foreach ($results as $row) {
-            $key = $row['empresa_id'] . '_' . $row['tipo_vehiculo'];
+            $tipoNormalizado = $this->normalizeVehicleType($row['tipo_vehiculo']);
+            $key = $row['empresa_id'] . '_' . $tipoNormalizado;
+            $row['tipo_vehiculo'] = $tipoNormalizado;
             $index[$key] = $row;
         }
         return $index;
@@ -393,10 +396,12 @@ class CompanyService {
         $global = [];
         
         foreach ($rates as $rate) {
+            $tipoNormalizado = $this->normalizeVehicleType($rate['tipo_vehiculo']);
+            $rate['tipo_vehiculo'] = $tipoNormalizado;
             if ($rate['empresa_id']) {
-                $index[$rate['empresa_id'] . '_' . $rate['tipo_vehiculo']] = $rate;
+                $index[$rate['empresa_id'] . '_' . $tipoNormalizado] = $rate;
             } else {
-                $global[$rate['tipo_vehiculo']] = $rate;
+                $global[$tipoNormalizado] = $rate;
             }
         }
         
@@ -420,6 +425,7 @@ class CompanyService {
             $distanciaMinimaEmpresa = PHP_FLOAT_MAX;
 
             foreach ($tiposEmpresa as $tipoVehiculo) {
+                $tipoVehiculo = $this->normalizeVehicleType($tipoVehiculo);
                 // Key for lookup
                 $key = $empresaId . '_' . $tipoVehiculo;
                 
@@ -464,7 +470,6 @@ class CompanyService {
                     'costo_tiempo' => $precio['costo_tiempo'],
                     'recargo_precio' => $precio['recargo_precio'],
                     'periodo' => $precio['periodo'],
-                    'periodo' => $precio['periodo'],
                     'recargo_porcentaje' => $precio['recargo_porcentaje'],
                     'calificacion' => isset($empresa['calificacion_promedio']) ? floatval($empresa['calificacion_promedio']) : 0.0
                 ];
@@ -476,7 +481,7 @@ class CompanyService {
                 'nombre' => $empresa['nombre'],
                 'logo_url' => $this->convertLogoUrl($empresa['logo_url']),
                 'municipio' => $empresa['municipio'],
-                'tipos_vehiculo' => $tiposEmpresa,
+                'tipos_vehiculo' => array_values(array_map([$this, 'normalizeVehicleType'], $tiposEmpresa)),
                 'conductores_cercanos' => $totalConductoresEmpresa,
                 'distancia_promedio_km' => $distanciaMinimaEmpresa < PHP_FLOAT_MAX ? round($distanciaMinimaEmpresa, 2) : null
             ];
@@ -507,7 +512,7 @@ class CompanyService {
         
         // Sort vehicle types by catalog order
         $vehiculosDisponibles = array_values($vehiculosDisponibles);
-        $ordenVehiculos = ['moto' => 1, 'auto' => 2, 'motocarro' => 3, 'taxi' => 4];
+        $ordenVehiculos = ['moto' => 1, 'auto' => 2, 'mototaxi' => 3, 'taxi' => 4];
         usort($vehiculosDisponibles, function($a, $b) use ($ordenVehiculos) {
             return ($ordenVehiculos[$a['tipo']] ?? 99) <=> ($ordenVehiculos[$b['tipo']] ?? 99);
         });
@@ -570,13 +575,19 @@ class CompanyService {
     }
 
     private function getVehicleTypeName($tipo) {
+        $tipo = $this->normalizeVehicleType($tipo);
         $nombres = [
             'moto' => 'Moto',
             'auto' => 'Auto',
-            'motocarro' => 'Motocarro',
+            'mototaxi' => 'Mototaxi',
             'taxi' => 'Taxi'
         ];
         return $nombres[$tipo] ?? ucfirst($tipo);
+    }
+
+    private function normalizeVehicleType($tipo) {
+        $value = strtolower(trim((string)$tipo));
+        return $value;
     }
 }
 ?>

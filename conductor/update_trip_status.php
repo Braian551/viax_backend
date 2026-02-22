@@ -19,6 +19,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 require_once '../config/database.php';
 require_once '../config/concurrency_service.php';
+require_once '../utils/NotificationHelper.php';
 
 try {
     $input = json_decode(file_get_contents('php://input'), true);
@@ -247,6 +248,29 @@ try {
         $stmt->execute([$solicitud_id, $conductor_id]);
     }
     
+    try {
+        $clienteId = isset($solicitud['cliente_id']) ? (int)$solicitud['cliente_id'] : 0;
+
+        if ($clienteId > 0) {
+            if ($nuevo_estado === 'conductor_llego') {
+                NotificationHelper::conductorLlego($clienteId, (int)$solicitud_id, 'Tu conductor');
+            } elseif ($nuevo_estado === 'recogido' || $nuevo_estado === 'en_curso') {
+                NotificationHelper::conductorEsperando($clienteId, (int)$solicitud_id, 'Tu conductor');
+            } elseif ($nuevo_estado === 'completada') {
+                $valorFinal = $precio_final ?? (float)($solicitud['precio_estimado'] ?? 0);
+                NotificationHelper::viajeCompletado($clienteId, (int)$solicitud_id, (float)$valorFinal);
+            } elseif ($nuevo_estado === 'cancelada') {
+                NotificationHelper::viajeCancelado(
+                    $clienteId,
+                    (int)$solicitud_id,
+                    $motivo_cancelacion ? (string)$motivo_cancelacion : ''
+                );
+            }
+        }
+    } catch (Exception $notificationError) {
+        error_log('update_trip_status.php notification error: ' . $notificationError->getMessage());
+    }
+
     echo json_encode([
         'success' => true,
         'message' => 'Estado actualizado correctamente',

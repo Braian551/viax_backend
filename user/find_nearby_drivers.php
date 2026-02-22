@@ -42,7 +42,7 @@ try {
     $vehiculoTipoMap = [
         'moto' => 'moto',
         'auto' => 'auto',
-        'motocarro' => 'motocarro'
+        'mototaxi' => 'mototaxi'
     ];
     $vehiculoTipoBD = $vehiculoTipoMap[$tipoVehiculo] ?? 'moto';
     

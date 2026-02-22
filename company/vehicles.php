@@ -162,7 +162,7 @@ function handleToggleVehicle($db, $input, $empresaId) {
         }
         
         // Validar tipo de vehículo
-        $tiposValidos = ['moto', 'motocarro', 'taxi', 'carro'];
+        $tiposValidos = ['moto', 'mototaxi', 'taxi', 'carro'];
         if (!in_array($tipoVehiculo, $tiposValidos)) {
             sendJsonResponse(false, 'Tipo de vehículo inválido');
             return;
@@ -402,7 +402,7 @@ function notificarConductoresAfectados($db, $empresaId, $tipoVehiculo, $conducto
     // Nombre del tipo de vehículo
     $nombresTipo = [
         'moto' => 'Moto',
-        'motocarro' => 'Motocarro',
+        'mototaxi' => 'Mototaxi',
         'taxi' => 'Taxi',
         'carro' => 'Carro'
     ];

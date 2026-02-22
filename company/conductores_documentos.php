@@ -23,6 +23,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../utils/NotificationHelper.php';
 
 try {
     $database = new Database();
@@ -392,6 +393,14 @@ function handlePost($db) {
     if ($empresa_id <= 0 || $conductor_id <= 0) {
         throw new Exception('IDs inválidos');
     }
+
+    $stmtConductorInfo = $db->prepare("SELECT nombre, apellido FROM usuarios WHERE id = :id LIMIT 1");
+    $stmtConductorInfo->execute([':id' => $conductor_id]);
+    $conductorInfo = $stmtConductorInfo->fetch(PDO::FETCH_ASSOC) ?: [];
+    $conductorNombre = trim(($conductorInfo['nombre'] ?? '') . ' ' . ($conductorInfo['apellido'] ?? ''));
+    if ($conductorNombre === '') {
+        $conductorNombre = 'Conductor #' . $conductor_id;
+    }
     
     if (!in_array($accion, ['aprobar', 'rechazar', 'aprobar_solicitud', 'rechazar_solicitud', 'aprobar_documentos', 'rechazar_documentos', 'desactivar', 'desvincular'])) {
         throw new Exception('Acción inválida');
@@ -522,6 +531,31 @@ function handlePost($db) {
             }
 
             $db->commit();
+
+            try {
+                NotificationHelper::crear(
+                    $conductor_id,
+                    'driver_document_update',
+                    'Solicitud aprobada',
+                    'Tu solicitud de vinculación fue aprobada por la empresa.',
+                    'conductor_solicitud',
+                    intval($solicitudId),
+                    ['estado' => 'aprobada', 'conductor_id' => $conductor_id]
+                );
+            } catch (Throwable $notifyError) {
+                error_log('Error notificando conductor (aprobar_solicitud): ' . $notifyError->getMessage());
+            }
+
+            notifyCompanyUsers(
+                $db,
+                $empresa_id,
+                $procesado_por > 0 ? $procesado_por : null,
+                'Solicitud de vinculación aprobada',
+                $conductorNombre . ' fue aprobado para vincularse a la empresa.',
+                'conductor_solicitud',
+                intval($solicitudId),
+                ['accion' => 'aprobar_solicitud', 'conductor_id' => $conductor_id]
+            );
             
             echo json_encode([
                 'success' => true,
@@ -578,6 +612,31 @@ function handlePost($db) {
             } catch (Exception $mailError) {}
             
             $db->commit();
+
+            try {
+                NotificationHelper::crear(
+                    $conductor_id,
+                    'driver_document_update',
+                    'Solicitud rechazada',
+                    'Tu solicitud de vinculación fue rechazada. Revisa tu perfil para más detalles.',
+                    'conductor_solicitud',
+                    intval($solicitudId),
+                    ['estado' => 'rechazada', 'conductor_id' => $conductor_id]
+                );
+            } catch (Throwable $notifyError) {
+                error_log('Error notificando conductor (rechazar_solicitud): ' . $notifyError->getMessage());
+            }
+
+            notifyCompanyUsers(
+                $db,
+                $empresa_id,
+                $procesado_por > 0 ? $procesado_por : null,
+                'Solicitud de vinculación rechazada',
+                $conductorNombre . ' fue rechazado en el proceso de vinculación.',
+                'conductor_solicitud',
+                intval($solicitudId),
+                ['accion' => 'rechazar_solicitud', 'conductor_id' => $conductor_id]
+            );
             
             echo json_encode([
                 'success' => true,
@@ -677,6 +736,31 @@ function handlePost($db) {
             }
 
             $db->commit();
+
+            try {
+                NotificationHelper::crear(
+                    $conductor_id,
+                    'document_approved',
+                    'Documentos aprobados',
+                    'La empresa aprobó tus documentos.',
+                    'documento_conductor',
+                    $conductor_id,
+                    ['estado' => 'aprobado', 'conductor_id' => $conductor_id]
+                );
+            } catch (Throwable $notifyError) {
+                error_log('Error notificando conductor (aprobar_documentos): ' . $notifyError->getMessage());
+            }
+
+            notifyCompanyUsers(
+                $db,
+                $empresa_id,
+                $procesado_por > 0 ? $procesado_por : null,
+                'Documentos de conductor aprobados',
+                'Se aprobaron los documentos de ' . $conductorNombre . '.',
+                'documento_conductor',
+                $conductor_id,
+                ['accion' => 'aprobar_documentos', 'conductor_id' => $conductor_id]
+            );
             
             echo json_encode([
                 'success' => true,
@@ -761,6 +845,31 @@ function handlePost($db) {
             }
 
             $db->commit();
+
+            try {
+                NotificationHelper::crear(
+                    $conductor_id,
+                    'driver_document_update',
+                    'Documentos rechazados',
+                    'La empresa rechazó tus documentos. Revisa el motivo y vuelve a cargarlos.',
+                    'documento_conductor',
+                    $conductor_id,
+                    ['estado' => 'rechazado', 'conductor_id' => $conductor_id, 'motivo' => $razon]
+                );
+            } catch (Throwable $notifyError) {
+                error_log('Error notificando conductor (rechazar_documentos): ' . $notifyError->getMessage());
+            }
+
+            notifyCompanyUsers(
+                $db,
+                $empresa_id,
+                $procesado_por > 0 ? $procesado_por : null,
+                'Documentos de conductor rechazados',
+                'Se rechazaron documentos de ' . $conductorNombre . '.',
+                'documento_conductor',
+                $conductor_id,
+                ['accion' => 'rechazar_documentos', 'conductor_id' => $conductor_id]
+            );
             
             echo json_encode([
                 'success' => true,
@@ -788,11 +897,41 @@ function handlePost($db) {
                 if ($conductorData) {
                     $nombreCompleto = trim($conductorData['nombre'] . ' ' . $conductorData['apellido']);
                     require_once __DIR__ . '/../utils/Mailer.php';
-                    Mailer::sendCompanyStatusChangeEmail($conductorData['email'], $nombreCompleto, 'Desactivado');
+                    Mailer::sendEmail(
+                        $conductorData['email'],
+                        $nombreCompleto,
+                        'Estado de cuenta actualizado - Viax',
+                        'Tu cuenta fue desactivada por la empresa.'
+                    );
                 }
             } catch (Exception $mailError) {}
 
             $db->commit();
+
+            try {
+                NotificationHelper::crear(
+                    $conductor_id,
+                    'system',
+                    'Conductor desactivado',
+                    'Tu cuenta fue desactivada por la empresa.',
+                    'conductor',
+                    $conductor_id,
+                    ['estado' => 'desactivado', 'conductor_id' => $conductor_id]
+                );
+            } catch (Throwable $notifyError) {
+                error_log('Error notificando conductor (desactivar): ' . $notifyError->getMessage());
+            }
+
+            notifyCompanyUsers(
+                $db,
+                $empresa_id,
+                $procesado_por > 0 ? $procesado_por : null,
+                'Conductor desactivado',
+                $conductorNombre . ' fue desactivado en la empresa.',
+                'conductor',
+                $conductor_id,
+                ['accion' => 'desactivar', 'conductor_id' => $conductor_id]
+            );
             
             echo json_encode([
                 'success' => true,
@@ -821,11 +960,41 @@ function handlePost($db) {
                 if ($conductorData) {
                     $nombreCompleto = trim($conductorData['nombre'] . ' ' . $conductorData['apellido']);
                     require_once __DIR__ . '/../utils/Mailer.php';
-                    Mailer::sendCompanyStatusChangeEmail($conductorData['email'], $nombreCompleto, 'Desvinculado');
+                    Mailer::sendEmail(
+                        $conductorData['email'],
+                        $nombreCompleto,
+                        'Estado de cuenta actualizado - Viax',
+                        'Fuiste desvinculado de la empresa.'
+                    );
                 }
             } catch (Exception $mailError) {}
 
             $db->commit();
+
+            try {
+                NotificationHelper::crear(
+                    $conductor_id,
+                    'system',
+                    'Conductor desvinculado',
+                    'Fuiste desvinculado de la empresa.',
+                    'conductor',
+                    $conductor_id,
+                    ['estado' => 'desvinculado', 'conductor_id' => $conductor_id]
+                );
+            } catch (Throwable $notifyError) {
+                error_log('Error notificando conductor (desvincular): ' . $notifyError->getMessage());
+            }
+
+            notifyCompanyUsers(
+                $db,
+                $empresa_id,
+                $procesado_por > 0 ? $procesado_por : null,
+                'Conductor desvinculado',
+                $conductorNombre . ' fue desvinculado de la empresa.',
+                'conductor',
+                $conductor_id,
+                ['accion' => 'desvincular', 'conductor_id' => $conductor_id]
+            );
             
             echo json_encode([
                 'success' => true,
@@ -836,6 +1005,45 @@ function handlePost($db) {
     } catch (Exception $e) {
         $db->rollBack();
         throw $e;
+    }
+}
+
+function notifyCompanyUsers(
+    PDO $db,
+    int $empresaId,
+    ?int $excludeUserId,
+    string $title,
+    string $message,
+    string $referenceType,
+    ?int $referenceId = null,
+    array $data = []
+): void {
+    try {
+        $query = "SELECT id FROM usuarios WHERE empresa_id = :empresa_id AND tipo_usuario = 'empresa'";
+        $params = [':empresa_id' => $empresaId];
+
+        if ($excludeUserId !== null && $excludeUserId > 0) {
+            $query .= " AND id <> :exclude_user_id";
+            $params[':exclude_user_id'] = $excludeUserId;
+        }
+
+        $stmt = $db->prepare($query);
+        $stmt->execute($params);
+        $companyUsers = $stmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
+
+        foreach ($companyUsers as $userId) {
+            NotificationHelper::crear(
+                intval($userId),
+                'system',
+                $title,
+                $message,
+                $referenceType,
+                $referenceId,
+                $data
+            );
+        }
+    } catch (Throwable $e) {
+        error_log('Error enviando notificaciones de empresa: ' . $e->getMessage());
     }
 }
 ?>

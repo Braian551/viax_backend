@@ -37,6 +37,7 @@ try {
     $query = "
         SELECT 
             u.id, 
+            u.empresa_id,
             u.nombre, 
             u.apellido, 
             u.email, 

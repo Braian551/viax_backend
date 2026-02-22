@@ -14,6 +14,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../utils/NotificationHelper.php';
 
 try {
     // Crear conexión PDO
@@ -128,6 +129,16 @@ try {
             }
         } catch (Exception $mailError) {
             error_log("Error enviando email de aprobación a conductor $conductor_id: " . $mailError->getMessage());
+        }
+
+        try {
+            NotificationHelper::documentacionActualizada(
+                $conductor_id,
+                'aprobado',
+                'Tu perfil de conductor fue verificado por el equipo de Viax.'
+            );
+        } catch (Exception $notificationError) {
+            error_log("Error enviando notificación de aprobación a conductor $conductor_id: " . $notificationError->getMessage());
         }
 
         http_response_code(200);

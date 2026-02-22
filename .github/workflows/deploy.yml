@@ -1,0 +1,51 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${{ secrets.SSH_PORT }}" -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Sync backend files
+        run: |
+          rsync -az --delete \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='.env' \
+            --exclude='config/.env' \
+            --exclude='vendor/' \
+            --exclude='node_modules/' \
+            -e "ssh -p ${{ secrets.SSH_PORT }}" \
+            ./ "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/var/www/viax/backend/"
+
+      - name: Install dependencies and set permissions
+        run: |
+          ssh -p "${{ secrets.SSH_PORT }}" "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" "
+            cd /var/www/viax/backend && \
+            if command -v composer >/dev/null 2>&1; then composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction; fi && \
+            echo '${{ github.sha }}' > /var/www/viax/backend/.deploy_commit && \
+            chown -R www-data:www-data /var/www/viax/backend && \
+            find /var/www/viax/backend -type d -exec chmod 755 {} \\; && \
+            find /var/www/viax/backend -type f -exec chmod 644 {} \\;
+          "
+
+      - name: Health check
+        run: |
+          curl -fsS "http://${{ secrets.SSH_HOST }}/health.php" > /dev/null

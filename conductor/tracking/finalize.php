@@ -111,19 +111,45 @@ try {
     }
     
     // Obtener el último punto de tracking para valores más precisos
-    $stmt = $db->prepare("
-        SELECT 
-            distancia_acumulada_km,
-            tiempo_transcurrido_seg,
-            precio_parcial,
-            timestamp_gps
-        FROM viaje_tracking_realtime
-        WHERE solicitud_id = :solicitud_id
-        ORDER BY timestamp_gps DESC
-        LIMIT 1
-    ");
-    $stmt->execute([':solicitud_id' => $solicitud_id]);
-    $ultimo_tracking = $stmt->fetch(PDO::FETCH_ASSOC);
+        $ultimo_tracking = null;
+
+        $stmt = $db->prepare("
+            SELECT to_regclass('public.viaje_tracking_snapshot') AS table_name
+        ");
+        $stmt->execute();
+        $snapshot_info = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!empty($snapshot_info['table_name'])) {
+            $stmt = $db->prepare("
+                SELECT
+                    distancia_acumulada_km,
+                    tiempo_transcurrido_seg,
+                    precio_parcial,
+                    actualizado_en AS timestamp_gps
+                FROM viaje_tracking_snapshot
+                WHERE solicitud_id = :solicitud_id
+                LIMIT 1
+            ");
+            $stmt->execute([':solicitud_id' => $solicitud_id]);
+            $ultimo_tracking = $stmt->fetch(PDO::FETCH_ASSOC);
+        }
+
+        if (!$ultimo_tracking) {
+            $stmt = $db->prepare("
+                SELECT 
+                    distancia_acumulada_km,
+                    tiempo_transcurrido_seg,
+                    precio_parcial,
+                    timestamp_gps
+                FROM viaje_tracking_realtime
+                WHERE solicitud_id = :solicitud_id
+                ORDER BY timestamp_gps DESC
+                LIMIT 1
+            ");
+            $stmt->execute([':solicitud_id' => $solicitud_id]);
+            $ultimo_tracking = $stmt->fetch(PDO::FETCH_ASSOC);
+        }
+
     
     // Usar valores del tracking si existen, si no, usar los enviados por la app
     if ($ultimo_tracking) {

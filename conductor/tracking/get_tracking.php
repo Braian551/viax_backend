@@ -41,26 +41,50 @@ try {
     
     $database = new Database();
     $db = $database->getConnection();
-    
-    // Obtener el último punto de tracking (datos actuales)
-    $stmt = $db->prepare("
-        SELECT 
-            latitud,
-            longitud,
-            velocidad,
-            distancia_acumulada_km,
-            tiempo_transcurrido_seg,
-            precio_parcial,
-            fase_viaje,
-            timestamp_gps
-        FROM viaje_tracking_realtime
-        WHERE solicitud_id = :solicitud_id
-        ORDER BY timestamp_gps DESC
-        LIMIT 1
+    // Obtener el último punto: primero snapshot (O(1)), fallback a realtime.
+    $ultimo_punto = null;
+
+    $stmt = $db->prepare("\n        SELECT to_regclass('public.viaje_tracking_snapshot') AS table_name
     ");
-    $stmt->execute([':solicitud_id' => $solicitud_id]);
-    $ultimo_punto = $stmt->fetch(PDO::FETCH_ASSOC);
-    
+    $stmt->execute();
+    $snapshot_info = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!empty($snapshot_info['table_name'])) {
+        $stmt = $db->prepare("\n            SELECT
+                latitud,
+                longitud,
+                0::numeric AS velocidad,
+                distancia_acumulada_km,
+                tiempo_transcurrido_seg,
+                precio_parcial,
+                fase_viaje,
+                actualizado_en AS timestamp_gps
+            FROM viaje_tracking_snapshot
+            WHERE solicitud_id = :solicitud_id
+            LIMIT 1
+        ");
+        $stmt->execute([':solicitud_id' => $solicitud_id]);
+        $ultimo_punto = $stmt->fetch(PDO::FETCH_ASSOC);
+    }
+
+    if (!$ultimo_punto) {
+        $stmt = $db->prepare("\n            SELECT
+                latitud,
+                longitud,
+                velocidad,
+                distancia_acumulada_km,
+                tiempo_transcurrido_seg,
+                precio_parcial,
+                fase_viaje,
+                timestamp_gps
+            FROM viaje_tracking_realtime
+            WHERE solicitud_id = :solicitud_id
+            ORDER BY timestamp_gps DESC
+            LIMIT 1
+        ");
+        $stmt->execute([':solicitud_id' => $solicitud_id]);
+        $ultimo_punto = $stmt->fetch(PDO::FETCH_ASSOC);
+    }
     // Obtener resumen del tracking
     $stmt = $db->prepare("
         SELECT 

@@ -63,6 +63,8 @@ if ($path === '') {
     $endpoint = substr($path, 17); // Remove 'location_sharing/'
     $endpoint = preg_replace('/\.php$/', '', $endpoint);
     require_once __DIR__ . '/location_sharing/' . $endpoint . '.php';
+} elseif ($path === 'get_api_keys' || $path === 'get_api_keys.php' || $path === 'config/api_keys' || $path === 'config/api_keys.php') {
+    require_once __DIR__ . '/get_api_keys.php';
 } elseif (strpos($path, 'utils/') !== false) {
     // Robustly handle utils route regardless of prefix
     $parts = explode('/', $path);

@@ -59,6 +59,10 @@ if ($path === '') {
 } elseif (strpos($path, 'pricing/') === 0) {
     $endpoint = substr($path, 8); // Remove 'pricing/'
     require_once __DIR__ . '/pricing/' . $endpoint . '.php';
+} elseif (strpos($path, 'location_sharing/') === 0) {
+    $endpoint = substr($path, 17); // Remove 'location_sharing/'
+    $endpoint = preg_replace('/\.php$/', '', $endpoint);
+    require_once __DIR__ . '/location_sharing/' . $endpoint . '.php';
 } elseif (strpos($path, 'utils/') !== false) {
     // Robustly handle utils route regardless of prefix
     $parts = explode('/', $path);

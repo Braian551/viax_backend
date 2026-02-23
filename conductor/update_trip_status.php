@@ -246,6 +246,14 @@ try {
         
         $stmt = $db->prepare("UPDATE asignaciones_conductor SET estado = 'cancelado' WHERE solicitud_id = ? AND conductor_id = ?");
         $stmt->execute([$solicitud_id, $conductor_id]);
+
+        // Desactivar cualquier sesión activa de compartir ubicación asociada al viaje
+        try {
+            $stmt = $db->prepare("\n                UPDATE location_share_tokens\n                SET is_active = false\n                WHERE solicitud_id = ? AND is_active = true\n            ");
+            $stmt->execute([$solicitud_id]);
+        } catch (Exception $shareError) {
+            error_log('update_trip_status.php location_sharing cleanup error: ' . $shareError->getMessage());
+        }
     }
     
     try {

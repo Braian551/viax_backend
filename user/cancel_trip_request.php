@@ -78,6 +78,14 @@ try {
     if ($stmt->rowCount() === 0) {
         throw new Exception('No se pudo actualizar el estado de la solicitud');
     }
+
+    // Desactivar cualquier sesión activa de compartir ubicación asociada al viaje
+    try {
+        $stmt = $db->prepare("\n            UPDATE location_share_tokens\n            SET is_active = false\n            WHERE solicitud_id = ? AND is_active = true\n        ");
+        $stmt->execute([$solicitudId]);
+    } catch (Exception $shareError) {
+        error_log('cancel_trip_request.php location_sharing cleanup error: ' . $shareError->getMessage());
+    }
     
     echo json_encode([
         'success' => true,

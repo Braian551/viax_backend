@@ -38,6 +38,13 @@ try {
     
     // Tamaño de cada zona/cuadrante en km (por defecto 0.5km)
     $zoneSize = isset($data['zone_size_km']) ? floatval($data['zone_size_km']) : 0.5;
+
+    // Permitir zonas demo solo si se solicita explícitamente
+    $includeDemo = false;
+    if (isset($data['include_demo'])) {
+        $rawIncludeDemo = $data['include_demo'];
+        $includeDemo = $rawIncludeDemo === true || $rawIncludeDemo === 1 || $rawIncludeDemo === '1' || $rawIncludeDemo === 'true';
+    }
     
     $database = new Database();
     $db = $database->getConnection();
@@ -79,18 +86,26 @@ try {
     $latStep = $zoneSize / 111.0;
     $lngStep = $zoneSize / (111.0 * cos(deg2rad($centerLat)));
     
-    // Obtener solicitudes activas en el área
+    // Obtener señales de demanda en el área
+    // - pendiente: mayor peso
+    // - aceptado/en_camino/conductor_llego: peso medio
+    // - completado reciente: peso bajo (inercia de demanda)
     $requestsQuery = "
         SELECT 
             latitud_recogida,
             longitud_recogida,
             estado,
-            tipo_servicio
+            tipo_servicio,
+            CASE
+                WHEN estado = 'pendiente' THEN 3
+                WHEN estado IN ('aceptado', 'en_camino', 'conductor_llego') THEN 2
+                ELSE 1
+            END AS demand_weight
         FROM solicitudes_servicio
-        WHERE estado IN ('pendiente')
+        WHERE estado IN ('pendiente', 'aceptado', 'en_camino', 'conductor_llego', 'completado')
         AND latitud_recogida BETWEEN ? AND ?
         AND longitud_recogida BETWEEN ? AND ?
-        AND COALESCE(solicitado_en, fecha_creacion) >= NOW() - INTERVAL '30 minutes'
+        AND COALESCE(solicitado_en, fecha_creacion) >= NOW() - INTERVAL '90 minutes'
     ";
     
     $requestsStmt = $db->prepare($requestsQuery);
@@ -125,15 +140,21 @@ try {
             $zoneCenterLat = $lat + ($latStep / 2);
             $zoneCenterLng = $lng + ($lngStep / 2);
             
-            // Contar solicitudes en esta zona
-            $requestCount = 0;
+            // Acumular demanda ponderada en esta zona
+            $demandScore = 0.0;
+            $pendingCount = 0;
             foreach ($activeRequests as $request) {
                 $reqLat = floatval($request['latitud_recogida']);
                 $reqLng = floatval($request['longitud_recogida']);
                 
                 if ($reqLat >= $lat && $reqLat < ($lat + $latStep) &&
                     $reqLng >= $lng && $reqLng < ($lng + $lngStep)) {
-                    $requestCount++;
+                    $weight = isset($request['demand_weight']) ? floatval($request['demand_weight']) : 1.0;
+                    $demandScore += $weight;
+
+                    if (($request['estado'] ?? '') === 'pendiente') {
+                        $pendingCount++;
+                    }
                 }
             }
             
@@ -149,10 +170,12 @@ try {
                 }
             }
             
-            // Solo incluir zonas con al menos 1 solicitud
-            if ($requestCount > 0) {
+            // Solo incluir zonas con señal de demanda positiva
+            if ($demandScore > 0) {
+                $effectiveRequests = (int) ceil($demandScore);
+
                 // Calcular nivel de demanda y multiplicador
-                $demandData = calculateDemandLevel($requestCount, $driverCount);
+                $demandData = calculateDemandLevel($effectiveRequests, $driverCount);
                 
                 $zones[] = [
                     'id' => 'zone_' . ($zoneId++),
@@ -161,7 +184,9 @@ try {
                     'radius_km' => $zoneSize / 2,
                     'demand_level' => $demandData['level'],
                     'surge_multiplier' => $demandData['multiplier'],
-                    'active_requests' => $requestCount,
+                    'active_requests' => $effectiveRequests,
+                    'pending_requests' => $pendingCount,
+                    'demand_score' => round($demandScore, 2),
                     'available_drivers' => $driverCount,
                     'last_updated' => date('Y-m-d H:i:s'),
                 ];
@@ -177,9 +202,16 @@ try {
     // Limitar a las 20 zonas más calientes
     $zones = array_slice($zones, 0, 20);
     
-    // Agregar zonas simuladas si no hay datos reales (para demo)
-    if (empty($zones) && count($activeRequests) === 0) {
+    // Agregar zonas simuladas solo si se habilita explícitamente
+    if ($includeDemo && empty($zones) && count($activeRequests) === 0) {
         $zones = generateDemoZones($centerLat, $centerLng, $zoneSize);
+    }
+
+    $recommendedRefresh = 30;
+    if (count($zones) === 0) {
+        $recommendedRefresh = 18;
+    } else if (count($zones) >= 10) {
+        $recommendedRefresh = 20;
     }
     
     echo json_encode([
@@ -195,7 +227,8 @@ try {
         'search_radius_km' => $searchRadiusKm,
         'zone_size_km' => $zoneSize,
         'server_time' => date('Y-m-d H:i:s'),
-        'refresh_interval' => 30, // Segundos recomendados para refrescar
+        'refresh_interval' => $recommendedRefresh,
+        'include_demo' => $includeDemo,
     ]);
     
 } catch (Exception $e) {

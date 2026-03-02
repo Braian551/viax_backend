@@ -29,7 +29,7 @@ try {
         exit();
     }
 
-    $email = trim($data['email']);
+    $email = trim(strtolower($data['email']));
 
     // Validate email format
     if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
@@ -45,8 +45,8 @@ try {
     $database = new Database();
     $db = $database->getConnection();
 
-    // Check if user exists in usuarios table
-    $query = "SELECT id, tipo_usuario FROM usuarios WHERE email = :email LIMIT 1";
+    // Check if user exists in usuarios table (Case Insensitive)
+    $query = "SELECT id, tipo_usuario FROM usuarios WHERE LOWER(email) = LOWER(:email) LIMIT 1";
     $stmt = $db->prepare($query);
     $stmt->bindParam(':email', $email, PDO::PARAM_STR);
     $stmt->execute();

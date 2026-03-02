@@ -10,13 +10,13 @@ try {
 
     $deviceUuid = isset($input['device_uuid']) ? trim($input['device_uuid']) : null;
 
-    $email = $input['email'];
+    $email = trim(strtolower($input['email']));
     $password = $input['password'];
 
     $database = new Database();
     $db = $database->getConnection();
 
-    $query = "SELECT id, uuid, nombre, apellido, email, telefono, tipo_usuario, empresa_id, hash_contrasena FROM usuarios WHERE email = ? LIMIT 1";
+    $query = "SELECT id, uuid, nombre, apellido, email, telefono, tipo_usuario, empresa_id, hash_contrasena FROM usuarios WHERE LOWER(email) = ? LIMIT 1";
     $stmt = $db->prepare($query);
     $stmt->execute([$email]);
     $user = $stmt->fetch(PDO::FETCH_ASSOC);

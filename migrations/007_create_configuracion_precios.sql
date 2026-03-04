@@ -167,7 +167,7 @@ WHERE cp.activo = 1;
 -- =====================================================
 -- INSTRUCCIONES DE INSTALACIÓN
 -- =====================================================
--- 1. Ejecutar este script en la base de datos 'pingo'
+-- 1. Ejecutar este script en la base de datos 'viax'
 -- 2. Verificar que las tablas se crearon correctamente
 -- 3. Confirmar que hay 4 registros en configuracion_precios
 -- 4. Los administradores pueden modificar estos valores desde el panel admin

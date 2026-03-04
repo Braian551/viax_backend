@@ -12,6 +12,10 @@ class EmpresaRepository {
     public function __construct($db) {
         $this->db = $db;
     }
+
+    public function getDb() {
+        return $this->db;
+    }
     
     /**
      * Create a new empresa record

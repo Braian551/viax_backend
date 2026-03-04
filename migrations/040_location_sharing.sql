@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS location_shares (
     id SERIAL PRIMARY KEY,
     token VARCHAR(64) NOT NULL UNIQUE,
     user_id INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
-    solicitud_id INTEGER REFERENCES solicitudes(id) ON DELETE SET NULL,
+    solicitud_id INTEGER,
     latitude DOUBLE PRECISION,
     longitude DOUBLE PRECISION,
     heading DOUBLE PRECISION DEFAULT 0,

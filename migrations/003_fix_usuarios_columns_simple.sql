@@ -1,7 +1,7 @@
 -- Migración 003 Simplificada - Solo ALTER TABLE
 -- Fecha: 2025-10-23
 
-USE pingo;
+USE viax;
 
 -- Crear backup
 CREATE TABLE IF NOT EXISTS usuarios_backup_20251023 AS SELECT * FROM usuarios;

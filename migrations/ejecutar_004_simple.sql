@@ -1,7 +1,7 @@
 -- Ejecutar Migración 004 SIMPLIFICADA
 -- Ejecuta este archivo en MySQL Workbench o línea de comandos
 
-USE pingo;
+USE viax;
 
 -- Agregar columna fecha_creacion a solicitudes_servicio
 -- Ignorar si ya existe

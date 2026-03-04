@@ -65,7 +65,7 @@ COMMENT='Configuraciones globales de la aplicacion';
 
 -- Insertar configuraciones iniciales
 INSERT INTO `configuraciones_app` (`clave`, `valor`, `tipo`, `categoria`, `descripcion`, `es_publica`) VALUES
-('app_nombre', 'PinGo', 'string', 'sistema', 'Nombre de la aplicacion', 1),
+('app_nombre', 'VIAX', 'string', 'sistema', 'Nombre de la aplicacion', 1),
 ('app_version', '1.0.0', 'string', 'sistema', 'Version actual de la aplicacion', 1),
 ('mantenimiento_activo', 'false', 'boolean', 'sistema', 'Indica si la app esta en mantenimiento', 1),
 ('precio_base_km', '2500', 'number', 'precios', 'Precio base por kilometro en COP', 0),

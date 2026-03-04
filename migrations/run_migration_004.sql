@@ -1,7 +1,7 @@
 -- Ejecutar Migration 004: Fix fecha_creacion columns
 -- Ejecuta este archivo directamente en MySQL Workbench o línea de comandos
 
-USE pingo;
+USE viax;
 
 -- Para solicitudes_servicio
 ALTER TABLE `solicitudes_servicio` 

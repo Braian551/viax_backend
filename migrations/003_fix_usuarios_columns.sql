@@ -7,12 +7,12 @@
 --   creado_en -> fecha_registro
 --   actualizado_en -> fecha_actualizacion
 
-USE pingo;
+USE viax;
 
 -- Verificar la estructura actual
 SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT
 FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_SCHEMA = 'pingo' 
+WHERE TABLE_SCHEMA = 'viax' 
 AND TABLE_NAME = 'usuarios'
 AND COLUMN_NAME IN ('activo', 'verificado', 'es_activo', 'es_verificado', 
                     'url_imagen_perfil', 'foto_perfil', 
@@ -23,7 +23,7 @@ AND COLUMN_NAME IN ('activo', 'verificado', 'es_activo', 'es_verificado',
 SET @column_exists = (
     SELECT COUNT(*) 
     FROM INFORMATION_SCHEMA.COLUMNS 
-    WHERE TABLE_SCHEMA = 'pingo' 
+    WHERE TABLE_SCHEMA = 'viax' 
     AND TABLE_NAME = 'usuarios' 
     AND COLUMN_NAME = 'activo'
 );
@@ -41,7 +41,7 @@ DEALLOCATE PREPARE stmt_activo;
 SET @column_exists_verif = (
     SELECT COUNT(*) 
     FROM INFORMATION_SCHEMA.COLUMNS 
-    WHERE TABLE_SCHEMA = 'pingo' 
+    WHERE TABLE_SCHEMA = 'viax' 
     AND TABLE_NAME = 'usuarios' 
     AND COLUMN_NAME = 'verificado'
 );
@@ -59,7 +59,7 @@ DEALLOCATE PREPARE stmt_verificado;
 SET @column_exists_foto = (
     SELECT COUNT(*) 
     FROM INFORMATION_SCHEMA.COLUMNS 
-    WHERE TABLE_SCHEMA = 'pingo' 
+    WHERE TABLE_SCHEMA = 'viax' 
     AND TABLE_NAME = 'usuarios' 
     AND COLUMN_NAME = 'url_imagen_perfil'
 );
@@ -77,7 +77,7 @@ DEALLOCATE PREPARE stmt_foto;
 SET @column_exists_creado = (
     SELECT COUNT(*) 
     FROM INFORMATION_SCHEMA.COLUMNS 
-    WHERE TABLE_SCHEMA = 'pingo' 
+    WHERE TABLE_SCHEMA = 'viax' 
     AND TABLE_NAME = 'usuarios' 
     AND COLUMN_NAME = 'creado_en'
 );
@@ -95,7 +95,7 @@ DEALLOCATE PREPARE stmt_creado;
 SET @column_exists_actualizado = (
     SELECT COUNT(*) 
     FROM INFORMATION_SCHEMA.COLUMNS 
-    WHERE TABLE_SCHEMA = 'pingo' 
+    WHERE TABLE_SCHEMA = 'viax' 
     AND TABLE_NAME = 'usuarios' 
     AND COLUMN_NAME = 'actualizado_en'
 );
@@ -112,7 +112,7 @@ DEALLOCATE PREPARE stmt_actualizado;
 -- Verificar los cambios
 SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_COMMENT
 FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_SCHEMA = 'pingo' 
+WHERE TABLE_SCHEMA = 'viax' 
 AND TABLE_NAME = 'usuarios'
 AND COLUMN_NAME IN ('es_activo', 'es_verificado', 'foto_perfil', 'fecha_registro', 'fecha_actualizacion')
 ORDER BY COLUMN_NAME;
@@ -124,7 +124,7 @@ SELECT
         ELSE 'ADVERTENCIA: Aún existen columnas antiguas'
     END AS resultado
 FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_SCHEMA = 'pingo' 
+WHERE TABLE_SCHEMA = 'viax' 
 AND TABLE_NAME = 'usuarios'
 AND COLUMN_NAME IN ('activo', 'verificado', 'url_imagen_perfil', 'creado_en', 'actualizado_en');
 

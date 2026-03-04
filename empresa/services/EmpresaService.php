@@ -8,6 +8,7 @@
 require_once __DIR__ . '/../validators/EmpresaValidator.php';
 require_once __DIR__ . '/../repositories/EmpresaRepository.php';
 require_once __DIR__ . '/../../utils/Mailer.php';
+require_once __DIR__ . '/../../utils/NotificationHelper.php';
 
 class EmpresaService {
     
@@ -64,8 +65,9 @@ class EmpresaService {
             }
             
             // Create secondary user for representative if email is different
-            $representanteEmail = $input['representante_email'] ?? null;
-            if ($representanteEmail && strtolower(trim($representanteEmail)) !== strtolower(trim($email))) {
+            $representanteEmail = $this->normalizeEmail($input['representante_email'] ?? null);
+            $mainEmail = $this->normalizeEmail($email);
+            if ($representanteEmail !== null && $mainEmail !== null && $representanteEmail !== $mainEmail) {
                 // Check if this email already exists
                 $existingCheck = $this->repository->checkEmailExists($representanteEmail);
                 if (!$existingCheck) {
@@ -180,8 +182,9 @@ class EmpresaService {
         $this->sendEmailSequence($email, $input, $representante, $logoUrl, $emailType);
         
         // 2. Send to Personal Email (if provided and different)
-        $personalEmail = $input['representante_email'] ?? null;
-        if ($personalEmail && strtolower(trim($personalEmail)) !== strtolower(trim($email))) {
+        $personalEmail = $this->normalizeEmail($input['representante_email'] ?? null);
+        $mainEmail = $this->normalizeEmail($email);
+        if ($personalEmail !== null && $mainEmail !== null && $personalEmail !== $mainEmail) {
             if (filter_var($personalEmail, FILTER_VALIDATE_EMAIL)) {
                 $this->sendEmailSequence($personalEmail, $input, $representante, $logoUrl, $emailType);
             }
@@ -225,8 +228,9 @@ class EmpresaService {
         $this->sendEmailSequence($email, $simulatedInput, $representante, $logoUrl, 'approved');
 
         // 2. Personal Email (if different)
-        $personalEmail = $empresaData['representante_email'] ?? null;
-        if ($personalEmail && strtolower(trim($personalEmail)) !== strtolower(trim($email))) {
+        $personalEmail = $this->normalizeEmail($empresaData['representante_email'] ?? null);
+        $mainEmail = $this->normalizeEmail($email);
+        if ($personalEmail !== null && $mainEmail !== null && $personalEmail !== $mainEmail) {
             if (filter_var($personalEmail, FILTER_VALIDATE_EMAIL)) {
                 $this->sendEmailSequence($personalEmail, $simulatedInput, $representante, $logoUrl, 'approved');
             }
@@ -271,8 +275,112 @@ class EmpresaService {
      * Notify admins about new empresa registration
      */
     private function notifyAdmins($empresaId, $nombreEmpresa, $email, $representante) {
-        // Implementation would go here - keeping it simple for now
-        error_log("New empresa registered: $nombreEmpresa (ID: $empresaId)");
+        try {
+            $query = "
+                SELECT id
+                FROM usuarios
+                WHERE tipo_usuario IN ('admin', 'administrador')
+                AND COALESCE(es_activo::text, 'true') IN ('1', 't', 'true')
+            ";
+            $stmt = $this->repository->getDb()->prepare($query);
+            $stmt->execute();
+            $admins = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            foreach ($admins as $admin) {
+                $adminId = intval($admin['id'] ?? 0);
+                if ($adminId <= 0) {
+                    continue;
+                }
+
+                NotificationHelper::crear(
+                    $adminId,
+                    'admin_company_registration_pending',
+                    'Nueva empresa pendiente de revisión',
+                    "{$nombreEmpresa} registró su cuenta y está pendiente de validación.",
+                    'empresa',
+                    $empresaId,
+                    [
+                        'empresa_id' => $empresaId,
+                        'empresa_nombre' => $nombreEmpresa,
+                        'empresa_email' => $email,
+                        'representante_nombre' => $representante,
+                    ]
+                );
+            }
+        } catch (Exception $e) {
+            error_log('Error notificando admins por registro empresa: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Notifica a admins cuando empresa actualiza datos sensibles de validación/pago
+     */
+    public function notifyAdminsOnCompanySettingsUpdate(int $empresaId, array $changes): void {
+        try {
+            if (empty($changes)) {
+                return;
+            }
+
+            $empresaStmt = $this->repository->getDb()->prepare(
+                "SELECT nombre, email FROM empresas_transporte WHERE id = ? LIMIT 1"
+            );
+            $empresaStmt->execute([$empresaId]);
+            $empresa = $empresaStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+            $empresaNombre = $empresa['nombre'] ?? 'Empresa';
+
+            $adminStmt = $this->repository->getDb()->prepare(
+                "SELECT id FROM usuarios WHERE tipo_usuario IN ('admin', 'administrador') AND COALESCE(es_activo::text, 'true') IN ('1', 't', 'true')"
+            );
+            $adminStmt->execute();
+            $admins = $adminStmt->fetchAll(PDO::FETCH_ASSOC);
+
+            $documentKeys = ['documento_titular'];
+            $paymentKeys = ['banco_codigo', 'banco_nombre', 'tipo_cuenta', 'numero_cuenta', 'titular_cuenta', 'referencia_transferencia'];
+
+            $hasDocumentChange = count(array_intersect(array_keys($changes), $documentKeys)) > 0;
+            $hasPaymentChange = count(array_intersect(array_keys($changes), $paymentKeys)) > 0;
+
+            foreach ($admins as $admin) {
+                $adminId = intval($admin['id'] ?? 0);
+                if ($adminId <= 0) {
+                    continue;
+                }
+
+                if ($hasDocumentChange) {
+                    NotificationHelper::crear(
+                        $adminId,
+                        'admin_company_documents_submitted',
+                        'Empresa actualizó documentación',
+                        "{$empresaNombre} envió/actualizó documentación para validación administrativa.",
+                        'empresa',
+                        $empresaId,
+                        [
+                            'empresa_id' => $empresaId,
+                            'empresa_nombre' => $empresaNombre,
+                            'changed_fields' => array_values(array_intersect(array_keys($changes), $documentKeys)),
+                        ]
+                    );
+                }
+
+                if ($hasPaymentChange) {
+                    NotificationHelper::crear(
+                        $adminId,
+                        'admin_company_payment_info_updated',
+                        'Empresa actualizó datos de pago',
+                        "{$empresaNombre} actualizó información bancaria/de transferencia.",
+                        'empresa',
+                        $empresaId,
+                        [
+                            'empresa_id' => $empresaId,
+                            'empresa_nombre' => $empresaNombre,
+                            'changed_fields' => array_values(array_intersect(array_keys($changes), $paymentKeys)),
+                        ]
+                    );
+                }
+            }
+        } catch (Exception $e) {
+            error_log('Error notificando admins por cambios de empresa: ' . $e->getMessage());
+        }
     }
     
     // --- Helper Methods ---
@@ -293,6 +401,15 @@ class EmpresaService {
             'apellido' => trim($apellido),
             'nombre_completo' => trim("$nombre $apellido")
         ];
+    }
+
+    private function normalizeEmail($value) {
+        if (!is_string($value)) {
+            return null;
+        }
+
+        $normalized = strtolower(trim($value));
+        return $normalized === '' ? null : $normalized;
     }
     
     private function processVehicleTypes($types) {
@@ -471,6 +588,19 @@ class EmpresaService {
     public function updateCompanySettings($empresaId, $data) {
         $success = $this->repository->updateCompanySettings($empresaId, $data);
         if ($success) {
+            $trackedKeys = [
+                'documento_titular',
+                'banco_codigo',
+                'banco_nombre',
+                'tipo_cuenta',
+                'numero_cuenta',
+                'titular_cuenta',
+                'referencia_transferencia',
+            ];
+            $changes = array_intersect_key($data, array_flip($trackedKeys));
+            if (!empty($changes)) {
+                $this->notifyAdminsOnCompanySettingsUpdate((int)$empresaId, $changes);
+            }
             return $this->getCompanySettings($empresaId);
         }
         throw new Exception("No se pudo actualizar la configuración");

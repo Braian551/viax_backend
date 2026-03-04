@@ -6,10 +6,41 @@
 
 require_once __DIR__ . '/../config/database.php';
 
+function isMySqlOnlyMigration(string $filename, string $sql): bool {
+    $legacyFileNames = [
+        'run_migration_003.sql',
+        'run_migration_004.sql',
+        'ejecutar_004_simple.sql',
+    ];
+
+    if (in_array($filename, $legacyFileNames, true)) {
+        return true;
+    }
+
+    $patterns = [
+        '/\bUSE\s+[\w`]+/i',
+        '/\bSOURCE\b/i',
+        '/\bDESCRIBE\b/i',
+        '/\bSHOW\s+COLUMNS\b/i',
+        '/\bON\s+DUPLICATE\s+KEY\b/i',
+        '/\bENGINE\s*=\s*InnoDB\b/i',
+        '/`[A-Za-z0-9_]+`/',
+    ];
+
+    foreach ($patterns as $pattern) {
+        if (preg_match($pattern, $sql)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 function runMigrations() {
     try {
         $database = new Database();
         $db = $database->getConnection();
+        $driver = $db->getAttribute(PDO::ATTR_DRIVER_NAME);
         
         echo "=== Ejecutando Migraciones de Base de Datos ===\n\n";
         
@@ -21,28 +52,36 @@ function runMigrations() {
             $filename = basename($file);
             echo "Ejecutando: $filename\n";
             
-            $sql = file_get_contents($file);
-            
-            // Dividir por ; pero ignorar ; dentro de bloques de comentarios
-            $statements = explode(';', $sql);
-            
-            $executedStatements = 0;
-            foreach ($statements as $statement) {
-                $statement = trim($statement);
-                if (empty($statement)) continue;
-                
-                try {
-                    $db->exec($statement);
-                    $executedStatements++;
-                } catch (PDOException $e) {
-                    // Ignorar errores de "tabla ya existe"
-                    if (strpos($e->getMessage(), 'already exists') === false) {
-                        echo "  ⚠ Advertencia: " . $e->getMessage() . "\n";
-                    }
-                }
+            $sql = trim((string) file_get_contents($file));
+            if ($sql === '') {
+                echo "  ⏭ Omitido (archivo vacío)\n\n";
+                continue;
             }
-            
-            echo "  ✓ Completado ($executedStatements statements ejecutados)\n\n";
+
+            if ($driver === 'pgsql' && isMySqlOnlyMigration($filename, $sql)) {
+                echo "  ⏭ Omitido (script legado MySQL no compatible con PostgreSQL)\n\n";
+                continue;
+            }
+
+            try {
+                if (!$db->inTransaction()) {
+                    $db->beginTransaction();
+                }
+
+                $db->exec($sql);
+
+                if ($db->inTransaction()) {
+                    $db->commit();
+                }
+
+                echo "  ✓ Completado (archivo ejecutado)\n\n";
+            } catch (PDOException $e) {
+                if ($db->inTransaction()) {
+                    $db->rollBack();
+                }
+                echo "  ⚠ Advertencia: " . $e->getMessage() . "\n";
+                echo "  ✓ Completado (con advertencias)\n\n";
+            }
         }
         
         echo "=== Migraciones completadas exitosamente ===\n";

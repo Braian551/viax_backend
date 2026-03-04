@@ -2,7 +2,7 @@
 -- Fecha: 2025-12-26
 -- Descripción: Modifica la columna tipo_usuario para incluir 'empresa'
 
-USE pingo;
+USE viax;
 
 -- Modificar la columna tipo_usuario para agregar 'empresa' al ENUM
 ALTER TABLE usuarios 

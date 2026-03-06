@@ -19,6 +19,7 @@ ini_set('display_errors', 0); // Disable display_errors to return clean JSON
 ini_set('log_errors', 1);
 
 require_once '../config/config.php';
+require_once '../services/EmailService.php';
 
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
@@ -526,34 +527,14 @@ function enviarEmailDesactivacionVehiculo($email, $nombreConductor, $nombreEmpre
                    "Si tienes dudas, contacta a tu empresa.\n\n" .
                    "Saludos,\nEl equipo de Viax";
         
-        // Usar PHPMailer
-        $vendorPath = __DIR__ . '/../vendor/autoload.php';
-        if (!file_exists($vendorPath)) {
-            error_log("Vendor autoload no encontrado");
-            return false;
-        }
-        require_once $vendorPath;
-        
-        $mail = new \PHPMailer\PHPMailer\PHPMailer(true);
-        
-        $mail->isSMTP();
-        $mail->Host = 'smtp.gmail.com';
-        $mail->SMTPAuth = true;
-        $mail->Username = 'viaxoficialcol@gmail.com';
-        $mail->Password = 'filz vqel gadn kugb';
-        $mail->SMTPSecure = \PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_STARTTLS;
-        $mail->Port = 587;
-        $mail->CharSet = 'UTF-8';
-        
-        $mail->setFrom('viaxoficialcol@gmail.com', 'Viax');
-        $mail->addAddress($email, $nombreConductor);
-        
-        $mail->isHTML(true);
-        $mail->Subject = $subject;
-        $mail->Body = $bodyContent;
-        $mail->AltBody = $altBody;
-        
-        return $mail->send();
+        $emailService = new EmailService();
+        return $emailService->sendCustomEmail(
+            $email,
+            $nombreConductor,
+            $subject,
+            $bodyContent,
+            $altBody
+        );
         
     } catch (Exception $e) {
         error_log("Error enviando email desactivación vehículo: " . $e->getMessage());

@@ -1,6 +1,7 @@
 <?php
 // Incluir configuración
 require_once '../config/config.php';
+require_once '../services/EmailService.php';
 
 try {
     // Obtener datos del request
@@ -144,17 +145,12 @@ try {
     $stmt->execute([$userId]);
     $location = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    // Enviar correo de bienvenida (solo si es cliente o si se desea para todos)
-    // Como la función es sendClientWelcomeEmail, la usamos aquí.
+    // Enviar correo de bienvenida de manera centralizada y segura
     if (!empty($email) && !empty($name)) {
         try {
-            require_once '../utils/Mailer.php';
-            // Ejecutar en "segundo plano" idealmente, pero aquí lo haremos directo
-            // Opcional: Verificar si Mailer existe para evitar error fatal si falta el archivo
-            if (class_exists('Mailer')) {
-                 Mailer::sendClientWelcomeEmail($email, $name);
-            }
-        } catch (Exception $e) {
+            $emailService = new EmailService($db);
+            $emailService->sendWelcomeEmail($email);
+        } catch (Throwable $e) {
             // No interrumpir el registro si falla el correo
             error_log("Error enviando email de bienvenida: " . $e->getMessage());
         }
@@ -166,8 +162,8 @@ try {
         'device_registered' => !empty($input['device_uuid'])
     ]);
 
-} catch (Exception $e) {
+} catch (Throwable $e) {
     http_response_code(500);
-    sendJsonResponse(false, 'Error: ' . $e->getMessage());
+    sendJsonResponse(false, 'No se pudo completar el registro en este momento.', [], 500, 'REGISTER_FAILED');
 }
 ?>

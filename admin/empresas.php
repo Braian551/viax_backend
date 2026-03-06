@@ -45,6 +45,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once '../config/config.php';
+require_once '../services/EmailService.php';
 
 try {
     $database = new Database();
@@ -855,36 +856,8 @@ function approveEmpresa($db, $input) {
  */
 function sendApprovalEmail($email, $nombreEmpresa, $representante) {
     try {
-        $vendorPath = __DIR__ . '/../vendor/autoload.php';
-        if (!file_exists($vendorPath)) {
-            error_log("Vendor autoload no encontrado para enviar email de aprobación");
-            return;
-        }
-        require_once $vendorPath;
-        
-        if (!class_exists('PHPMailer\PHPMailer\PHPMailer')) {
-            error_log("PHPMailer no disponible");
-            return;
-        }
-        
-        $mail = new \PHPMailer\PHPMailer\PHPMailer(true);
-        
-        $mail->isSMTP();
-        $mail->Host = 'smtp.gmail.com';
-        $mail->SMTPAuth = true;
-        $mail->Username = 'viaxoficialcol@gmail.com';
-        $mail->Password = 'filz vqel gadn kugb';
-        $mail->SMTPSecure = \PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_STARTTLS;
-        $mail->Port = 587;
-        $mail->CharSet = 'UTF-8';
-        
-        $mail->setFrom('viaxoficialcol@gmail.com', 'Viax');
-        $mail->addAddress($email, $representante);
-        
-        $mail->isHTML(true);
-        $mail->Subject = "✅ ¡Tu empresa ha sido aprobada! - {$nombreEmpresa}";
-        
-        $mail->Body = "
+        $subject = "✅ ¡Tu empresa ha sido aprobada! - {$nombreEmpresa}";
+        $body = "
         <div style='font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;'>
             <div style='background: linear-gradient(135deg, #4CAF50 0%, #388E3C 100%); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;'>
                 <h1 style='color: white; margin: 0;'>✅ ¡Felicidades!</h1>
@@ -905,15 +878,16 @@ function sendApprovalEmail($email, $nombreEmpresa, $representante) {
                 </ul>
                 <hr style='border: none; border-top: 1px solid #ddd; margin: 20px 0;'>
                 <p style='color: #666; font-size: 12px; text-align: center;'>
-                    ¿Tienes preguntas? Contáctanos a viaxoficialcol@gmail.com<br>
+                    ¿Tienes preguntas? Contáctanos a soporte@viax.com.co<br>
                     © 2026 Viax - Todos los derechos reservados
                 </p>
             </div>
         </div>";
-        
-        $mail->AltBody = "Hola {$representante},\n\n¡Felicidades! Tu empresa {$nombreEmpresa} ha sido aprobada en Viax.\n\nYa puedes iniciar sesión y comenzar a gestionar tu flota.\n\nSaludos,\nEquipo Viax";
-        
-        $mail->send();
+
+        $altBody = "Hola {$representante},\n\n¡Felicidades! Tu empresa {$nombreEmpresa} ha sido aprobada en Viax.\n\nYa puedes iniciar sesión y comenzar a gestionar tu flota.\n\nSaludos,\nEquipo Viax";
+
+        $emailService = new EmailService();
+        $emailService->sendCustomEmail($email, $representante, $subject, $body, $altBody);
         error_log("Email de aprobación enviado a: {$email}");
         
     } catch (\Exception $e) {
@@ -926,34 +900,8 @@ function sendApprovalEmail($email, $nombreEmpresa, $representante) {
  */
 function sendRejectionEmail($email, $nombreEmpresa, $representante, $motivo) {
     try {
-        $vendorPath = __DIR__ . '/../vendor/autoload.php';
-        if (!file_exists($vendorPath)) {
-            return;
-        }
-        require_once $vendorPath;
-        
-        if (!class_exists('PHPMailer\PHPMailer\PHPMailer')) {
-            return;
-        }
-        
-        $mail = new \PHPMailer\PHPMailer\PHPMailer(true);
-        
-        $mail->isSMTP();
-        $mail->Host = 'smtp.gmail.com';
-        $mail->SMTPAuth = true;
-        $mail->Username = 'viaxoficialcol@gmail.com';
-        $mail->Password = 'filz vqel gadn kugb';
-        $mail->SMTPSecure = \PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_STARTTLS;
-        $mail->Port = 587;
-        $mail->CharSet = 'UTF-8';
-        
-        $mail->setFrom('viaxoficialcol@gmail.com', 'Viax');
-        $mail->addAddress($email, $representante);
-        
-        $mail->isHTML(true);
-        $mail->Subject = "Información sobre tu solicitud - {$nombreEmpresa}";
-        
-        $mail->Body = "
+        $subject = "Información sobre tu solicitud - {$nombreEmpresa}";
+        $body = "
         <div style='font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;'>
             <div style='background: linear-gradient(135deg, #757575 0%, #616161 100%); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;'>
                 <h1 style='color: white; margin: 0;'>Actualización de tu Solicitud</h1>
@@ -969,15 +917,16 @@ function sendRejectionEmail($email, $nombreEmpresa, $representante, $motivo) {
                 <p>También puedes intentar registrarte nuevamente corrigiendo los aspectos mencionados.</p>
                 <hr style='border: none; border-top: 1px solid #ddd; margin: 20px 0;'>
                 <p style='color: #666; font-size: 12px; text-align: center;'>
-                    Contáctanos a viaxoficialcol@gmail.com<br>
+                    Contáctanos a soporte@viax.com.co<br>
                     © 2026 Viax - Todos los derechos reservados
                 </p>
             </div>
         </div>";
-        
-        $mail->AltBody = "Hola {$representante},\n\nLamentamos informarte que tu solicitud para {$nombreEmpresa} no ha sido aprobada.\n\nMotivo: {$motivo}\n\nPuedes contactarnos para más información.\n\nSaludos,\nEquipo Viax";
-        
-        $mail->send();
+
+        $altBody = "Hola {$representante},\n\nLamentamos informarte que tu solicitud para {$nombreEmpresa} no ha sido aprobada.\n\nMotivo: {$motivo}\n\nPuedes contactarnos para más información.\n\nSaludos,\nEquipo Viax";
+
+        $emailService = new EmailService();
+        $emailService->sendCustomEmail($email, $representante, $subject, $body, $altBody);
         error_log("Email de rechazo enviado a: {$email}");
         
     } catch (\Exception $e) {

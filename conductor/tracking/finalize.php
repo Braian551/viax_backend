@@ -64,6 +64,128 @@ function esFestivoColombia($fecha = null) {
     return $diaSemana === 0; // 0 = Domingo
 }
 
+function normalizarTipoVehiculoTracking($tipoVehiculo) {
+    $normalized = strtolower(trim((string)$tipoVehiculo));
+    $aliases = [
+        'mototaxi' => 'moto',
+        'motocarro' => 'moto',
+        'moto_carga' => 'moto',
+        'motorcycle' => 'moto',
+        'auto' => 'carro',
+        'automovil' => 'carro',
+        'car' => 'carro',
+    ];
+
+    if (isset($aliases[$normalized])) {
+        return $aliases[$normalized];
+    }
+
+    return $normalized !== '' ? $normalized : 'moto';
+}
+
+function configPreciosFallbackFinalize() {
+    return [
+        'id' => null,
+        'tarifa_base' => 0,
+        'costo_por_km' => 0,
+        'costo_por_minuto' => 0,
+        'tarifa_minima' => 0,
+        'tarifa_maxima' => null,
+        'comision_plataforma' => 0,
+        'recargo_hora_pico' => 0,
+        'hora_pico_inicio_manana' => '07:00:00',
+        'hora_pico_fin_manana' => '09:00:00',
+        'hora_pico_inicio_tarde' => '17:00:00',
+        'hora_pico_fin_tarde' => '19:00:00',
+        'recargo_nocturno' => 0,
+        'hora_nocturna_inicio' => '22:00:00',
+        'hora_nocturna_fin' => '06:00:00',
+        'recargo_festivo' => 0,
+        'umbral_km_descuento' => 15,
+        'descuento_distancia_larga' => 0,
+        'tiempo_espera_gratis' => 3,
+        'costo_tiempo_espera' => 0,
+        '__fallback' => true,
+    ];
+}
+
+function obtenerConfigPreciosTrackingFinalize(PDO $db, $empresaId, $tipoVehiculoRaw) {
+    $tipoNormalizado = normalizarTipoVehiculoTracking($tipoVehiculoRaw);
+    $tiposCandidatos = array_values(array_unique([$tipoNormalizado, 'moto']));
+
+    foreach ($tiposCandidatos as $tipo) {
+        if ($empresaId) {
+            $stmt = $db->prepare(" 
+                SELECT 
+                    id,
+                    tarifa_base,
+                    costo_por_km,
+                    costo_por_minuto,
+                    tarifa_minima,
+                    tarifa_maxima,
+                    comision_plataforma,
+                    recargo_hora_pico,
+                    hora_pico_inicio_manana,
+                    hora_pico_fin_manana,
+                    hora_pico_inicio_tarde,
+                    hora_pico_fin_tarde,
+                    recargo_nocturno,
+                    hora_nocturna_inicio,
+                    hora_nocturna_fin,
+                    recargo_festivo,
+                    umbral_km_descuento,
+                    descuento_distancia_larga,
+                    tiempo_espera_gratis,
+                    costo_tiempo_espera
+                FROM configuracion_precios 
+                WHERE empresa_id = :empresa_id AND tipo_vehiculo = :tipo AND activo = 1
+                LIMIT 1
+            ");
+            $stmt->execute([':empresa_id' => $empresaId, ':tipo' => $tipo]);
+            $config = $stmt->fetch(PDO::FETCH_ASSOC);
+            if ($config) {
+                $config['__fallback'] = false;
+                return $config;
+            }
+        }
+
+        $stmt = $db->prepare(" 
+            SELECT 
+                id,
+                tarifa_base,
+                costo_por_km,
+                costo_por_minuto,
+                tarifa_minima,
+                tarifa_maxima,
+                comision_plataforma,
+                recargo_hora_pico,
+                hora_pico_inicio_manana,
+                hora_pico_fin_manana,
+                hora_pico_inicio_tarde,
+                hora_pico_fin_tarde,
+                recargo_nocturno,
+                hora_nocturna_inicio,
+                hora_nocturna_fin,
+                recargo_festivo,
+                umbral_km_descuento,
+                descuento_distancia_larga,
+                tiempo_espera_gratis,
+                costo_tiempo_espera
+            FROM configuracion_precios 
+            WHERE empresa_id IS NULL AND tipo_vehiculo = :tipo AND activo = 1
+            LIMIT 1
+        ");
+        $stmt->execute([':tipo' => $tipo]);
+        $config = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($config) {
+            $config['__fallback'] = false;
+            return $config;
+        }
+    }
+
+    return configPreciosFallbackFinalize();
+}
+
 try {
     $input = json_decode(file_get_contents('php://input'), true);
     
@@ -180,75 +302,17 @@ try {
         }
     }
     
-    // Primero buscar tarifa de la empresa
-    if ($empresa_id) {
-        $stmt = $db->prepare("
-            SELECT 
-                id,
-                tarifa_base,
-                costo_por_km,
-                costo_por_minuto,
-                tarifa_minima,
-                tarifa_maxima,
-                comision_plataforma,
-                recargo_hora_pico,
-                hora_pico_inicio_manana,
-                hora_pico_fin_manana,
-                hora_pico_inicio_tarde,
-                hora_pico_fin_tarde,
-                recargo_nocturno,
-                hora_nocturna_inicio,
-                hora_nocturna_fin,
-                recargo_festivo,
-                umbral_km_descuento,
-                descuento_distancia_larga,
-                tiempo_espera_gratis,
-                costo_tiempo_espera
-            FROM configuracion_precios 
-            WHERE empresa_id = :empresa_id AND tipo_vehiculo = :tipo AND activo = 1
-            LIMIT 1
-        ");
-        $stmt->execute([':empresa_id' => $empresa_id, ':tipo' => $viaje['tipo_vehiculo'] ?? 'moto']);
-        $config = $stmt->fetch(PDO::FETCH_ASSOC);
+    $config = obtenerConfigPreciosTrackingFinalize(
+        $db,
+        $empresa_id,
+        $viaje['tipo_vehiculo'] ?? 'moto'
+    );
+
+    if (!empty($config['__fallback'])) {
+        error_log('[tracking_finalize] Sin configuración de precios para solicitud ' . $solicitud_id . ', tipo=' . ($viaje['tipo_vehiculo'] ?? 'N/A') . '. Se aplicó fallback seguro.');
     }
     
-    // Si no hay tarifa de empresa, usar tarifa global
-    if (!$config) {
-        $stmt = $db->prepare("
-            SELECT 
-                id,
-                tarifa_base,
-                costo_por_km,
-                costo_por_minuto,
-                tarifa_minima,
-                tarifa_maxima,
-                comision_plataforma,
-                recargo_hora_pico,
-                hora_pico_inicio_manana,
-                hora_pico_fin_manana,
-                hora_pico_inicio_tarde,
-                hora_pico_fin_tarde,
-                recargo_nocturno,
-                hora_nocturna_inicio,
-                hora_nocturna_fin,
-                recargo_festivo,
-                umbral_km_descuento,
-                descuento_distancia_larga,
-                tiempo_espera_gratis,
-                costo_tiempo_espera
-            FROM configuracion_precios 
-            WHERE empresa_id IS NULL AND tipo_vehiculo = :tipo AND activo = 1
-            LIMIT 1
-        ");
-        $stmt->execute([':tipo' => $viaje['tipo_vehiculo'] ?? 'moto']);
-        $config = $stmt->fetch(PDO::FETCH_ASSOC);
-    }
-    
-    if (!$config) {
-        throw new Exception('No hay configuración de precios para este tipo de vehículo');
-    }
-    
-    $config_precios_id = intval($config['id']);
+    $config_precios_id = isset($config['id']) ? intval($config['id']) : null;
     
     // =====================================================
     // CALCULAR PRECIO FINAL CON TODOS LOS COMPONENTES

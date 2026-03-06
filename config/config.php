@@ -1,9 +1,11 @@
 <?php
 // backend/config/config.php
 
+require_once __DIR__ . '/bootstrap.php';
+
 // Habilitar reporte de errores
 error_reporting(E_ALL);
-ini_set('display_errors', 1);
+ini_set('display_errors', env_value('APP_ENV', 'production') === 'production' ? '0' : '1');
 
 // Headers para CORS
 header('Content-Type: application/json');

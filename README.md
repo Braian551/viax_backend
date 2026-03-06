@@ -45,6 +45,35 @@ git pull origin main
 tail -f /var/log/nginx/error.log
 ```
 
+## ✉️ Configuración de Correo (SMTP seguro)
+
+El envío de correos ahora usa un servicio centralizado en `services/EmailService.php`.
+
+### Variables de entorno requeridas
+
+Crear archivo `.env` en la raíz de `backend/` (puedes basarte en `.env.example`):
+
+```env
+APP_ENV=production
+MAIL_PROVIDER=smtp
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=tu_correo_sistema@gmail.com
+SMTP_PASS=tu_app_password_de_gmail
+SMTP_FROM_EMAIL=tu_correo_sistema@gmail.com
+SMTP_FROM_NAME=Viax
+RATE_LIMIT_IP_PER_HOUR=15
+RATE_LIMIT_USER_PER_HOUR=5
+RATE_LIMIT_BLOCK_MINUTES=120
+RATE_LIMIT_SECRET=usa-una-cadena-larga-aleatoria
+```
+
+### Seguridad
+
+- Nunca hardcodear credenciales SMTP en archivos PHP.
+- Logs de correo y abuso quedan en `storage/logs/email.log`.
+- El acceso web a `storage/` y `storage/logs/` está bloqueado con `.htaccess`.
+
 ## 📄 Licencia
 
 Propiedad de **Braian Andres Oquendo Durango**.

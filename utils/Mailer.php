@@ -8,15 +8,23 @@ use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\Exception;
 
 require_once __DIR__ . '/../vendor/autoload.php';
+require_once __DIR__ . '/../config/bootstrap.php';
 
 class Mailer {
     
-    // Configuración SMTP (Idealmente mover a variables de entorno)
-    private const SMTP_HOST = 'smtp.gmail.com';
-    private const SMTP_USER = 'viaxoficialcol@gmail.com';
-    private const SMTP_PASS = 'filz vqel gadn kugb'; // App Password
-    private const SMTP_PORT = 587;
+    // Configuración SMTP desde entorno
     private const FROM_NAME = 'Viax';
+
+    private static function getSmtpConfig() {
+        return [
+            'host' => env_value('SMTP_HOST', 'smtp.gmail.com'),
+            'port' => (int) env_value('SMTP_PORT', 587),
+            'user' => env_value('SMTP_USER', ''),
+            'pass' => env_value('SMTP_PASS', ''),
+            'from_name' => env_value('SMTP_FROM_NAME', self::FROM_NAME),
+            'from_email' => env_value('SMTP_FROM_EMAIL', env_value('SMTP_USER', '')),
+        ];
+    }
 
     /**
      * Envía un código de verificación.
@@ -1322,20 +1330,26 @@ class Mailer {
      */
     private static function send($toEmail, $toName, $subject, $htmlBody, $altBody = null, $attachments = []) {
         $mail = new PHPMailer(true);
+        $smtp = self::getSmtpConfig();
+
+        if (empty($smtp['user']) || empty($smtp['pass'])) {
+            error_log('Mailer SMTP credentials not configured in environment variables.');
+            return false;
+        }
 
         try {
             // Configuración del servidor
             $mail->isSMTP();
-            $mail->Host       = self::SMTP_HOST;
+            $mail->Host       = $smtp['host'];
             $mail->SMTPAuth   = true;
-            $mail->Username   = self::SMTP_USER;
-            $mail->Password   = self::SMTP_PASS;
+            $mail->Username   = $smtp['user'];
+            $mail->Password   = $smtp['pass'];
             $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
-            $mail->Port       = self::SMTP_PORT;
+            $mail->Port       = $smtp['port'];
             $mail->CharSet    = 'UTF-8';
 
             // Destinatarios
-            $mail->setFrom(self::SMTP_USER, self::FROM_NAME);
+            $mail->setFrom($smtp['from_email'], $smtp['from_name']);
             $mail->addAddress($toEmail, $toName);
 
             // Contenido

@@ -224,37 +224,79 @@ function validarConductorYEstado(array $viaje, int $conductorId): void
 
 function obtenerConfigTarifaTracking(PDO $db, array $viaje): array
 {
-    $tipoVehiculo = $viaje['tipo_vehiculo'] ?? 'moto';
+    $tipoVehiculo = normalizarTipoVehiculoTracking($viaje['tipo_vehiculo'] ?? 'moto');
     $empresaId = $viaje['empresa_id'] ?? null;
     $config = null;
 
+    $tiposCandidatos = array_values(array_unique([
+        $tipoVehiculo,
+        'moto',
+    ]));
+
     if (!empty($empresaId)) {
-        $stmt = $db->prepare(
-            "SELECT tarifa_base, costo_por_km, costo_por_minuto, tarifa_minima
-            FROM configuracion_precios
-            WHERE empresa_id = :empresa_id AND tipo_vehiculo = :tipo AND activo = 1
-            LIMIT 1"
-        );
-        $stmt->execute([':empresa_id' => $empresaId, ':tipo' => $tipoVehiculo]);
-        $config = $stmt->fetch(PDO::FETCH_ASSOC);
+        foreach ($tiposCandidatos as $tipo) {
+            $stmt = $db->prepare(
+                "SELECT tarifa_base, costo_por_km, costo_por_minuto, tarifa_minima
+                FROM configuracion_precios
+                WHERE empresa_id = :empresa_id AND tipo_vehiculo = :tipo AND activo = 1
+                LIMIT 1"
+            );
+            $stmt->execute([':empresa_id' => $empresaId, ':tipo' => $tipo]);
+            $config = $stmt->fetch(PDO::FETCH_ASSOC);
+            if ($config) {
+                break;
+            }
+        }
     }
 
     if (!$config) {
-        $stmt = $db->prepare(
-            "SELECT tarifa_base, costo_por_km, costo_por_minuto, tarifa_minima
-            FROM configuracion_precios
-            WHERE empresa_id IS NULL AND tipo_vehiculo = :tipo AND activo = 1
-            LIMIT 1"
-        );
-        $stmt->execute([':tipo' => $tipoVehiculo]);
-        $config = $stmt->fetch(PDO::FETCH_ASSOC);
+        foreach ($tiposCandidatos as $tipo) {
+            $stmt = $db->prepare(
+                "SELECT tarifa_base, costo_por_km, costo_por_minuto, tarifa_minima
+                FROM configuracion_precios
+                WHERE empresa_id IS NULL AND tipo_vehiculo = :tipo AND activo = 1
+                LIMIT 1"
+            );
+            $stmt->execute([':tipo' => $tipo]);
+            $config = $stmt->fetch(PDO::FETCH_ASSOC);
+            if ($config) {
+                break;
+            }
+        }
     }
 
     if (!$config) {
-        throw new Exception('No hay configuración de precios para este tipo de vehículo');
+        error_log('[tracking_ingest] Sin configuración de precios para solicitud ' . ($viaje['id'] ?? 'N/A') . ', tipo=' . ($viaje['tipo_vehiculo'] ?? 'N/A') . '. Usando fallback seguro.');
+        return configTarifaFallback();
     }
 
     return $config;
+}
+
+function normalizarTipoVehiculoTracking(string $tipoVehiculo): string
+{
+    $normalized = strtolower(trim($tipoVehiculo));
+    $aliases = [
+        'mototaxi' => 'moto',
+        'motocarro' => 'moto',
+        'moto_carga' => 'moto',
+        'motorcycle' => 'moto',
+        'auto' => 'carro',
+        'automovil' => 'carro',
+        'car' => 'carro',
+    ];
+
+    return $aliases[$normalized] ?? ($normalized !== '' ? $normalized : 'moto');
+}
+
+function configTarifaFallback(): array
+{
+    return [
+        'tarifa_base' => 0,
+        'costo_por_km' => 0,
+        'costo_por_minuto' => 0,
+        'tarifa_minima' => 0,
+    ];
 }
 
 function obtenerUltimoEstadoTracking(PDO $db, int $solicitudId): array

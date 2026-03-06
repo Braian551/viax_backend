@@ -26,7 +26,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 require_once '../config/database.php';
 require_once 'services/AuthService.php';
-require_once '../utils/Mailer.php';
+require_once '../services/EmailService.php';
 
 function generateVerificationCode(): string {
     return strval(random_int(1000, 9999));
@@ -116,11 +116,8 @@ try {
             $insertCodeStmt = $db->prepare("\n                INSERT INTO verification_codes (id, email, code, created_at, expires_at, used)\n                VALUES (?, ?, ?, NOW(), NOW() + INTERVAL '10 minutes', 0)\n            ");
             $insertCodeStmt->execute([$nextId, $user['email'], $code]);
 
-            $sent = Mailer::sendPasswordRecoveryCode(
-                $user['email'],
-                $user['nombre'] ?? 'Usuario',
-                $code
-            );
+            $emailService = new EmailService($db);
+            $sent = $emailService->sendPasswordResetEmail($user['email'], $code);
 
             if (!$sent) {
                 throw new Exception("No se pudo enviar el código de verificación");
@@ -203,8 +200,13 @@ try {
     
 } catch (Throwable $e) {
     http_response_code(400);
+    $rawMessage = $e->getMessage();
+    $isMailTransportError = stripos($rawMessage, 'smtp') !== false || stripos($rawMessage, 'mailer') !== false;
+    $safeMessage = $isMailTransportError ? 'No se pudo enviar el código de verificación en este momento.' : $rawMessage;
+
+    error_log('change_password error: ' . $rawMessage);
     echo json_encode([
         'success' => false,
-        'message' => $e->getMessage()
+        'message' => $safeMessage
     ]);
 }

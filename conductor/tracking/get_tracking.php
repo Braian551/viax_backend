@@ -31,17 +31,21 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
 
 require_once '../../config/database.php';
 
-try {
-    $solicitud_id = isset($_GET['solicitud_id']) ? intval($_GET['solicitud_id']) : 0;
-    $incluir_puntos = isset($_GET['incluir_puntos']) && $_GET['incluir_puntos'] === 'true';
-    
-    if ($solicitud_id <= 0) {
-        throw new Exception('solicitud_id es requerido');
-    }
-    
-    $database = new Database();
-    $db = $database->getConnection();
-    // Obtener el último punto: primero snapshot (O(1)), fallback a realtime.
+function parseWaitSeconds($rawValue): int {
+    $value = intval($rawValue ?? 0);
+    if ($value < 0) return 0;
+    if ($value > 25) return 25;
+    return $value;
+}
+
+function parseSinceTs($rawValue): ?string {
+    if (!is_string($rawValue)) return null;
+    $clean = trim($rawValue);
+    if ($clean === '') return null;
+    return substr($clean, 0, 40);
+}
+
+function getLatestTrackingPoint(PDO $db, int $solicitudId): ?array {
     $ultimo_punto = null;
 
     $stmt = $db->prepare("\n        SELECT to_regclass('public.viaje_tracking_snapshot') AS table_name
@@ -53,7 +57,7 @@ try {
         $stmt = $db->prepare("\n            SELECT
                 latitud,
                 longitud,
-                0::numeric AS velocidad,
+                    0::numeric AS velocidad,
                 distancia_acumulada_km,
                 tiempo_transcurrido_seg,
                 precio_parcial,
@@ -63,7 +67,7 @@ try {
             WHERE solicitud_id = :solicitud_id
             LIMIT 1
         ");
-        $stmt->execute([':solicitud_id' => $solicitud_id]);
+        $stmt->execute([':solicitud_id' => $solicitudId]);
         $ultimo_punto = $stmt->fetch(PDO::FETCH_ASSOC);
     }
 
@@ -82,8 +86,52 @@ try {
             ORDER BY timestamp_gps DESC
             LIMIT 1
         ");
-        $stmt->execute([':solicitud_id' => $solicitud_id]);
+        $stmt->execute([':solicitud_id' => $solicitudId]);
         $ultimo_punto = $stmt->fetch(PDO::FETCH_ASSOC);
+    }
+
+    return $ultimo_punto ?: null;
+}
+
+function trackingTimestampToEpoch(?array $trackingPoint): int {
+    if (!$trackingPoint || empty($trackingPoint['timestamp_gps'])) {
+        return 0;
+    }
+    $ts = strtotime((string)$trackingPoint['timestamp_gps']);
+    return $ts !== false ? $ts : 0;
+}
+
+try {
+    $solicitud_id = isset($_GET['solicitud_id']) ? intval($_GET['solicitud_id']) : 0;
+    $incluir_puntos = isset($_GET['incluir_puntos']) && $_GET['incluir_puntos'] === 'true';
+    $wait_seconds = parseWaitSeconds($_GET['wait_seconds'] ?? 0);
+    $since_ts = parseSinceTs($_GET['since_ts'] ?? null);
+    
+    if ($solicitud_id <= 0) {
+        throw new Exception('solicitud_id es requerido');
+    }
+    
+    $database = new Database();
+    $db = $database->getConnection();
+    // Obtener el último punto y si aplica, esperar cambios (long-polling).
+    $ultimo_punto = getLatestTrackingPoint($db, $solicitud_id);
+
+    if ($wait_seconds > 0 && $since_ts !== null) {
+        $since_epoch = strtotime($since_ts);
+        if ($since_epoch === false) {
+            $since_epoch = 0;
+        }
+
+        $deadline = microtime(true) + $wait_seconds;
+        while (microtime(true) < $deadline) {
+            $current_epoch = trackingTimestampToEpoch($ultimo_punto);
+            if ($current_epoch > $since_epoch) {
+                break;
+            }
+
+            usleep(300000);
+            $ultimo_punto = getLatestTrackingPoint($db, $solicitud_id);
+        }
     }
     // Obtener resumen del tracking
     $stmt = $db->prepare("
@@ -130,6 +178,11 @@ try {
     // Preparar respuesta
     $response = [
         'success' => true,
+        'meta' => [
+            'generated_at' => gmdate('c'),
+            'wait_seconds' => $wait_seconds,
+            'since_ts' => $since_ts,
+        ],
         'solicitud_id' => $solicitud_id,
         'viaje' => [
             'estado' => $solicitud['estado'],
@@ -168,6 +221,8 @@ try {
             'fase' => $ultimo_punto['fase_viaje'],
             'ultima_actualizacion' => $ultimo_punto['timestamp_gps']
         ];
+
+        $response['meta']['latest_tracking_ts'] = $ultimo_punto['timestamp_gps'];
         
         // Calcular diferencias con estimados
         $diff_distancia = $distancia_actual - floatval($solicitud['distancia_estimada']);

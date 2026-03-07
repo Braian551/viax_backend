@@ -24,8 +24,21 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 require_once '../../config/database.php';
 require_once __DIR__ . '/tracking_ingest_service.php';
 
+/**
+ * Valida que el payload JSON exista y sea objeto.
+ */
+function readJsonInput(): array
+{
+    $raw = file_get_contents('php://input');
+    $data = json_decode($raw, true);
+    if (!is_array($data)) {
+        throw new Exception('JSON inválido');
+    }
+    return $data;
+}
+
 try {
-    $input = json_decode(file_get_contents('php://input'), true);
+    $input = readJsonInput();
 
     $solicitudId = isset($input['solicitud_id']) ? intval($input['solicitud_id']) : 0;
     $conductorId = isset($input['conductor_id']) ? intval($input['conductor_id']) : 0;
@@ -41,6 +54,13 @@ try {
 
     if (count($puntos) > 120) {
         throw new Exception('Lote demasiado grande. Máximo 120 puntos por request');
+    }
+
+    // Protección básica anti-abuso: evita lotes con contenido no estructurado.
+    foreach ($puntos as $punto) {
+        if (!is_array($punto)) {
+            throw new Exception('Formato de puntos inválido');
+        }
     }
 
     usort($puntos, static function($a, $b) {
@@ -73,6 +93,7 @@ try {
     }
 
     http_response_code(400);
+    error_log('register_points_batch.php error: ' . $e->getMessage());
     echo json_encode([
         'success' => false,
         'message' => $e->getMessage(),

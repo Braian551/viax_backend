@@ -101,6 +101,80 @@ function trackingTimestampToEpoch(?array $trackingPoint): int {
     return $ts !== false ? $ts : 0;
 }
 
+function positiveFloatOrNull($value): ?float {
+    if ($value === null || $value === '') {
+        return null;
+    }
+    $parsed = floatval($value);
+    return $parsed > 0 ? $parsed : null;
+}
+
+function positiveIntOrNull($value): ?int {
+    if ($value === null || $value === '') {
+        return null;
+    }
+    $parsed = intval($value);
+    return $parsed > 0 ? $parsed : null;
+}
+
+function maxFloatOrZero(array $values): float {
+    $filtered = array_values(array_filter($values, static fn($value) => $value !== null && $value > 0));
+    if (empty($filtered)) {
+        return 0.0;
+    }
+    return (float) max($filtered);
+}
+
+function maxIntOrZero(array $values): int {
+    $filtered = array_values(array_filter($values, static fn($value) => $value !== null && $value > 0));
+    if (empty($filtered)) {
+        return 0;
+    }
+    return (int) max($filtered);
+}
+
+function isCompletedTripState(string $estado): bool {
+    $normalized = strtolower(trim($estado));
+    return in_array($normalized, ['completada', 'completado', 'finalizada', 'finalizado', 'entregado'], true);
+}
+
+function buildCanonicalCompletedTrackingActual(array $solicitud, ?array $resumen, ?array $ultimoPunto): array {
+    $distanciaKm = maxFloatOrZero([
+        positiveFloatOrNull($resumen['distancia_real_km'] ?? null),
+        positiveFloatOrNull($solicitud['distancia_recorrida'] ?? null),
+        positiveFloatOrNull($ultimoPunto['distancia_acumulada_km'] ?? null),
+    ]);
+
+    $tiempoSegundos = maxIntOrZero([
+        positiveIntOrNull(isset($resumen['tiempo_real_minutos']) ? intval($resumen['tiempo_real_minutos']) * 60 : null),
+        positiveIntOrNull($solicitud['tiempo_transcurrido'] ?? null),
+        positiveIntOrNull($ultimoPunto['tiempo_transcurrido_seg'] ?? null),
+    ]);
+
+    $precioActual = maxFloatOrZero([
+        positiveFloatOrNull($resumen['precio_final_aplicado'] ?? null),
+        positiveFloatOrNull($solicitud['precio_final'] ?? null),
+        positiveFloatOrNull($ultimoPunto['precio_parcial'] ?? null),
+        positiveFloatOrNull($solicitud['precio_estimado'] ?? null),
+    ]);
+
+    $ultimaActualizacion = $resumen['actualizado_en']
+        ?? $solicitud['completado_en']
+        ?? $ultimoPunto['timestamp_gps']
+        ?? null;
+
+    return [
+        'ubicacion' => null,
+        'velocidad_kmh' => 0,
+        'distancia_km' => $distanciaKm,
+        'tiempo_segundos' => $tiempoSegundos,
+        'tiempo_minutos' => (int) ceil($tiempoSegundos / 60),
+        'precio_actual' => $precioActual,
+        'fase' => 'finalizado',
+        'ultima_actualizacion' => $ultimaActualizacion,
+    ];
+}
+
 try {
     $solicitud_id = isset($_GET['solicitud_id']) ? intval($_GET['solicitud_id']) : 0;
     $incluir_puntos = isset($_GET['incluir_puntos']) && $_GET['incluir_puntos'] === 'true';
@@ -138,6 +212,7 @@ try {
         SELECT 
             distancia_real_km,
             tiempo_real_minutos,
+            precio_final_aplicado,
             velocidad_promedio_kmh,
             velocidad_maxima_kmh,
             total_puntos_gps,
@@ -162,6 +237,7 @@ try {
             s.precio_final,
             s.distancia_recorrida,
             s.tiempo_transcurrido,
+            s.completado_en,
             s.direccion_recogida,
             s.direccion_destino,
             s.metodo_pago
@@ -201,8 +277,30 @@ try {
         'comparacion' => null
     ];
     
-    // Si hay datos de tracking
-    if ($ultimo_punto) {
+    $estadoCompletado = isCompletedTripState((string)($solicitud['estado'] ?? ''));
+
+    // Si el viaje ya terminó, responder siempre con métricas finales canónicas.
+    if ($estadoCompletado) {
+        $trackingFinal = buildCanonicalCompletedTrackingActual($solicitud, $resumen ?: null, $ultimo_punto ?: null);
+        $response['tracking_actual'] = $trackingFinal;
+        $response['meta']['latest_tracking_ts'] = $trackingFinal['ultima_actualizacion'];
+
+        $diff_distancia = $trackingFinal['distancia_km'] - floatval($solicitud['distancia_estimada']);
+        $diff_tiempo = $trackingFinal['tiempo_minutos'] - intval($solicitud['tiempo_estimado']);
+        $diff_precio = $trackingFinal['precio_actual'] - floatval($solicitud['precio_estimado']);
+
+        $response['comparacion'] = [
+            'diferencia_distancia_km' => round($diff_distancia, 2),
+            'diferencia_tiempo_min' => $diff_tiempo,
+            'diferencia_precio' => round($diff_precio, 2),
+            'porcentaje_distancia' => $solicitud['distancia_estimada'] > 0
+                ? round(($diff_distancia / floatval($solicitud['distancia_estimada'])) * 100, 1)
+                : 0,
+            'mensaje' => generarMensajeComparacion($diff_distancia, $diff_tiempo)
+        ];
+    }
+    // Si hay datos de tracking en curso
+    else if ($ultimo_punto) {
         $distancia_actual = floatval($ultimo_punto['distancia_acumulada_km']);
         $tiempo_actual_seg = intval($ultimo_punto['tiempo_transcurrido_seg']);
         $tiempo_actual_min = ceil($tiempo_actual_seg / 60);
@@ -238,26 +336,6 @@ try {
                 : 0,
             'mensaje' => generarMensajeComparacion($diff_distancia, $diff_tiempo)
         ];
-    } 
-    // Si NO hay tracking pero el viaje está completado, usar datos finales de la solicitud
-    else if (in_array($solicitud['estado'], ['completada', 'entregado'])) {
-        $distancia_final = floatval($solicitud['distancia_recorrida'] ?? 0);
-        // tiempo_transcurrido está en SEGUNDOS (guardado por finalize.php)
-        $tiempo_final_seg = intval($solicitud['tiempo_transcurrido'] ?? 0);
-        $tiempo_final_min = ceil($tiempo_final_seg / 60);
-
-        $precio_final = floatval($solicitud['precio_final'] ?? $solicitud['precio_estimado']);
-        
-        $response['tracking_actual'] = [
-            'ubicacion' => null,
-            'velocidad_kmh' => 0,
-            'distancia_km' => $distancia_final,
-            'tiempo_segundos' => $tiempo_final_seg,
-            'tiempo_minutos' => $tiempo_final_min,
-            'precio_actual' => $precio_final,
-            'fase' => 'finalizado',
-            'ultima_actualizacion' => null
-        ];
     }
     
     // Si hay resumen
@@ -265,6 +343,7 @@ try {
         $response['resumen'] = [
             'distancia_total_km' => floatval($resumen['distancia_real_km']),
             'tiempo_total_minutos' => intval($resumen['tiempo_real_minutos']),
+            'precio_final' => floatval($resumen['precio_final_aplicado']),
             'velocidad_promedio_kmh' => floatval($resumen['velocidad_promedio_kmh']),
             'velocidad_maxima_kmh' => floatval($resumen['velocidad_maxima_kmh']),
             'total_puntos_registrados' => intval($resumen['total_puntos_gps']),

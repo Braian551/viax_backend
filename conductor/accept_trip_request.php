@@ -20,6 +20,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 require_once '../config/database.php';
 require_once '../config/concurrency_service.php';
 require_once '../utils/NotificationHelper.php';
+require_once '../config/redis.php';
+require_once '../core/Cache.php';
+
+/** Guarda asignación temporal en cache para acelerar consultas de estado. */
+function cacheTripAssignment(int $solicitudId, int $conductorId): void
+{
+    try {
+        Cache::set('ride_request:' . $solicitudId, (string) json_encode([
+            'solicitud_id' => $solicitudId,
+            'conductor_id' => $conductorId,
+            'estado' => 'aceptada',
+            'timestamp' => time(),
+        ]), 300);
+    } catch (Throwable $e) {
+        error_log('accept_trip_request.php cache warning: ' . $e->getMessage());
+    }
+}
 
 try {
     $data = json_decode(file_get_contents('php://input'), true);
@@ -42,6 +59,8 @@ try {
     $result = $concurrencyService->acceptTripConcurrent($solicitudId, $conductorId, $idempotencyKey);
     
     if ($result['success']) {
+        cacheTripAssignment($solicitudId, $conductorId);
+
         try {
             if (empty($result['idempotent'])) {
                 $database = new Database();
@@ -108,7 +127,7 @@ try {
         
         // Verificar que el conductor esté disponible y obtener sus datos
         $stmt = $db->prepare("
-            SELECT u.id, u.empresa_id, dc.disponible, dc.vehiculo_tipo
+            SELECT u.id, u.nombre, u.apellido, u.empresa_id, dc.disponible, dc.vehiculo_tipo
             FROM usuarios u
             INNER JOIN detalles_conductor dc ON u.id = dc.usuario_id
             WHERE u.id = ? 
@@ -177,6 +196,7 @@ try {
         $stmt->execute([$conductorId]);
         
             $db->commit();
+            cacheTripAssignment($solicitudId, $conductorId);
 
             try {
                 $nombreConductor = trim(($conductor['nombre'] ?? '') . ' ' . ($conductor['apellido'] ?? ''));

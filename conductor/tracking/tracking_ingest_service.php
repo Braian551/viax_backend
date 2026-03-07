@@ -1,6 +1,15 @@
 <?php
+/**
+ * Servicio de ingestión de tracking (uso interno).
+ *
+ * Responsabilidades:
+ * - Validar puntos GPS recibidos en lote.
+ * - Persistir puntos en viaje_tracking_realtime.
+ * - Actualizar snapshot y métricas agregadas del viaje.
+ * - Refrescar cache Redis para lectura realtime de conductor/viaje.
+ */
 
-require_once __DIR__ . '/../../config/database.php';
+require_once __DIR__ . '/../../config/app.php';
 
 function processTrackingPoints(PDO $db, int $solicitudId, int $conductorId, array $points): array
 {
@@ -173,6 +182,18 @@ function processTrackingPoints(PDO $db, int $solicitudId, int $conductorId, arra
             $ultimoPrecio,
             $ultimoPunto['fase_viaje']
         );
+
+        // Refrescar cache de alta frecuencia para APIs realtime.
+        refreshRealtimeTrackingCache(
+            $solicitudId,
+            $conductorId,
+            $ultimoPunto['latitud'],
+            $ultimoPunto['longitud'],
+            $ultimoDist,
+            $ultimoTiempo,
+            $ultimoPrecio,
+            $ultimoPunto['fase_viaje']
+        );
     }
 
     return [
@@ -182,6 +203,50 @@ function processTrackingPoints(PDO $db, int $solicitudId, int $conductorId, arra
         'tiempo_transcurrido_seg' => $ultimoTiempo,
         'precio_parcial' => round($ultimoPrecio, 2),
     ];
+}
+
+/**
+ * Sincroniza en Redis el estado realtime más reciente del viaje.
+ *
+ * Este cache acelera:
+ * - lectura de ubicación de conductor,
+ * - detección de cambios,
+ * - paneles de monitoreo en tiempo real.
+ */
+function refreshRealtimeTrackingCache(
+    int $solicitudId,
+    int $conductorId,
+    float $latitud,
+    float $longitud,
+    float $distanciaKm,
+    int $tiempoSeg,
+    float $precioParcial,
+    string $faseViaje
+): void {
+    try {
+        Cache::set('driver_location:' . $conductorId, (string) json_encode([
+            'lat' => $latitud,
+            'lng' => $longitud,
+            'speed' => null,
+            'timestamp' => time(),
+        ]), 30);
+        Cache::sAdd('active_drivers', (string) $conductorId);
+
+        Cache::set('trip_tracking_latest:' . $solicitudId, (string) json_encode([
+            'solicitud_id' => $solicitudId,
+            'conductor_id' => $conductorId,
+            'latitud' => $latitud,
+            'longitud' => $longitud,
+            'distancia_km' => $distanciaKm,
+            'tiempo_seg' => $tiempoSeg,
+            'precio_parcial' => $precioParcial,
+            'fase_viaje' => $faseViaje,
+            'timestamp' => time(),
+        ]), 120);
+    } catch (Throwable $e) {
+        // Redis es capa secundaria: no bloquear flujo principal por cache.
+        error_log('[tracking_ingest] cache warning: ' . $e->getMessage());
+    }
 }
 
 function obtenerViajeTracking(PDO $db, int $solicitudId): array

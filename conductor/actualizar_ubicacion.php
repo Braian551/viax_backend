@@ -1,103 +1,181 @@
 <?php
+/**
+ * Endpoint: actualizar_ubicacion.php
+ *
+ * Este endpoint es usado por la app Flutter de conductor para enviar GPS
+ * frecuente (cada pocos segundos). Para alto rendimiento:
+ * - Escribe siempre en Redis (driver_location:{conductor_id}).
+ * - Persiste en BD de forma periódica para reducir carga de escritura.
+ * - Mantiene compatibilidad total del contrato JSON existente.
+ */
+
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Accept');
 
-require_once '../config/database.php';
+require_once __DIR__ . '/../config/app.php';
 
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
     http_response_code(200);
     exit();
 }
 
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     http_response_code(405);
     echo json_encode(['success' => false, 'message' => 'Método no permitido']);
     exit();
 }
 
-try {
-    $database = new Database();
-    $db = $database->getConnection();
+/** Valida latitud en rango geográfico permitido. */
+function isValidLat(float $lat): bool
+{
+    return $lat >= -90.0 && $lat <= 90.0;
+}
 
-    $input = json_decode(file_get_contents('php://input'), true);
+/** Valida longitud en rango geográfico permitido. */
+function isValidLng(float $lng): bool
+{
+    return $lng >= -180.0 && $lng <= 180.0;
+}
 
-    $conductor_id = isset($input['conductor_id']) ? intval($input['conductor_id']) : 0;
-    $latitud = isset($input['latitud']) ? floatval($input['latitud']) : null;
-    $longitud = isset($input['longitud']) ? floatval($input['longitud']) : null;
+/**
+ * Guarda ubicación en Redis para lectura ultra-rápida en tiempo real.
+ *
+ * Claves:
+ * - driver_location:{id}
+ * - active_drivers (set)
+ */
+function writeLocationToRedis(int $conductorId, float $lat, float $lng, ?float $speed): void
+{
+    $payload = json_encode([
+        'lat' => $lat,
+        'lng' => $lng,
+        'speed' => $speed,
+        'timestamp' => time(),
+    ]);
 
-    if ($conductor_id <= 0) {
-        throw new Exception('ID de conductor inválido');
+    Cache::set("driver_location:{$conductorId}", (string) $payload, 30);
+    Cache::sAdd('active_drivers', (string) $conductorId);
+}
+
+/**
+ * Determina si toca persistir en BD según un throttle por conductor.
+ *
+ * Esto reduce escrituras intensivas sin perder frescura en tiempo real,
+ * ya que la app consumidora lee primero Redis.
+ */
+function shouldPersistToDatabase(int $conductorId, int $intervalSeconds = 12): bool
+{
+    $key = "driver_location:last_persist:{$conductorId}";
+    $last = Cache::get($key);
+    $now = time();
+
+    if ($last === null) {
+        Cache::set($key, (string) $now, $intervalSeconds + 5);
+        return true;
     }
 
+    $lastTs = (int) $last;
+    if (($now - $lastTs) >= $intervalSeconds) {
+        Cache::set($key, (string) $now, $intervalSeconds + 5);
+        return true;
+    }
+
+    return false;
+}
+
+try {
+    $input = json_decode(file_get_contents('php://input'), true);
+    if (!is_array($input)) {
+        throw new Exception('JSON inválido');
+    }
+
+    $conductorId = isset($input['conductor_id']) ? (int) $input['conductor_id'] : 0;
+    $latitud = isset($input['latitud']) ? (float) $input['latitud'] : null;
+    $longitud = isset($input['longitud']) ? (float) $input['longitud'] : null;
+    $velocidad = isset($input['velocidad']) ? (float) $input['velocidad'] : null;
+
+    if ($conductorId <= 0) {
+        throw new Exception('ID de conductor inválido');
+    }
     if ($latitud === null || $longitud === null) {
         throw new Exception('Latitud y longitud son requeridas');
     }
-
-    // Actualizar ubicación en detalles_conductor
-    $query = "UPDATE detalles_conductor 
-              SET latitud_actual = :latitud, 
-                  longitud_actual = :longitud,
-                  ultima_actualizacion = NOW()
-              WHERE usuario_id = :conductor_id";
-    
-    $stmt = $db->prepare($query);
-    $stmt->bindParam(':latitud', $latitud);
-    $stmt->bindParam(':longitud', $longitud);
-    $stmt->bindParam(':conductor_id', $conductor_id, PDO::PARAM_INT);
-    $stmt->execute();
-
-    // Actualizar detalles_conductor (existente)
-    if ($stmt->rowCount() === 0) {
-        // Si no existe, crear registro
-        $query_insert = "INSERT INTO detalles_conductor 
-                         (usuario_id, latitud_actual, longitud_actual, fecha_creacion, ultima_actualizacion)
-                         VALUES (:conductor_id, :latitud, :longitud, NOW(), NOW())";
-        
-        $stmt_insert = $db->prepare($query_insert);
-        $stmt_insert->bindParam(':conductor_id', $conductor_id, PDO::PARAM_INT);
-        $stmt_insert->bindParam(':latitud', $latitud);
-        $stmt_insert->bindParam(':longitud', $longitud);
-        $stmt_insert->execute();
+    if (!isValidLat($latitud) || !isValidLng($longitud)) {
+        throw new Exception('Coordenadas inválidas');
     }
 
-    // --- NUEVO: Actualizar datos del viaje activo si se proporcionan ---
-    $solicitud_id = isset($input['solicitud_id']) ? intval($input['solicitud_id']) : 0;
-    $distancia_recorrida = isset($input['distancia_recorrida']) ? floatval($input['distancia_recorrida']) : null;
-    $tiempo_transcurrido = isset($input['tiempo_transcurrido']) ? intval($input['tiempo_transcurrido']) : null;
+    // Escritura rápida en cache (camino crítico realtime).
+    writeLocationToRedis($conductorId, $latitud, $longitud, $velocidad);
 
-    if ($solicitud_id > 0 && ($distancia_recorrida !== null || $tiempo_transcurrido !== null)) {
-        $update_parts = [];
-        $params = [':solicitud_id' => $solicitud_id];
+    // Persistencia periódica en BD para descargar I/O.
+    $persistirBd = shouldPersistToDatabase($conductorId);
 
-        if ($distancia_recorrida !== null) {
-            $update_parts[] = "distancia_recorrida = :distancia";
-            $params[':distancia'] = $distancia_recorrida;
+    if ($persistirBd) {
+        $database = new Database();
+        $db = $database->getConnection();
+
+        $query = "UPDATE detalles_conductor
+                  SET latitud_actual = :latitud,
+                      longitud_actual = :longitud,
+                      ultima_actualizacion = NOW()
+                  WHERE usuario_id = :conductor_id";
+
+        $stmt = $db->prepare($query);
+        $stmt->bindParam(':latitud', $latitud);
+        $stmt->bindParam(':longitud', $longitud);
+        $stmt->bindParam(':conductor_id', $conductorId, PDO::PARAM_INT);
+        $stmt->execute();
+
+        if ($stmt->rowCount() === 0) {
+            $queryInsert = "INSERT INTO detalles_conductor
+                            (usuario_id, latitud_actual, longitud_actual, fecha_creacion, ultima_actualizacion)
+                            VALUES (:conductor_id, :latitud, :longitud, NOW(), NOW())";
+
+            $stmtInsert = $db->prepare($queryInsert);
+            $stmtInsert->bindParam(':conductor_id', $conductorId, PDO::PARAM_INT);
+            $stmtInsert->bindParam(':latitud', $latitud);
+            $stmtInsert->bindParam(':longitud', $longitud);
+            $stmtInsert->execute();
         }
 
-        if ($tiempo_transcurrido !== null) {
-            $update_parts[] = "tiempo_transcurrido = :tiempo";
-            $params[':tiempo'] = $tiempo_transcurrido;
-        }
+        // Actualiza métricas de viaje activo si vienen en el payload.
+        $solicitudId = isset($input['solicitud_id']) ? (int) $input['solicitud_id'] : 0;
+        $distanciaRecorrida = isset($input['distancia_recorrida']) ? (float) $input['distancia_recorrida'] : null;
+        $tiempoTranscurrido = isset($input['tiempo_transcurrido']) ? (int) $input['tiempo_transcurrido'] : null;
 
-        if (!empty($update_parts)) {
-            $sql_trip = "UPDATE solicitudes_servicio SET " . implode(', ', $update_parts) . " WHERE id = :solicitud_id";
-            $stmt_trip = $db->prepare($sql_trip);
-            $stmt_trip->execute($params);
+        if ($solicitudId > 0 && ($distanciaRecorrida !== null || $tiempoTranscurrido !== null)) {
+            $updateParts = [];
+            $params = [':solicitud_id' => $solicitudId];
+
+            if ($distanciaRecorrida !== null && $distanciaRecorrida >= 0) {
+                $updateParts[] = 'distancia_recorrida = :distancia';
+                $params[':distancia'] = $distanciaRecorrida;
+            }
+
+            if ($tiempoTranscurrido !== null && $tiempoTranscurrido >= 0) {
+                $updateParts[] = 'tiempo_transcurrido = :tiempo';
+                $params[':tiempo'] = $tiempoTranscurrido;
+            }
+
+            if (!empty($updateParts)) {
+                $sqlTrip = 'UPDATE solicitudes_servicio SET ' . implode(', ', $updateParts) . ' WHERE id = :solicitud_id';
+                $stmtTrip = $db->prepare($sqlTrip);
+                $stmtTrip->execute($params);
+            }
         }
     }
 
     echo json_encode([
         'success' => true,
-        'message' => 'Ubicación actualizada exitosamente'
+        'message' => 'Ubicación actualizada exitosamente',
     ]);
-
 } catch (Exception $e) {
     http_response_code(500);
+    error_log('actualizar_ubicacion.php error: ' . $e->getMessage());
     echo json_encode([
         'success' => false,
-        'message' => $e->getMessage()
+        'message' => $e->getMessage(),
     ]);
 }
-?>

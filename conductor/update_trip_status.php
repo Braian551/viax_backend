@@ -20,6 +20,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 require_once '../config/database.php';
 require_once '../config/concurrency_service.php';
 require_once '../utils/NotificationHelper.php';
+require_once '../config/redis.php';
+require_once '../core/Cache.php';
+
+/**
+ * Valida transición de estado permitida sin romper estados históricos.
+ */
+function isValidStateTransition(string $estadoActual, string $nuevoEstado): bool
+{
+    $estadoActual = trim(strtolower($estadoActual));
+    $nuevoEstado = trim(strtolower($nuevoEstado));
+
+    $map = [
+        'pendiente' => ['conductor_llego', 'recogido', 'en_curso', 'cancelada', 'completada'],
+        'aceptada' => ['conductor_llego', 'recogido', 'en_curso', 'cancelada', 'completada'],
+        'asignado' => ['conductor_llego', 'recogido', 'en_curso', 'cancelada', 'completada'],
+        'conductor_llego' => ['recogido', 'en_curso', 'cancelada', 'completada'],
+        'recogido' => ['en_curso', 'cancelada', 'completada'],
+        'en_curso' => ['completada', 'cancelada'],
+        'completada' => [],
+        'cancelada' => [],
+    ];
+
+    if (!isset($map[$estadoActual])) {
+        // Compatibilidad con datos legacy: si estado no reconocido, permitir.
+        return true;
+    }
+
+    return in_array($nuevoEstado, $map[$estadoActual], true);
+}
 
 try {
     $input = json_decode(file_get_contents('php://input'), true);
@@ -59,14 +88,19 @@ try {
 
     $database = new Database();
     $db = $database->getConnection();
+
+    // Reinstanciar servicio con conexión compartida para lock + TX coherente.
+    $concurrencyService = new ConcurrencyService($db);
+
+    if (!$concurrencyService->acquireLock('solicitud', (int) $solicitud_id, 15)) {
+        throw new Exception('La solicitud está siendo procesada, intenta nuevamente');
+    }
+
+    $db->beginTransaction();
     
-    // Verificar que el conductor está asignado a esta solicitud
-    $stmt = $db->prepare("
-        SELECT s.*, ac.conductor_id 
-        FROM solicitudes_servicio s
-        LEFT JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id AND ac.estado IN ('asignado', 'llegado', 'en_curso', 'completado')
-        WHERE s.id = ?
-    ");
+    // Bloquear primero la solicitud (tabla base).
+    // En PostgreSQL no se puede usar FOR UPDATE sobre el lado nullable de un LEFT JOIN.
+    $stmt = $db->prepare("SELECT s.* FROM solicitudes_servicio s WHERE s.id = ? FOR UPDATE");
     $stmt->execute([$solicitud_id]);
     $solicitud = $stmt->fetch(PDO::FETCH_ASSOC);
     
@@ -74,8 +108,29 @@ try {
         throw new Exception('Solicitud no encontrada');
     }
     
-    if ($solicitud['conductor_id'] && $solicitud['conductor_id'] != $conductor_id) {
+    // Bloquear y validar asignación del conductor en query separada.
+    $stmtAsignacion = $db->prepare(" 
+        SELECT conductor_id, estado
+        FROM asignaciones_conductor
+        WHERE solicitud_id = ?
+        ORDER BY asignado_en DESC NULLS LAST, id DESC
+        LIMIT 1
+        FOR UPDATE
+    ");
+    $stmtAsignacion->execute([$solicitud_id]);
+    $asignacion = $stmtAsignacion->fetch(PDO::FETCH_ASSOC);
+
+    if ($asignacion && (int)$asignacion['conductor_id'] !== (int)$conductor_id) {
         throw new Exception('No tienes permiso para actualizar esta solicitud');
+    }
+
+    // Fallback legacy: si no hay fila en asignaciones, validar contra conductor_id de solicitud (si existe).
+    if (!$asignacion && !empty($solicitud['conductor_id']) && (int)$solicitud['conductor_id'] !== (int)$conductor_id) {
+        throw new Exception('No tienes permiso para actualizar esta solicitud');
+    }
+
+    if (!isValidStateTransition((string) $solicitud['estado'], $nuevo_estado)) {
+        throw new Exception('Transición de estado inválida');
     }
     
     // Construir QUERY dinámico
@@ -255,6 +310,14 @@ try {
             error_log('update_trip_status.php location_sharing cleanup error: ' . $shareError->getMessage());
         }
     }
+
+    // Confirmar transacción antes de emitir notificaciones.
+    $db->commit();
+
+    // Invalidar cache temporal de solicitud al cerrar ciclo.
+    if ($nuevo_estado === 'completada' || $nuevo_estado === 'cancelada') {
+        Cache::set('ride_request:' . (int) $solicitud_id, '{}', 1);
+    }
     
     try {
         $clienteId = isset($solicitud['cliente_id']) ? (int)$solicitud['cliente_id'] : 0;
@@ -284,8 +347,16 @@ try {
         'message' => 'Estado actualizado correctamente',
         'nuevo_estado' => $nuevo_estado
     ]);
+
+    $concurrencyService->releaseLock('solicitud', (int) $solicitud_id);
     
 } catch (Exception $e) {
+    if (isset($db) && $db instanceof PDO && $db->inTransaction()) {
+        $db->rollBack();
+    }
+    if (isset($concurrencyService) && isset($solicitud_id) && (int) $solicitud_id > 0) {
+        $concurrencyService->releaseLock('solicitud', (int) $solicitud_id);
+    }
     http_response_code(400);
     echo json_encode([
         'success' => false,

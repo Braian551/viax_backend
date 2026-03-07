@@ -10,6 +10,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once '../config/database.php';
+require_once '../config/redis.php';
+require_once '../core/Cache.php';
 
 try {
     $data = json_decode(file_get_contents('php://input'), true);
@@ -19,17 +21,23 @@ try {
         throw new Exception('El ID de la solicitud es requerido');
     }
     
-    $solicitudId = $data['solicitud_id'];
+    $solicitudId = (int) $data['solicitud_id'];
+    if ($solicitudId <= 0) {
+        throw new Exception('El ID de la solicitud es inválido');
+    }
     
     $database = new Database();
     $db = $database->getConnection();
     
+    $db->beginTransaction();
+
     // Verificar que la solicitud existe y está en estado cancelable
     $stmt = $db->prepare("
         SELECT ss.id, ss.estado, ss.cliente_id, ac.conductor_id
             FROM solicitudes_servicio ss
             LEFT JOIN asignaciones_conductor ac ON ss.id = ac.solicitud_id AND ac.estado IN ('asignado', 'llegado')
         WHERE ss.id = ?
+        FOR UPDATE
     ");
     $stmt->execute([$solicitudId]);
     $solicitud = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -86,6 +94,11 @@ try {
     } catch (Exception $shareError) {
         error_log('cancel_trip_request.php location_sharing cleanup error: ' . $shareError->getMessage());
     }
+
+    $db->commit();
+
+    // Limpieza de cache temporal del request/candidatos.
+    Cache::set('ride_request:' . $solicitudId, '{}', 1);
     
     echo json_encode([
         'success' => true,
@@ -94,6 +107,9 @@ try {
     ]);
     
 } catch (Exception $e) {
+    if (isset($db) && $db instanceof PDO && $db->inTransaction()) {
+        $db->rollBack();
+    }
     http_response_code(400);
     echo json_encode([
         'success' => false,

@@ -29,7 +29,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit();
 }
 
-require_once '../../config/database.php';
+require_once __DIR__ . '/../../config/app.php';
 
 /**
  * Verifica si una fecha es festivo en Colombia
@@ -106,6 +106,57 @@ function configPreciosFallbackFinalize() {
         'tiempo_espera_gratis' => 3,
         'costo_tiempo_espera' => 0,
         '__fallback' => true,
+    ];
+}
+
+function positiveFloatOrNull($value): ?float {
+    if ($value === null || $value === '') {
+        return null;
+    }
+    $parsed = floatval($value);
+    return $parsed > 0 ? $parsed : null;
+}
+
+function positiveIntOrNull($value): ?int {
+    if ($value === null || $value === '') {
+        return null;
+    }
+    $parsed = intval($value);
+    return $parsed > 0 ? $parsed : null;
+}
+
+function maxFloatOrZero(array $values): float {
+    $filtered = array_values(array_filter($values, static fn($value) => $value !== null && $value > 0));
+    if (empty($filtered)) {
+        return 0.0;
+    }
+    return (float) max($filtered);
+}
+
+function maxIntOrZero(array $values): int {
+    $filtered = array_values(array_filter($values, static fn($value) => $value !== null && $value > 0));
+    if (empty($filtered)) {
+        return 0;
+    }
+    return (int) max($filtered);
+}
+
+function resolveCanonicalFinalMetrics(array $viaje, ?array $ultimoTracking, ?float $bodyDistanciaKm, ?int $bodyTiempoSeg): array {
+    $distanciaReal = maxFloatOrZero([
+        positiveFloatOrNull($bodyDistanciaKm),
+        positiveFloatOrNull($ultimoTracking['distancia_acumulada_km'] ?? null),
+        positiveFloatOrNull($viaje['distancia_recorrida'] ?? null),
+    ]);
+
+    $tiempoRealSeg = maxIntOrZero([
+        positiveIntOrNull($bodyTiempoSeg),
+        positiveIntOrNull($ultimoTracking['tiempo_transcurrido_seg'] ?? null),
+        positiveIntOrNull($viaje['tiempo_transcurrido'] ?? null),
+    ]);
+
+    return [
+        'distancia_real_km' => $distanciaReal,
+        'tiempo_real_seg' => $tiempoRealSeg,
     ];
 }
 
@@ -188,6 +239,9 @@ function obtenerConfigPreciosTrackingFinalize(PDO $db, $empresaId, $tipoVehiculo
 
 try {
     $input = json_decode(file_get_contents('php://input'), true);
+    if (!is_array($input)) {
+        throw new Exception('JSON inválido');
+    }
     
     // Validar campos requeridos
     $solicitud_id = isset($input['solicitud_id']) ? intval($input['solicitud_id']) : 0;
@@ -273,13 +327,24 @@ try {
         }
 
     
-    // Usar valores del tracking si existen, si no, usar los enviados por la app
-    if ($ultimo_tracking) {
-        $distancia_real = floatval($ultimo_tracking['distancia_acumulada_km']);
-        $tiempo_real_seg = $tiempo_final_seg ?? intval($ultimo_tracking['tiempo_transcurrido_seg']);
-    } else {
-        $distancia_real = $distancia_final_km ?? floatval($viaje['distancia_recorrida'] ?? 0);
-        $tiempo_real_seg = $tiempo_final_seg ?? intval($viaje['tiempo_transcurrido'] ?? 0);
+    // Resolver valores finales canónicos con criterio monotónico.
+    // Esto evita que un snapshot atrasado o un batch tardío pise el valor real final.
+    $metricasFinales = resolveCanonicalFinalMetrics(
+        $viaje,
+        $ultimo_tracking ?: null,
+        $distancia_final_km,
+        $tiempo_final_seg
+    );
+
+    $distancia_real = $metricasFinales['distancia_real_km'];
+    $tiempo_real_seg = $metricasFinales['tiempo_real_seg'];
+
+    if ($distancia_real <= 0 && $distancia_final_km !== null && $distancia_final_km > 0) {
+        $distancia_real = (float) $distancia_final_km;
+    }
+
+    if ($tiempo_real_seg <= 0 && $tiempo_final_seg !== null && $tiempo_final_seg > 0) {
+        $tiempo_real_seg = (int) $tiempo_final_seg;
     }
     
     $tiempo_real_min = ceil($tiempo_real_seg / 60);
@@ -688,8 +753,54 @@ try {
         ':desglose_json' => $desglose_json,
         ':solicitud_id' => $solicitud_id
     ]);
+
+    // Blindaje de consistencia: si por cualquier motivo falló update_trip_status.php,
+    // dejamos el viaje formalmente cerrado aquí también para no quedar "en viaje".
+    $stmt = $db->prepare(" 
+        UPDATE solicitudes_servicio
+        SET
+            estado = 'completada',
+            completado_en = COALESCE(completado_en, NOW()),
+            entregado_en = COALESCE(entregado_en, NOW())
+        WHERE id = :solicitud_id
+    ");
+    $stmt->execute([':solicitud_id' => $solicitud_id]);
+
+    $stmt = $db->prepare(" 
+        UPDATE asignaciones_conductor
+        SET estado = 'completado'
+        WHERE solicitud_id = :solicitud_id
+          AND conductor_id = :conductor_id
+    ");
+    $stmt->execute([
+        ':solicitud_id' => $solicitud_id,
+        ':conductor_id' => $conductor_id,
+    ]);
+
+    $stmt = $db->prepare(" 
+        UPDATE detalles_conductor
+        SET disponible = 1
+        WHERE usuario_id = :conductor_id
+    ");
+    $stmt->execute([':conductor_id' => $conductor_id]);
     
     $db->commit();
+
+    // Cerrar cache temporal de solicitud y publicar resumen final de tracking.
+    try {
+        Cache::set('ride_request:' . $solicitud_id, '{}', 1);
+        Cache::set('trip_tracking_latest:' . $solicitud_id, (string) json_encode([
+            'solicitud_id' => $solicitud_id,
+            'conductor_id' => $conductor_id,
+            'distancia_km' => round($distancia_real, 3),
+            'tiempo_seg' => $tiempo_real_seg,
+            'precio_final' => $precio_final,
+            'estado' => 'trip_completed',
+            'timestamp' => time(),
+        ]), 300);
+    } catch (Throwable $cacheError) {
+        error_log('finalize.php cache warning: ' . $cacheError->getMessage());
+    }
     
     // =====================================================
     // RESPUESTA CON DESGLOSE COMPLETO
@@ -750,7 +861,7 @@ try {
     echo json_encode($response);
     
 } catch (Exception $e) {
-    if (isset($db) && $db->inTransaction()) {
+    if (isset($db) && $db instanceof PDO && $db->inTransaction()) {
         $db->rollBack();
     }
     http_response_code(400);

@@ -22,7 +22,32 @@ if (isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'OPTIONS
     exit();
 }
 
-require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../config/app.php';
+
+/** Valida coordenadas geográficas para evitar payloads corruptos. */
+function isValidCoordinate(float $lat, float $lng): bool
+{
+    return $lat >= -90.0 && $lat <= 90.0 && $lng >= -180.0 && $lng <= 180.0;
+}
+
+/** Guarda solicitud temporal en Redis para lecturas rápidas/eventuales retries. */
+function cacheRideRequest(int $solicitudId, array $data): void
+{
+    $payload = [
+        'solicitud_id' => $solicitudId,
+        'usuario_id' => (int) $data['usuario_id'],
+        'tipo_servicio' => (string) $data['tipo_servicio'],
+        'tipo_vehiculo' => (string) ($data['tipo_vehiculo'] ?? 'moto'),
+        'latitud_origen' => (float) $data['latitud_origen'],
+        'longitud_origen' => (float) $data['longitud_origen'],
+        'latitud_destino' => (float) $data['latitud_destino'],
+        'longitud_destino' => (float) $data['longitud_destino'],
+        'timestamp' => time(),
+    ];
+
+    // TTL corto: solicitud en búsqueda activa inicial.
+    Cache::set("ride_request:{$solicitudId}", (string) json_encode($payload), 180);
+}
 
 try {
     // Read input
@@ -47,6 +72,26 @@ try {
             throw new Exception("Campo requerido faltante: $field");
         }
     }
+
+    // Validaciones de dominio básicas (sin romper contrato actual).
+    $usuarioId = filter_var($data['usuario_id'], FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+    if ($usuarioId === false) {
+        throw new Exception('usuario_id inválido');
+    }
+
+    $latOrigen = (float) $data['latitud_origen'];
+    $lngOrigen = (float) $data['longitud_origen'];
+    $latDestino = (float) $data['latitud_destino'];
+    $lngDestino = (float) $data['longitud_destino'];
+    if (!isValidCoordinate($latOrigen, $lngOrigen) || !isValidCoordinate($latDestino, $lngDestino)) {
+        throw new Exception('Coordenadas de origen/destino inválidas');
+    }
+
+    $distanciaKm = (float) $data['distancia_km'];
+    $duracionMin = (int) $data['duracion_minutos'];
+    if ($distanciaKm < 0 || $duracionMin < 0) {
+        throw new Exception('distancia_km y duracion_minutos deben ser no negativos');
+    }
     
     $database = new Database();
     $db = $database->getConnection();
@@ -63,7 +108,7 @@ try {
             AND fecha_creacion > NOW() - INTERVAL '5 minutes'
         ");
         $stmt->execute([
-            ':user_id' => $data['usuario_id'],
+            ':user_id' => $usuarioId,
             ':idem_key' => $idempotencyKey
         ]);
         $existing = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -87,7 +132,7 @@ try {
 
     // Verificar que el usuario existe
     $stmt = $db->prepare("SELECT id, nombre FROM usuarios WHERE id = ? AND tipo_usuario = 'cliente'");
-    $stmt->execute([$data['usuario_id']]);
+    $stmt->execute([$usuarioId]);
     $usuario = $stmt->fetch(PDO::FETCH_ASSOC);
     
     if (!$usuario) {
@@ -145,18 +190,18 @@ try {
     
     $stmt->execute([
         $uuid,
-        $data['usuario_id'],
+        $usuarioId,
         $tipoServicio,
         $tipoVehiculo,
         $empresaId,
-        $data['latitud_origen'],
-        $data['longitud_origen'],
+        $latOrigen,
+        $lngOrigen,
         $data['direccion_origen'],
-        $data['latitud_destino'],
-        $data['longitud_destino'],
+        $latDestino,
+        $lngDestino,
         $data['direccion_destino'],
-        $data['distancia_km'],
-        $data['duracion_minutos'],
+        $distanciaKm,
+        $duracionMin,
         $precioEstimado,
         $metodoPago,
         $idempotencyKey // Clave de idempotencia para evitar duplicados
@@ -197,6 +242,9 @@ try {
     // Confirmar transacción
     $db->commit();
     
+    // Cache temporal de solicitud para flujo realtime/matching.
+    cacheRideRequest((int) $solicitudId, $data);
+
     // Buscar conductores cercanos disponibles (si se proporciona tipo_vehiculo)
     $conductoresCercanos = [];
     if (isset($data['tipo_vehiculo'])) {
@@ -249,13 +297,13 @@ try {
         
         // Parámetros base
         $params = [
-            $data['latitud_origen'],
-            $data['longitud_origen'],
-            $data['latitud_origen'],
+            $latOrigen,
+            $lngOrigen,
+            $latOrigen,
             $vehiculoTipo,
-            $data['latitud_origen'],
-            $data['longitud_origen'],
-            $data['latitud_origen'],
+            $latOrigen,
+            $lngOrigen,
+            $latOrigen,
             $radiusKm
         ];
         

@@ -59,11 +59,13 @@ function handleGetPricing($db, $empresaId) {
         $empresaStmt->execute([$empresaId]);
         $empresaInfo = $empresaStmt->fetch(PDO::FETCH_ASSOC);
         
-        // 2. Obtener vehículos ACTIVOS de la empresa (Source of Truth)
+        // 2. Obtener vehículos ACTIVOS de la empresa (fuente principal de verdad)
         $queryActivos = "SELECT tipo_vehiculo_codigo FROM empresa_tipos_vehiculo WHERE empresa_id = ? AND activo = true";
         $stmtActivos = $db->prepare($queryActivos);
         $stmtActivos->execute([$empresaId]);
-        $vehiculosActivos = $stmtActivos->fetchAll(PDO::FETCH_COLUMN); // ['moto', 'carro']
+        $vehiculosActivosRaw = $stmtActivos->fetchAll(PDO::FETCH_COLUMN);
+        // Normalizamos para evitar desalineación entre catálogos legacy y nuevos.
+        $vehiculosActivos = array_values(array_unique(array_map('normalizeVehicleTypeCode', $vehiculosActivosRaw))); // ['moto', 'carro']
         
         // Flag para saber si usamos la tabla normalizada (si tiene registros)
         // Si no tiene registros, asumimos modo legacy o nuevo sin config
@@ -80,12 +82,16 @@ function handleGetPricing($db, $empresaId) {
         $stmtEmpresa->execute([$empresaId]);
         $empresaPrices = $stmtEmpresa->fetchAll(PDO::FETCH_ASSOC);
         
-        // Organizar por tipo_vehiculo
+        // Organizar por tipo_vehiculo ya normalizado
         $merged = [];
         
         // A. Mapear globales como base
         foreach ($globalPrices as $p) {
-            $type = $p['tipo_vehiculo'];
+            $type = normalizeVehicleTypeCode($p['tipo_vehiculo'] ?? '');
+            if ($type === '') {
+                continue;
+            }
+            $p['tipo_vehiculo'] = $type;
             $p['es_global'] = true;
             $p['heredado'] = true;
             $merged[$type] = $p;
@@ -93,27 +99,29 @@ function handleGetPricing($db, $empresaId) {
         
         // B. Sobrescribir con empresa
         foreach ($empresaPrices as $p) {
-            $type = $p['tipo_vehiculo'];
+            $type = normalizeVehicleTypeCode($p['tipo_vehiculo'] ?? '');
+            if ($type === '') {
+                continue;
+            }
+            $p['tipo_vehiculo'] = $type;
             $p['es_global'] = false;
             $p['heredado'] = false;
             $merged[$type] = $p;
         }
         
-        // 5. FILTRADO FINAL: Solo devolver lo que está activo
+        // 5. FILTRADO FINAL: solo devolver lo que está activo para la empresa
         $finalResult = [];
         
         foreach ($merged as $type => $price) {
             $isVisible = false;
             
             if ($hasNormalizedData) {
-                // Modo Estricto: Solo si está en la lista de activos de la empresa
+                // Modo estricto: solo si está en la lista activa de la empresa.
                 if (in_array($type, $vehiculosActivos)) {
                     $isVisible = true;
                 }
             } else {
-                // Modo Fallback (Legacy): Si el precio tiene el flag activo
-                // O si es un precio de la empresa (incluso si activo=0, para que puedan verlo y reactivarlo? 
-                // No, el usuario pidió que NO aparezca si no está habilitado)
+                // Modo fallback (legacy): solo si el precio está activo.
                 if (($price['activo'] ?? 0) == 1) {
                     $isVisible = true;
                 }
@@ -124,6 +132,24 @@ function handleGetPricing($db, $empresaId) {
             }
         }
         
+        // Orden estable para UI de app/sitio web.
+        usort($finalResult, function ($a, $b) {
+            $order = [
+                'moto' => 1,
+                'mototaxi' => 2,
+                'taxi' => 3,
+                'carro' => 4,
+            ];
+            $aType = normalizeVehicleTypeCode($a['tipo_vehiculo'] ?? '');
+            $bType = normalizeVehicleTypeCode($b['tipo_vehiculo'] ?? '');
+            $aOrder = $order[$aType] ?? 999;
+            $bOrder = $order[$bType] ?? 999;
+            if ($aOrder === $bOrder) {
+                return strcmp($aType, $bType);
+            }
+            return $aOrder <=> $bOrder;
+        });
+
         sendJsonResponse(true, 'Tarifas obtenidas', [
             'precios' => $finalResult,
             'empresa' => $empresaInfo ? [
@@ -156,17 +182,23 @@ function handleUpdatePricing($db, $input, $empresaId) {
         $db->beginTransaction();
         
         foreach ($precios as $precio) {
-            $tipo = $precio['tipo_vehiculo'];
+            $tipo = normalizeVehicleTypeCode($precio['tipo_vehiculo'] ?? '');
+            if ($tipo === '') {
+                continue;
+            }
+            $tipoAliases = getVehicleTypeAliases($tipo);
             
-            // Verificar si existe para actualizar o insertar
-            $check = "SELECT id FROM configuracion_precios WHERE empresa_id = ? AND tipo_vehiculo = ?";
+            // Buscar coincidencias también por alias para actualizar datos legacy.
+            $inPlaceholders = implode(',', array_fill(0, count($tipoAliases), '?'));
+            $check = "SELECT id FROM configuracion_precios WHERE empresa_id = ? AND tipo_vehiculo IN ($inPlaceholders) LIMIT 1";
             $stmtCheck = $db->prepare($check);
-            $stmtCheck->execute([$empresaId, $tipo]);
+            $stmtCheck->execute(array_merge([$empresaId], $tipoAliases));
             $exists = $stmtCheck->fetch();
             
             if ($exists) {
-                // Update completo
+                // Update completo y canonización de tipo_vehiculo.
                 $sql = "UPDATE configuracion_precios SET 
+                        tipo_vehiculo = ?,
                         tarifa_base = ?, 
                         costo_por_km = ?, 
                         costo_por_minuto = ?, 
@@ -188,6 +220,7 @@ function handleUpdatePricing($db, $input, $empresaId) {
                         WHERE id = ?";
                 $stmt = $db->prepare($sql);
                 $stmt->execute([
+                    $tipo,
                     $precio['tarifa_base'] ?? 0,
                     $precio['costo_por_km'] ?? 0,
                     $precio['costo_por_minuto'] ?? 0,
@@ -208,7 +241,7 @@ function handleUpdatePricing($db, $input, $empresaId) {
                     $exists['id']
                 ]);
             } else {
-                // Insert completo
+                // Insert completo en formato canónico.
                 $sql = "INSERT INTO configuracion_precios (
                         empresa_id, tipo_vehiculo, tarifa_base, costo_por_km, costo_por_minuto,
                         tarifa_minima, tarifa_maxima, recargo_hora_pico, recargo_nocturno, 
@@ -248,5 +281,39 @@ function handleUpdatePricing($db, $input, $empresaId) {
         error_log("Error Update Pricing: " . $e->getMessage());
         sendJsonResponse(false, 'Error al actualizar: ' . $e->getMessage());
     }
+}
+
+function normalizeVehicleTypeCode($type) {
+    $value = strtolower(trim((string)$type));
+
+    if ($value === '') {
+        return '';
+    }
+
+    // Alias históricos usados en distintas migraciones/versiones.
+    $aliases = [
+        'auto' => 'carro',
+        'automovil' => 'carro',
+        'car' => 'carro',
+        'motocarro' => 'mototaxi',
+        'moto_carga' => 'mototaxi',
+        'moto carga' => 'mototaxi',
+    ];
+
+    return $aliases[$value] ?? $value;
+}
+
+function getVehicleTypeAliases($canonicalType) {
+    $canonical = normalizeVehicleTypeCode($canonicalType);
+
+    // Conjunto de alias permitidos para encontrar registros antiguos.
+    $aliasByCanonical = [
+        'carro' => ['carro', 'auto', 'automovil', 'car'],
+        'mototaxi' => ['mototaxi', 'motocarro', 'moto_carga', 'moto carga'],
+        'moto' => ['moto'],
+        'taxi' => ['taxi'],
+    ];
+
+    return $aliasByCanonical[$canonical] ?? [$canonical];
 }
 ?>

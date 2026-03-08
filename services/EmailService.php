@@ -134,6 +134,7 @@ class EmailService {
     }
 
     private function wrapEmailTemplate(string $content): string {
+        $year = date('Y');
         return "
             <div style='font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #222;'>
                 <div style='padding: 16px 20px; background: #0ea5e9; color: #fff; border-radius: 8px 8px 0 0;'>
@@ -142,6 +143,7 @@ class EmailService {
                 <div style='padding: 24px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;'>
                     {$content}
                     <p style='margin-top:24px; color:#6b7280;'>Este es un correo automático del sistema Viax.</p>
+                    <p style='margin-top:10px; color:#9AA0A6; font-size:12px;'>&copy; {$year} Viax Technology S.A.S. | viaxcol.online | NIT 902040253-1</p>
                 </div>
             </div>
         ";

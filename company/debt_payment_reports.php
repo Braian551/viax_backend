@@ -94,7 +94,7 @@ try {
             $params[':estado'] = $estado;
         }
 
-        $query = "SELECT r.*, u.nombre, u.apellido, u.email
+        $query = "SELECT r.*, u.nombre, u.apellido, u.email, u.foto_perfil
                   FROM pagos_comision_reportes r
                   INNER JOIN usuarios u ON u.id = r.conductor_id
                   WHERE " . implode(' AND ', $where) . "

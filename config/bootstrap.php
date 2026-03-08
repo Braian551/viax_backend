@@ -41,3 +41,9 @@ if (!function_exists('env_value')) {
 }
 
 viax_load_env();
+
+// Use Colombia timezone by default across backend-generated timestamps (emails, templates, logs shown to users).
+$viaxTimezone = env_value('APP_TIMEZONE', 'America/Bogota');
+if (is_string($viaxTimezone) && $viaxTimezone !== '') {
+    date_default_timezone_set($viaxTimezone);
+}

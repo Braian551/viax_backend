@@ -471,7 +471,7 @@ function enviarEmailDesactivacionVehiculo($email, $nombreConductor, $nombreEmpre
         $bodyContent = "
         <div style='font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;'>
             <div style='text-align: center; margin-bottom: 30px;'>
-                <img src='https://viax.com.co/images/logo.png' alt='Viax' style='height: 40px;'>
+                <img src='https://viaxcol.online/images/logo.png' alt='Viax' style='height: 40px;'>
             </div>
             
             <div style='background: linear-gradient(135deg, #FFF3E0 0%, #FFE0B2 100%); border-radius: 16px; padding: 25px; margin-bottom: 20px; border-left: 4px solid #FF9800;'>
@@ -514,7 +514,7 @@ function enviarEmailDesactivacionVehiculo($email, $nombreConductor, $nombreEmpre
             
             <p style='font-size: 12px; color: #999; text-align: center;'>
                 Este es un mensaje automático enviado por Viax.<br>
-                Si tienes preguntas, contacta a soporte@viax.com.co
+                Sitio oficial: viaxcol.online | NIT Viax Technology S.A.S.: 902040253-1
             </p>
         </div>";
         

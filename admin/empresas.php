@@ -878,8 +878,8 @@ function sendApprovalEmail($email, $nombreEmpresa, $representante) {
                 </ul>
                 <hr style='border: none; border-top: 1px solid #ddd; margin: 20px 0;'>
                 <p style='color: #666; font-size: 12px; text-align: center;'>
-                    ¿Tienes preguntas? Contáctanos a soporte@viax.com.co<br>
-                    © 2026 Viax - Todos los derechos reservados
+                    ¿Tienes preguntas? Contáctanos en viaxcol.online<br>
+                    © 2026 Viax Technology S.A.S. - NIT 902040253-1
                 </p>
             </div>
         </div>";
@@ -917,8 +917,8 @@ function sendRejectionEmail($email, $nombreEmpresa, $representante, $motivo) {
                 <p>También puedes intentar registrarte nuevamente corrigiendo los aspectos mencionados.</p>
                 <hr style='border: none; border-top: 1px solid #ddd; margin: 20px 0;'>
                 <p style='color: #666; font-size: 12px; text-align: center;'>
-                    Contáctanos a soporte@viax.com.co<br>
-                    © 2026 Viax - Todos los derechos reservados
+                    Contáctanos en viaxcol.online<br>
+                    © 2026 Viax Technology S.A.S. - NIT 902040253-1
                 </p>
             </div>
         </div>";

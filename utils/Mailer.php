@@ -1445,7 +1445,7 @@ class Mailer {
                     </div>
                 </div>
                 <div class='footer'>
-                    <p>&copy; $year Viax. Viaja fácil, llega rápido.</p>
+                    <p>&copy; $year Viax Technology S.A.S. | viaxcol.online | NIT 902040253-1</p>
                 </div>
             </div>
         </body>

@@ -4,7 +4,6 @@
  * Endpoint para reportes avanzados de empresa
  */
 
-header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
@@ -27,6 +26,10 @@ try {
 $action = $_GET['action'] ?? 'overview';
 $empresaId = $_GET['empresa_id'] ?? null;
 
+if ($action !== 'pdf') {
+    header('Content-Type: application/json');
+}
+
 if (!$empresaId) {
     echo json_encode(['success' => false, 'message' => 'empresa_id es requerido']);
     exit;
@@ -48,8 +51,59 @@ switch ($action) {
     case 'vehicle_types':
         getVehicleTypesReport($pdo, $empresaId);
         break;
+    case 'pdf':
+        generateReportsPdf($pdo, $empresaId);
+        break;
     default:
         echo json_encode(['success' => false, 'message' => 'Acción no válida']);
+}
+
+function getVehicleTypeLabels() {
+    return [
+        'moto' => 'Moto',
+        'mototaxi' => 'Mototaxi',
+        'taxi' => 'Taxi',
+        'carro' => 'Carro',
+        'auto' => 'Carro',
+        'camioneta' => 'Camioneta',
+        'camion_pequeno' => 'Camión Pequeño',
+        'camion_pequeño' => 'Camión Pequeño',
+        'camion_grande' => 'Camión Grande',
+        'mudanza' => 'Mudanza',
+        'transporte' => 'Transporte',
+        'envio_paquete' => 'Envío Paquete',
+        'otro' => 'Otro',
+    ];
+}
+
+function normalizeVehicleTypeCode($type) {
+    $raw = strtolower(trim((string)($type ?? '')));
+    if ($raw === '') {
+        return 'otro';
+    }
+
+    if ($raw === 'auto') {
+        return 'carro';
+    }
+
+    return $raw;
+}
+
+function getVehicleTypeName($type) {
+    $labels = getVehicleTypeLabels();
+    $normalized = normalizeVehicleTypeCode($type);
+    return $labels[$normalized] ?? ucfirst($normalized);
+}
+
+function normalizeTripStatus($status) {
+    $raw = strtolower(trim((string)($status ?? '')));
+    $map = [
+        'entregado' => 'completada',
+        'cancelado' => 'cancelada',
+        'rechazado' => 'rechazada',
+    ];
+
+    return $map[$raw] ?? $raw;
 }
 
 /**
@@ -416,7 +470,7 @@ function getTopDrivers($pdo, $empresaId, $dateFilter, $limit = 5) {
  */
 function getVehicleDistribution($pdo, $empresaId, $dateFilter) {
     $sql = "SELECT 
-                COALESCE(s.tipo_servicio, 'otro') as tipo,
+                COALESCE(NULLIF(TRIM(s.tipo_vehiculo), ''), NULLIF(TRIM(s.tipo_servicio), ''), 'otro') as tipo,
                 COUNT(*) as viajes,
                 COALESCE(SUM(CASE WHEN s.estado IN ('completada', 'entregado') THEN s.precio_final END), 0) as ingresos
             FROM solicitudes_servicio s
@@ -424,26 +478,18 @@ function getVehicleDistribution($pdo, $empresaId, $dateFilter) {
             INNER JOIN usuarios u ON ac.conductor_id = u.id
             WHERE u.empresa_id = :empresa_id
             $dateFilter
-            GROUP BY s.tipo_servicio
+            GROUP BY COALESCE(NULLIF(TRIM(s.tipo_vehiculo), ''), NULLIF(TRIM(s.tipo_servicio), ''), 'otro')
             ORDER BY viajes DESC";
     
     $stmt = $pdo->prepare($sql);
     $stmt->execute(['empresa_id' => $empresaId]);
     $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    $vehicleNames = [
-        'moto' => 'Moto',
-        'auto' => 'Auto',
-        'camioneta' => 'Camioneta',
-        'camion_pequeño' => 'Camión Pequeño',
-        'camion_grande' => 'Camión Grande',
-        'mudanza' => 'Mudanza',
-    ];
-    
-    return array_map(function($row) use ($vehicleNames) {
+    return array_map(function($row) {
+        $tipo = normalizeVehicleTypeCode($row['tipo']);
         return [
-            'tipo' => $row['tipo'],
-            'nombre' => $vehicleNames[$row['tipo']] ?? ucfirst($row['tipo']),
+            'tipo' => $tipo,
+            'nombre' => getVehicleTypeName($tipo),
             'viajes' => (int)$row['viajes'],
             'ingresos' => round((float)$row['ingresos'], 2),
         ];
@@ -510,6 +556,8 @@ function getTripsReport($pdo, $empresaId) {
                 s.solicitado_en,
                 s.estado,
                 s.tipo_servicio,
+                s.tipo_vehiculo,
+                COALESCE(NULLIF(TRIM(s.tipo_vehiculo), ''), NULLIF(TRIM(s.tipo_servicio), ''), 'otro') as tipo_operacion,
                 s.direccion_recogida,
                 s.direccion_destino,
                 s.distancia_estimada,
@@ -529,6 +577,24 @@ function getTripsReport($pdo, $empresaId) {
     $stmt->bindValue('offset', $offset, PDO::PARAM_INT);
     $stmt->execute();
     $viajes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $viajes = array_map(function ($v) {
+        $tipoOperacion = normalizeVehicleTypeCode($v['tipo_operacion'] ?? null);
+        return [
+            'id' => (int)$v['id'],
+            'solicitado_en' => $v['solicitado_en'],
+            'estado' => $v['estado'],
+            'tipo_servicio' => $v['tipo_servicio'],
+            'tipo_vehiculo' => $v['tipo_vehiculo'],
+            'tipo_operacion' => $tipoOperacion,
+            'tipo_operacion_nombre' => getVehicleTypeName($tipoOperacion),
+            'direccion_recogida' => $v['direccion_recogida'],
+            'direccion_destino' => $v['direccion_destino'],
+            'distancia_estimada' => $v['distancia_estimada'],
+            'precio_final' => round((float)($v['precio_final'] ?? 0), 2),
+            'conductor_nombre' => $v['conductor_nombre'],
+        ];
+    }, $viajes);
     
     echo json_encode([
         'success' => true,
@@ -665,7 +731,7 @@ function getVehicleTypesReport($pdo, $empresaId) {
     $dateFilter = getDateFilter($periodo);
     
     $sql = "SELECT 
-                COALESCE(s.tipo_servicio, 'otro') as tipo,
+                COALESCE(NULLIF(TRIM(s.tipo_vehiculo), ''), NULLIF(TRIM(s.tipo_servicio), ''), 'otro') as tipo,
                 COUNT(*) as total_viajes,
                 COUNT(CASE WHEN s.estado IN ('completada', 'entregado') THEN 1 END) as completados,
                 COUNT(CASE WHEN s.estado IN ('cancelada', 'cancelado') THEN 1 END) as cancelados,
@@ -677,29 +743,21 @@ function getVehicleTypesReport($pdo, $empresaId) {
             INNER JOIN usuarios u ON ac.conductor_id = u.id
             WHERE u.empresa_id = :empresa_id
             $dateFilter
-            GROUP BY s.tipo_servicio
+            GROUP BY COALESCE(NULLIF(TRIM(s.tipo_vehiculo), ''), NULLIF(TRIM(s.tipo_servicio), ''), 'otro')
             ORDER BY ingresos DESC";
     
     $stmt = $pdo->prepare($sql);
     $stmt->execute(['empresa_id' => $empresaId]);
     $vehiculos = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    $vehicleNames = [
-        'moto' => 'Moto',
-        'auto' => 'Auto',
-        'camioneta' => 'Camioneta',
-        'camion_pequeño' => 'Camión Pequeño',
-        'camion_grande' => 'Camión Grande',
-        'mudanza' => 'Mudanza',
-    ];
-    
     echo json_encode([
         'success' => true,
         'data' => [
-            'vehiculos' => array_map(function($v) use ($vehicleNames) {
+            'vehiculos' => array_map(function($v) {
+                $tipo = normalizeVehicleTypeCode($v['tipo']);
                 return [
-                    'tipo' => $v['tipo'],
-                    'nombre' => $vehicleNames[$v['tipo']] ?? ucfirst($v['tipo']),
+                    'tipo' => $tipo,
+                    'nombre' => getVehicleTypeName($tipo),
                     'total_viajes' => (int)$v['total_viajes'],
                     'completados' => (int)$v['completados'],
                     'cancelados' => (int)$v['cancelados'],
@@ -713,4 +771,91 @@ function getVehicleTypesReport($pdo, $empresaId) {
             }, $vehiculos),
         ],
     ]);
+}
+
+function getRecentTripsForPdf($pdo, $empresaId, $periodo, $limit = 20) {
+    $sql = "SELECT
+                s.id,
+                s.solicitado_en,
+                s.estado,
+                COALESCE(NULLIF(TRIM(s.tipo_vehiculo), ''), NULLIF(TRIM(s.tipo_servicio), ''), 'otro') as tipo_operacion,
+                s.direccion_recogida,
+                s.direccion_destino,
+                s.precio_final,
+                u.nombre as conductor_nombre
+            FROM solicitudes_servicio s
+            INNER JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id
+            INNER JOIN usuarios u ON ac.conductor_id = u.id
+            WHERE u.empresa_id = :empresa_id
+            " . getDateFilter($periodo) . "
+            ORDER BY s.solicitado_en DESC
+            LIMIT :limit";
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->bindValue('empresa_id', $empresaId);
+    $stmt->bindValue('limit', $limit, PDO::PARAM_INT);
+    $stmt->execute();
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    return array_map(function ($row) {
+        $tipoOperacion = normalizeVehicleTypeCode($row['tipo_operacion'] ?? null);
+        return [
+            'id' => (int)$row['id'],
+            'fecha' => $row['solicitado_en'],
+            'conductor' => $row['conductor_nombre'] ?? 'N/A',
+            'tipo_operacion' => $tipoOperacion,
+            'tipo_operacion_nombre' => getVehicleTypeName($tipoOperacion),
+            'estado' => normalizeTripStatus($row['estado'] ?? null),
+            'origen' => $row['direccion_recogida'] ?? '',
+            'destino' => $row['direccion_destino'] ?? '',
+            'valor' => round((float)($row['precio_final'] ?? 0), 2),
+        ];
+    }, $rows);
+}
+
+function generateReportsPdf($pdo, $empresaId) {
+    $periodo = $_GET['periodo'] ?? '30d';
+
+    require_once __DIR__ . '/../utils/PdfGenerator.php';
+
+    // Evita contaminación de salida en respuesta PDF.
+    if (ob_get_length()) {
+        ob_clean();
+    }
+
+    $stmt = $pdo->prepare("SELECT nombre, logo_url FROM empresas_transporte WHERE id = :id");
+    $stmt->execute(['id' => $empresaId]);
+    $empresa = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+    $empresaNombre = $empresa['nombre'] ?? 'Empresa de Transporte';
+    $empresaLogoUrl = $empresa['logo_url'] ?? null;
+
+    $dateFilter = getDateFilter($periodo);
+    $tripStats = getTripStats($pdo, $empresaId, $dateFilter);
+    $earningsStats = getEarningsStats($pdo, $empresaId, $periodo);
+    $topDrivers = getTopDrivers($pdo, $empresaId, $dateFilter);
+    $vehicleDistribution = getVehicleDistribution($pdo, $empresaId, $dateFilter);
+    $recentTrips = getRecentTripsForPdf($pdo, $empresaId, $periodo, 20);
+
+    $pdfGen = new PdfGenerator();
+    $pdfPath = $pdfGen->generateActivityReport([
+        'empresa_nombre' => $empresaNombre,
+        'periodo' => $periodo,
+        'trip_stats' => $tripStats,
+        'earnings_stats' => $earningsStats,
+        'top_drivers' => $topDrivers,
+        'vehicle_distribution' => $vehicleDistribution,
+        'recent_trips' => $recentTrips,
+        'company_logo_url' => $empresaLogoUrl,
+        'generated_at' => date('Y-m-d H:i:s'),
+    ]);
+
+    if (!$pdfPath || !file_exists($pdfPath)) {
+        throw new Exception('No se pudo generar el archivo PDF');
+    }
+
+    header('Content-Type: application/pdf');
+    header('Content-Disposition: inline; filename="reporte_viax_' . $periodo . '.pdf"');
+    readfile($pdfPath);
+    @unlink($pdfPath);
+    exit;
 }

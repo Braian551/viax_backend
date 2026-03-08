@@ -30,39 +30,11 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 require_once __DIR__ . '/../../config/app.php';
-
-/**
- * Verifica si una fecha es festivo en Colombia
- * Lista básica de festivos fijos - se puede expandir
- */
-function esFestivoColombia($fecha = null) {
-    if ($fecha === null) {
-        $fecha = new DateTime();
-    }
-    
-    $mes = (int)$fecha->format('m');
-    $dia = (int)$fecha->format('d');
-    
-    // Festivos fijos en Colombia
-    $festivosFijos = [
-        [1, 1],   // Año Nuevo
-        [5, 1],   // Día del Trabajo
-        [7, 20],  // Día de la Independencia
-        [8, 7],   // Batalla de Boyacá
-        [12, 8],  // Inmaculada Concepción
-        [12, 25], // Navidad
-    ];
-    
-    foreach ($festivosFijos as $festivo) {
-        if ($mes === $festivo[0] && $dia === $festivo[1]) {
-            return true;
-        }
-    }
-    
-    // Domingos también se consideran para recargo
-    $diaSemana = (int)$fecha->format('w');
-    return $diaSemana === 0; // 0 = Domingo
-}
+require_once __DIR__ . '/tracking_schema_helpers.php';
+require_once __DIR__ . '/../../services/traffic_zone_resolver.php';
+require_once __DIR__ . '/../../services/traffic_cache.php';
+require_once __DIR__ . '/../../services/traffic_pricing.php';
+require_once __DIR__ . '/../../services/traffic_service.php';
 
 function normalizarTipoVehiculoTracking($tipoVehiculo) {
     $normalized = strtolower(trim((string)$tipoVehiculo));
@@ -160,6 +132,233 @@ function resolveCanonicalFinalMetrics(array $viaje, ?array $ultimoTracking, ?flo
     ];
 }
 
+function haversineMeters(float $lat1, float $lon1, float $lat2, float $lon2): float {
+    $earthRadius = 6371000.0;
+    $dLat = deg2rad($lat2 - $lat1);
+    $dLon = deg2rad($lon2 - $lon1);
+    $a = sin($dLat / 2) * sin($dLat / 2)
+        + cos(deg2rad($lat1)) * cos(deg2rad($lat2))
+        * sin($dLon / 2) * sin($dLon / 2);
+    $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
+    return $earthRadius * $c;
+}
+
+function fetchGpsRowsForReconciliation(PDO $db, int $solicitudId): array {
+    if (trackingTableExists($db, 'trip_tracking_points')) {
+        $stmt = $db->prepare(" 
+            SELECT
+                lat,
+                lng,
+                speed,
+                accuracy,
+                timestamp
+            FROM trip_tracking_points
+            WHERE trip_id = :solicitud_id
+            ORDER BY timestamp ASC
+        ");
+        $stmt->execute([':solicitud_id' => $solicitudId]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    }
+
+    $stmt = $db->prepare(" 
+        SELECT
+            latitud AS lat,
+            longitud AS lng,
+            velocidad AS speed,
+            precision_gps AS accuracy,
+            COALESCE(timestamp_gps, timestamp_servidor) AS timestamp
+        FROM viaje_tracking_realtime
+        WHERE solicitud_id = :solicitud_id
+        ORDER BY COALESCE(timestamp_gps, timestamp_servidor) ASC
+    ");
+    $stmt->execute([':solicitud_id' => $solicitudId]);
+    return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+}
+
+function reconcileDistanceKmFromGps(PDO $db, int $solicitudId, float $fallbackKm): array {
+    $rows = fetchGpsRowsForReconciliation($db, $solicitudId);
+    if (empty($rows)) {
+        return [
+            'distance_km' => max(0.0, $fallbackKm),
+            'accepted_points' => 0,
+            'rejected_points' => 0,
+        ];
+    }
+
+    $distanceMeters = 0.0;
+    $accepted = 0;
+    $rejected = 0;
+    $prev = null;
+
+    foreach ($rows as $row) {
+        $lat = floatval($row['lat'] ?? 0);
+        $lng = floatval($row['lng'] ?? 0);
+        $speed = isset($row['speed']) ? floatval($row['speed']) : 0.0;
+        $accuracy = isset($row['accuracy']) ? floatval($row['accuracy']) : 0.0;
+        $timestamp = strtotime((string)($row['timestamp'] ?? ''));
+
+        if ($timestamp === false || $lat < -90 || $lat > 90 || $lng < -180 || $lng > 180) {
+            $rejected++;
+            continue;
+        }
+
+        // Se descarta baja calidad GPS para no inflar métricas con ruido.
+        if ($accuracy > 100) {
+            $rejected++;
+            continue;
+        }
+
+        // Se descarta velocidad físicamente improbable para viajes urbanos.
+        if ($speed > 150) {
+            $rejected++;
+            continue;
+        }
+
+        $current = [
+            'lat' => $lat,
+            'lng' => $lng,
+            'ts' => $timestamp,
+        ];
+
+        if ($prev !== null) {
+            $deltaSec = max(0, $current['ts'] - $prev['ts']);
+            $jumpMeters = haversineMeters($prev['lat'], $prev['lng'], $current['lat'], $current['lng']);
+
+            // Salto imposible: >200m en menos de 2s indica punto corrupto/atrasado.
+            if ($deltaSec < 2 && $jumpMeters > 200) {
+                $rejected++;
+                continue;
+            }
+
+            // Duplicado o jitter ínfimo, no suma distancia.
+            if ($jumpMeters < 1.0) {
+                $accepted++;
+                $prev = $current;
+                continue;
+            }
+
+            $distanceMeters += $jumpMeters;
+        }
+
+        $accepted++;
+        $prev = $current;
+    }
+
+    $distanceKm = $distanceMeters / 1000.0;
+
+    return [
+        // Monotónico: nunca bajar por latencia o pérdida parcial de puntos.
+        'distance_km' => max($distanceKm, $fallbackKm, 0.0),
+        'accepted_points' => $accepted,
+        'rejected_points' => $rejected,
+    ];
+}
+
+function resolveDurationSegFromServer(PDO $db, int $solicitudId, int $fallbackSeg): int {
+    if (trackingTableExists($db, 'trip_tracking_points')) {
+        $stmt = $db->prepare(" 
+            SELECT
+                MIN(timestamp) AS ts_inicio,
+                MAX(timestamp) AS ts_fin
+            FROM trip_tracking_points
+            WHERE trip_id = :solicitud_id
+        ");
+        $stmt->execute([':solicitud_id' => $solicitudId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        $ini = strtotime((string)($row['ts_inicio'] ?? ''));
+        $fin = strtotime((string)($row['ts_fin'] ?? ''));
+        if ($ini !== false && $fin !== false && $fin >= $ini) {
+            return max($fallbackSeg, $fin - $ini, 0);
+        }
+    }
+
+    $stmt = $db->prepare(" 
+        SELECT
+            MIN(COALESCE(timestamp_gps, timestamp_servidor)) AS ts_inicio,
+            MAX(COALESCE(timestamp_gps, timestamp_servidor)) AS ts_fin
+        FROM viaje_tracking_realtime
+        WHERE solicitud_id = :solicitud_id
+    ");
+    $stmt->execute([':solicitud_id' => $solicitudId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    $ini = strtotime((string)($row['ts_inicio'] ?? ''));
+    $fin = strtotime((string)($row['ts_fin'] ?? ''));
+
+    if ($ini !== false && $fin !== false && $fin >= $ini) {
+        return max($fallbackSeg, $fin - $ini, 0);
+    }
+
+    return max(0, $fallbackSeg);
+}
+
+function buildLockedSummaryResponse(PDO $db, int $solicitudId, int $conductorId): array {
+    $stmt = $db->prepare(" 
+        SELECT
+            s.id,
+            s.precio_final,
+            s.distancia_recorrida,
+            s.tiempo_transcurrido,
+            s.precio_estimado,
+            s.distancia_estimada,
+            s.tiempo_estimado,
+            s.empresa_id,
+            s.tipo_vehiculo,
+            vrt.precio_final_aplicado,
+            vrt.distancia_real_km,
+            vrt.tiempo_real_minutos,
+            vrt.actualizado_en
+        FROM solicitudes_servicio s
+        LEFT JOIN viaje_resumen_tracking vrt ON vrt.solicitud_id = s.id
+        WHERE s.id = :solicitud_id
+        LIMIT 1
+    ");
+    $stmt->execute([':solicitud_id' => $solicitudId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    $precioFinal = maxFloatOrZero([
+        positiveFloatOrNull($row['precio_final_aplicado'] ?? null),
+        positiveFloatOrNull($row['precio_final'] ?? null),
+        positiveFloatOrNull($row['precio_estimado'] ?? null),
+    ]);
+
+    $distanciaReal = maxFloatOrZero([
+        positiveFloatOrNull($row['distancia_real_km'] ?? null),
+        positiveFloatOrNull($row['distancia_recorrida'] ?? null),
+    ]);
+
+    $tiempoRealSeg = maxIntOrZero([
+        positiveIntOrNull(isset($row['tiempo_real_minutos']) ? intval($row['tiempo_real_minutos']) * 60 : null),
+        positiveIntOrNull($row['tiempo_transcurrido'] ?? null),
+    ]);
+
+    $tiempoRealMin = (int) ceil($tiempoRealSeg / 60);
+
+    return [
+        'success' => true,
+        'message' => 'Métricas finales ya estaban congeladas',
+        'precio_final' => $precioFinal,
+        'tracking' => [
+            'distancia_real_km' => round($distanciaReal, 2),
+            'tiempo_real_min' => $tiempoRealMin,
+            'tiempo_real_seg' => $tiempoRealSeg,
+            'distancia_estimada_km' => floatval($row['distancia_estimada'] ?? 0),
+            'tiempo_estimado_min' => intval($row['tiempo_estimado'] ?? 0),
+        ],
+        'comparacion_precio' => [
+            'precio_estimado' => floatval($row['precio_estimado'] ?? 0),
+            'precio_final' => $precioFinal,
+            'diferencia' => $precioFinal - floatval($row['precio_estimado'] ?? 0),
+        ],
+        'meta' => [
+            'metrics_locked' => true,
+            'empresa_id' => $row['empresa_id'] ?? null,
+            'config_precios_id' => null,
+            'tipo_vehiculo' => $row['tipo_vehiculo'] ?? 'moto',
+            'conductor_id' => $conductorId,
+        ],
+    ];
+}
+
 function obtenerConfigPreciosTrackingFinalize(PDO $db, $empresaId, $tipoVehiculoRaw) {
     $tipoNormalizado = normalizarTipoVehiculoTracking($tipoVehiculoRaw);
     $tiposCandidatos = array_values(array_unique([$tipoNormalizado, 'moto']));
@@ -238,7 +437,11 @@ function obtenerConfigPreciosTrackingFinalize(PDO $db, $empresaId, $tipoVehiculo
 }
 
 try {
-    $input = json_decode(file_get_contents('php://input'), true);
+    if (isset($GLOBALS['__trip_finalize_payload_bridge']) && is_array($GLOBALS['__trip_finalize_payload_bridge'])) {
+        $input = $GLOBALS['__trip_finalize_payload_bridge'];
+    } else {
+        $input = json_decode(file_get_contents('php://input'), true);
+    }
     if (!is_array($input)) {
         throw new Exception('JSON inválido');
     }
@@ -259,31 +462,79 @@ try {
     
     $database = new Database();
     $db = $database->getConnection();
+
+    $hasMetricsLocked = trackingColumnExists($db, 'solicitudes_servicio', 'metrics_locked');
+    $hasDistanceFinal = trackingColumnExists($db, 'solicitudes_servicio', 'distance_final');
+    $hasDurationFinal = trackingColumnExists($db, 'solicitudes_servicio', 'duration_final');
+    $hasCompletedAt = trackingColumnExists($db, 'solicitudes_servicio', 'completed_at');
+    $hasPriceFinalEn = trackingColumnExists($db, 'solicitudes_servicio', 'price_final');
+    $hasGpsPointsCount = trackingColumnExists($db, 'solicitudes_servicio', 'gps_points_count');
     
     $db->beginTransaction();
     
     // Obtener datos del viaje
-    $stmt = $db->prepare("
+    $metricsLockedExpr = $hasMetricsLocked
+        ? 'COALESCE(s.metrics_locked, FALSE) AS metrics_locked,'
+        : 'FALSE AS metrics_locked,';
+
+    $distanceFinalExpr = $hasDistanceFinal
+        ? 's.distance_final,'
+        : 'NULL::numeric AS distance_final,';
+
+    $durationFinalExpr = $hasDurationFinal
+        ? 's.duration_final,'
+        : 'NULL::integer AS duration_final,';
+
+    $completedAtExpr = $hasCompletedAt
+        ? 's.completed_at,'
+        : 'NULL::timestamp AS completed_at,';
+
+    $priceFinalEnExpr = $hasPriceFinalEn
+        ? 's.price_final,'
+        : 'NULL::numeric AS price_final_en,';
+
+    $gpsPointsCountExpr = $hasGpsPointsCount
+        ? 's.gps_points_count,'
+        : 'NULL::integer AS gps_points_count,';
+
+    $stmt = $db->prepare(" 
         SELECT 
             s.id,
             s.tipo_servicio,
             s.tipo_vehiculo,
             s.empresa_id,
             s.estado,
+            $metricsLockedExpr
             s.distancia_estimada,
             s.tiempo_estimado,
             s.precio_estimado,
             s.distancia_recorrida,
             s.tiempo_transcurrido,
-            s.solicitado_en
+            $distanceFinalExpr
+            $durationFinalExpr
+            $priceFinalEnExpr
+            $completedAtExpr
+            $gpsPointsCountExpr
+            s.solicitado_en,
+            s.latitud_recogida,
+            s.longitud_recogida,
+            s.latitud_destino,
+            s.longitud_destino
         FROM solicitudes_servicio s
         WHERE s.id = :solicitud_id
+        FOR UPDATE
     ");
     $stmt->execute([':solicitud_id' => $solicitud_id]);
     $viaje = $stmt->fetch(PDO::FETCH_ASSOC);
     
     if (!$viaje) {
         throw new Exception('Viaje no encontrado');
+    }
+
+    if (!empty($viaje['metrics_locked']) && intval($viaje['metrics_locked']) === 1) {
+        $db->rollBack();
+        echo json_encode(buildLockedSummaryResponse($db, $solicitud_id, $conductor_id));
+        exit();
     }
     
     // Obtener el último punto de tracking para valores más precisos
@@ -336,8 +587,24 @@ try {
         $tiempo_final_seg
     );
 
-    $distancia_real = $metricasFinales['distancia_real_km'];
-    $tiempo_real_seg = $metricasFinales['tiempo_real_seg'];
+    // Reconciliación robusta por GPS (fuente de verdad backend).
+    $reconciliacion = reconcileDistanceKmFromGps(
+        $db,
+        $solicitud_id,
+        $metricasFinales['distancia_real_km']
+    );
+
+    $distancia_real = max(
+        $metricasFinales['distancia_real_km'],
+        floatval($reconciliacion['distance_km'] ?? 0)
+    );
+
+    // Duración basada en timestamps del servidor para eliminar sesgo de latencia cliente.
+    $tiempo_real_seg = resolveDurationSegFromServer(
+        $db,
+        $solicitud_id,
+        $metricasFinales['tiempo_real_seg']
+    );
 
     if ($distancia_real <= 0 && $distancia_final_km !== null && $distancia_final_km > 0) {
         $distancia_real = (float) $distancia_final_km;
@@ -404,52 +671,49 @@ try {
     $tiempo_espera_cobrable = max(0, $tiempo_espera_min - $tiempo_espera_gratis);
     $recargo_espera = $tiempo_espera_cobrable * floatval($config['costo_tiempo_espera'] ?? 0);
     
-    // 4. Determinar recargos por horario/fecha
-    $hora_actual = date('H:i:s');
-    $fecha_actual = new DateTime();
-    
-    $recargo_nocturno = 0;
-    $recargo_hora_pico = 0;
-    $recargo_festivo = 0;
-    $tipo_recargo = 'normal';
-    $recargo_porcentaje = 0;
-    
-    // Verificar si es festivo primero (tiene prioridad)
-    $es_festivo = esFestivoColombia($fecha_actual);
-    
-    if ($es_festivo && floatval($config['recargo_festivo'] ?? 0) > 0) {
-        // Recargo festivo
-        $recargo_porcentaje = floatval($config['recargo_festivo']);
-        $recargo_festivo = $subtotal_con_descuento * ($recargo_porcentaje / 100);
-        $tipo_recargo = 'festivo';
-    } else {
-        // Verificar hora pico o nocturno
-        $h_pico_ini_m = $config['hora_pico_inicio_manana'] ?? '07:00:00';
-        $h_pico_fin_m = $config['hora_pico_fin_manana'] ?? '09:00:00';
-        $h_pico_ini_t = $config['hora_pico_inicio_tarde'] ?? '17:00:00';
-        $h_pico_fin_t = $config['hora_pico_fin_tarde'] ?? '19:00:00';
-        $h_noc_ini = $config['hora_nocturna_inicio'] ?? '22:00:00';
-        $h_noc_fin = $config['hora_nocturna_fin'] ?? '06:00:00';
-        
-        // Hora pico mañana
-        if ($hora_actual >= $h_pico_ini_m && $hora_actual <= $h_pico_fin_m) {
-            $recargo_porcentaje = floatval($config['recargo_hora_pico'] ?? 0);
-            $recargo_hora_pico = $subtotal_con_descuento * ($recargo_porcentaje / 100);
-            $tipo_recargo = 'hora_pico_manana';
-        }
-        // Hora pico tarde
-        elseif ($hora_actual >= $h_pico_ini_t && $hora_actual <= $h_pico_fin_t) {
-            $recargo_porcentaje = floatval($config['recargo_hora_pico'] ?? 0);
-            $recargo_hora_pico = $subtotal_con_descuento * ($recargo_porcentaje / 100);
-            $tipo_recargo = 'hora_pico_tarde';
-        }
-        // Nocturno (cruza medianoche)
-        elseif ($hora_actual >= $h_noc_ini || $hora_actual <= $h_noc_fin) {
-            $recargo_porcentaje = floatval($config['recargo_nocturno'] ?? 0);
-            $recargo_nocturno = $subtotal_con_descuento * ($recargo_porcentaje / 100);
-            $tipo_recargo = 'nocturno';
-        }
+    // 4. Determinar recargos con contexto Colombia + trafico real por zonas.
+    $fecha_colombia = trafficNowInColombia();
+    $h_noc_ini = (string) ($config['hora_nocturna_inicio'] ?? '22:00:00');
+    $h_noc_fin = (string) ($config['hora_nocturna_fin'] ?? '06:00:00');
+
+    $holidayMeta = [];
+    $es_festivo = trafficIsHolidayColombia($fecha_colombia, $holidayMeta);
+    $es_nocturno = trafficIsNocturnoColombia($fecha_colombia, $h_noc_ini, $h_noc_fin);
+
+    $originLat = isset($viaje['latitud_recogida']) ? floatval($viaje['latitud_recogida']) : 0.0;
+    $originLng = isset($viaje['longitud_recogida']) ? floatval($viaje['longitud_recogida']) : 0.0;
+    $destLat = isset($viaje['latitud_destino']) ? floatval($viaje['latitud_destino']) : 0.0;
+    $destLng = isset($viaje['longitud_destino']) ? floatval($viaje['longitud_destino']) : 0.0;
+
+    $trafico = trafficGetConditions($originLat, $originLng, $destLat, $destLng);
+
+    $porcentaje_recargo_festivo = $es_festivo ? floatval($config['recargo_festivo'] ?? 0) : 0.0;
+    $porcentaje_recargo_nocturno = $es_nocturno ? floatval($config['recargo_nocturno'] ?? 0) : 0.0;
+    $porcentaje_recargo_trafico = calculateTrafficSurcharge(floatval($trafico['traffic_ratio'] ?? 1.0));
+
+    $recargo_festivo = $porcentaje_recargo_festivo > 0
+        ? $subtotal_con_descuento * ($porcentaje_recargo_festivo / 100)
+        : 0.0;
+    $recargo_nocturno = $porcentaje_recargo_nocturno > 0
+        ? $subtotal_con_descuento * ($porcentaje_recargo_nocturno / 100)
+        : 0.0;
+    $recargo_hora_pico = $porcentaje_recargo_trafico > 0
+        ? $subtotal_con_descuento * ($porcentaje_recargo_trafico / 100)
+        : 0.0;
+
+    $tiposRecargo = [];
+    if ($recargo_festivo > 0) {
+        $tiposRecargo[] = 'festivo';
     }
+    if ($recargo_nocturno > 0) {
+        $tiposRecargo[] = 'nocturno';
+    }
+    if ($recargo_hora_pico > 0) {
+        $tiposRecargo[] = 'hora_pico_' . strval($trafico['traffic_level'] ?? 'moderado');
+    }
+
+    $tipo_recargo = empty($tiposRecargo) ? 'normal' : implode('+', $tiposRecargo);
+    $recargo_porcentaje = $porcentaje_recargo_festivo + $porcentaje_recargo_nocturno + $porcentaje_recargo_trafico;
     
     // 5. Sumar todos los recargos
     $total_recargos = $recargo_nocturno + $recargo_hora_pico + $recargo_festivo + $recargo_espera;
@@ -519,6 +783,31 @@ try {
         'total_recargos' => round($total_recargos, 2),
         'tipo_recargo' => $tipo_recargo,
         'recargo_porcentaje' => $recargo_porcentaje,
+        'porcentaje_recargo_festivo' => round($porcentaje_recargo_festivo, 2),
+        'porcentaje_recargo_nocturno' => round($porcentaje_recargo_nocturno, 2),
+        'porcentaje_recargo_trafico' => round($porcentaje_recargo_trafico, 2),
+        'contexto_colombia' => [
+            'fecha_hora_bogota' => $fecha_colombia->format('Y-m-d H:i:s'),
+            'es_festivo' => $es_festivo,
+            'fuente_festivo' => $holidayMeta['source'] ?? 'desconocida',
+            'es_nocturno' => $es_nocturno,
+            'horario_nocturno' => [
+                'inicio' => $h_noc_ini,
+                'fin' => $h_noc_fin,
+            ],
+        ],
+        'trafico' => [
+            'origin_zone_key' => $trafico['origin_zone_key'] ?? null,
+            'destination_zone_key' => $trafico['destination_zone_key'] ?? null,
+            'distance_meters' => intval($trafico['distance_meters'] ?? 0),
+            'duration_seconds' => intval($trafico['duration_seconds'] ?? 0),
+            'static_duration_seconds' => intval($trafico['static_duration_seconds'] ?? 0),
+            'traffic_ratio' => round(floatval($trafico['traffic_ratio'] ?? 1.0), 4),
+            'traffic_level' => $trafico['traffic_level'] ?? 'normal',
+            'peak_traffic' => !empty($trafico['peak_traffic']),
+            'source' => $trafico['source'] ?? 'unknown',
+            'api_called' => !empty($trafico['api_called']),
+        ],
         'aplico_tarifa_minima' => $aplico_tarifa_minima,
         'precio_antes_redondeo' => round($precio_total, 2),
         'precio_final' => $precio_final,
@@ -729,30 +1018,68 @@ try {
     */
     
     // =====================================================
-    // ACTUALIZAR SOLICITUD CON DESGLOSE JSON
+    // ACTUALIZAR SOLICITUD Y CONGELAR MÉTRICAS FINALES
     // =====================================================
     
-    $stmt = $db->prepare("
-        UPDATE solicitudes_servicio SET
-            pago_confirmado = true,
-            pago_confirmado_en = NOW(),
-            precio_final = :precio_final,
-            distancia_recorrida = :distancia,
-            tiempo_transcurrido = :tiempo,
-            precio_ajustado_por_tracking = TRUE,
-            tuvo_desvio_ruta = :tuvo_desvio,
-            desglose_precio = :desglose_json
-        WHERE id = :solicitud_id
-    ");
+    $updateSet = [
+        'pago_confirmado = true',
+        'pago_confirmado_en = NOW()',
+        'precio_final = :precio_final',
+        'distancia_recorrida = :distancia',
+        'tiempo_transcurrido = :tiempo',
+        'precio_ajustado_por_tracking = TRUE',
+        'tuvo_desvio_ruta = :tuvo_desvio',
+        'desglose_precio = :desglose_json',
+    ];
+
+    if ($hasDistanceFinal) {
+        $updateSet[] = 'distance_final = :distance_final';
+    }
+    if ($hasDurationFinal) {
+        $updateSet[] = 'duration_final = :duration_final';
+    }
+    if ($hasPriceFinalEn) {
+        $updateSet[] = 'price_final = :price_final_en';
+    }
+    if ($hasCompletedAt) {
+        $updateSet[] = 'completed_at = COALESCE(completed_at, NOW())';
+    }
+    if ($hasMetricsLocked) {
+        $updateSet[] = 'metrics_locked = TRUE';
+    }
+    if ($hasGpsPointsCount) {
+        $updateSet[] = 'gps_points_count = :gps_points_count';
+    }
+
+    $stmt = $db->prepare(
+        "UPDATE solicitudes_servicio SET
+            " . implode(",\n            ", $updateSet) . "
+        WHERE id = :solicitud_id"
+    );
     
-    $stmt->execute([
+    $paramsSolicitud = [
         ':precio_final' => $precio_final,
         ':distancia' => $distancia_real,
         ':tiempo' => $tiempo_real_seg,
         ':tuvo_desvio' => $tuvo_desvio ? 1 : 0,
         ':desglose_json' => $desglose_json,
-        ':solicitud_id' => $solicitud_id
-    ]);
+        ':solicitud_id' => $solicitud_id,
+    ];
+
+    if ($hasDistanceFinal) {
+        $paramsSolicitud[':distance_final'] = $distancia_real;
+    }
+    if ($hasDurationFinal) {
+        $paramsSolicitud[':duration_final'] = $tiempo_real_seg;
+    }
+    if ($hasPriceFinalEn) {
+        $paramsSolicitud[':price_final_en'] = $precio_final;
+    }
+    if ($hasGpsPointsCount) {
+        $paramsSolicitud[':gps_points_count'] = intval($reconciliacion['accepted_points'] ?? 0);
+    }
+
+    $stmt->execute($paramsSolicitud);
 
     // Blindaje de consistencia: si por cualquier motivo falló update_trip_status.php,
     // dejamos el viaje formalmente cerrado aquí también para no quedar "en viaje".
@@ -824,16 +1151,32 @@ try {
             'total_recargos' => round($total_recargos, 2),
             'tipo_recargo' => $tipo_recargo,
             'recargo_porcentaje' => $recargo_porcentaje,
+            'porcentaje_recargo_festivo' => round($porcentaje_recargo_festivo, 2),
+            'porcentaje_recargo_nocturno' => round($porcentaje_recargo_nocturno, 2),
+            'porcentaje_recargo_trafico' => round($porcentaje_recargo_trafico, 2),
             'aplico_tarifa_minima' => $aplico_tarifa_minima,
             'precio_antes_redondeo' => round($precio_total, 2),
-            'precio_final' => $precio_final
+            'precio_final' => $precio_final,
+            'contexto_colombia' => [
+                'fecha_hora_bogota' => $fecha_colombia->format('Y-m-d H:i:s'),
+                'es_festivo' => $es_festivo,
+                'fuente_festivo' => $holidayMeta['source'] ?? 'desconocida',
+                'es_nocturno' => $es_nocturno,
+            ],
+            'trafico' => [
+                'traffic_ratio' => round(floatval($trafico['traffic_ratio'] ?? 1.0), 4),
+                'traffic_level' => $trafico['traffic_level'] ?? 'normal',
+                'source' => $trafico['source'] ?? 'unknown',
+            ],
         ],
         'tracking' => [
             'distancia_real_km' => round($distancia_real, 2),
             'tiempo_real_min' => $tiempo_real_min,
             'tiempo_real_seg' => $tiempo_real_seg,
             'distancia_estimada_km' => $distancia_estimada,
-            'tiempo_estimado_min' => $tiempo_estimado_min
+            'tiempo_estimado_min' => $tiempo_estimado_min,
+            'gps_puntos_validos' => intval($reconciliacion['accepted_points'] ?? 0),
+            'gps_puntos_descartados' => intval($reconciliacion['rejected_points'] ?? 0),
         ],
         'diferencias' => [
             'diferencia_distancia_km' => round($diferencia_distancia, 2),
@@ -854,7 +1197,8 @@ try {
         'meta' => [
             'empresa_id' => $empresa_id,
             'config_precios_id' => $config_precios_id,
-            'tipo_vehiculo' => $viaje['tipo_vehiculo'] ?? 'moto'
+            'tipo_vehiculo' => $viaje['tipo_vehiculo'] ?? 'moto',
+            'metrics_locked' => $hasMetricsLocked ? true : null,
         ]
     ];
     

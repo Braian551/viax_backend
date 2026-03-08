@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -12,6 +13,41 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build changed files manifest
+        id: manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BEFORE_SHA="${{ github.event.before }}"
+          AFTER_SHA="${{ github.sha }}"
+
+          if [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            git diff-tree --no-commit-id --name-status -r "$AFTER_SHA" > /tmp/changed_raw.txt || true
+          else
+            git diff --name-status "$BEFORE_SHA" "$AFTER_SHA" > /tmp/changed_raw.txt || true
+          fi
+
+          # Filtrar solo archivos relevantes para deploy de backend.
+          grep -E '^[AMRT]\s+' /tmp/changed_raw.txt | awk '{print $2}' \
+            | grep -Ev '^\.github/|^\.git/|^vendor/|^node_modules/|^\.env$|^config/\.env$' \
+            > /tmp/changed_upload.txt || true
+
+          grep -E '^D\s+' /tmp/changed_raw.txt | awk '{print $2}' \
+            | grep -Ev '^\.github/|^\.git/|^vendor/|^node_modules/|^\.env$|^config/\.env$' \
+            > /tmp/changed_delete.txt || true
+
+          UPLOAD_COUNT=$(wc -l < /tmp/changed_upload.txt || echo 0)
+          DELETE_COUNT=$(wc -l < /tmp/changed_delete.txt || echo 0)
+
+          echo "upload_count=$UPLOAD_COUNT" >> "$GITHUB_OUTPUT"
+          echo "delete_count=$DELETE_COUNT" >> "$GITHUB_OUTPUT"
+
+          echo "Archivos a subir: $UPLOAD_COUNT"
+          echo "Archivos a eliminar: $DELETE_COUNT"
 
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.9.0
@@ -23,17 +59,25 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -p "${{ secrets.SSH_PORT }}" -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
 
-      - name: Sync backend files
+      - name: Sync changed backend files only
+        if: steps.manifest.outputs.upload_count != '0'
         run: |
-          rsync -az --delete \
-            --exclude='.git/' \
-            --exclude='.github/' \
-            --exclude='.env' \
-            --exclude='config/.env' \
-            --exclude='vendor/' \
-            --exclude='node_modules/' \
+          rsync -az \
+            --files-from=/tmp/changed_upload.txt \
             -e "ssh -p ${{ secrets.SSH_PORT }}" \
             ./ "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/var/www/viax/backend/"
+
+      - name: Delete removed files on server
+        if: steps.manifest.outputs.delete_count != '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r file; do
+            if [ -n "$file" ]; then
+              ssh -p "${{ secrets.SSH_PORT }}" "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" \
+                "rm -f '/var/www/viax/backend/$file'"
+            fi
+          done < /tmp/changed_delete.txt
 
       - name: Install dependencies and set permissions
         run: |

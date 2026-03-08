@@ -691,6 +691,37 @@ try {
     $porcentaje_recargo_nocturno = $es_nocturno ? floatval($config['recargo_nocturno'] ?? 0) : 0.0;
     $porcentaje_recargo_trafico = calculateTrafficSurcharge(floatval($trafico['traffic_ratio'] ?? 1.0));
 
+    // Fallback operativo: si no hay dato real de Routes (por ejemplo, API key faltante)
+    // aplicamos la franja configurada de hora pico para no perder el recargo.
+    $fuenteTrafico = strtolower(trim(strval($trafico['source'] ?? 'unknown')));
+    $horaActualBogota = $fecha_colombia->format('H:i:s');
+    $hPicoIniM = (string) ($config['hora_pico_inicio_manana'] ?? '07:00:00');
+    $hPicoFinM = (string) ($config['hora_pico_fin_manana'] ?? '09:00:00');
+    $hPicoIniT = (string) ($config['hora_pico_inicio_tarde'] ?? '17:00:00');
+    $hPicoFinT = (string) ($config['hora_pico_fin_tarde'] ?? '19:00:00');
+    $recargoHoraPicoConfig = floatval($config['recargo_hora_pico'] ?? 0);
+
+    $horaSec = trafficTimeToSeconds($horaActualBogota);
+    $esPicoManana = $horaSec >= trafficTimeToSeconds($hPicoIniM)
+        && $horaSec <= trafficTimeToSeconds($hPicoFinM);
+    $esPicoTarde = $horaSec >= trafficTimeToSeconds($hPicoIniT)
+        && $horaSec <= trafficTimeToSeconds($hPicoFinT);
+
+    $traficoInconcluso = in_array($fuenteTrafico, [
+        'no_api_key',
+        'api_error',
+        'invalid_response',
+        'throttled_lock',
+        'cache_historical_no_key',
+    ], true);
+
+    if ($traficoInconcluso && $porcentaje_recargo_trafico <= 0 && $recargoHoraPicoConfig > 0 && ($esPicoManana || $esPicoTarde)) {
+        $porcentaje_recargo_trafico = $recargoHoraPicoConfig;
+        $trafico['source'] = 'fallback_config_schedule';
+        $trafico['traffic_level'] = $esPicoManana ? 'hora_pico_manana' : 'hora_pico_tarde';
+        $trafico['peak_traffic'] = true;
+    }
+
     $recargo_festivo = $porcentaje_recargo_festivo > 0
         ? $subtotal_con_descuento * ($porcentaje_recargo_festivo / 100)
         : 0.0;

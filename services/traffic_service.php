@@ -75,6 +75,32 @@ function trafficBuildDefaultResult(string $source, string $reason = ''): array
 }
 
 /**
+ * Resuelve API key de Google para Routes.
+ *
+ * Orden de prioridad:
+ * 1) GOOGLE_MAPS_API_KEY
+ * 2) GOOGLE_PLACES_API_KEY
+ * 3) GOOGLE_API_KEY
+ */
+function trafficResolveGoogleApiKey(): string
+{
+    $candidates = [
+        'GOOGLE_MAPS_API_KEY',
+        'GOOGLE_PLACES_API_KEY',
+        'GOOGLE_API_KEY',
+    ];
+
+    foreach ($candidates as $name) {
+        $value = trim((string) env_value($name, ''));
+        if ($value !== '') {
+            return $value;
+        }
+    }
+
+    return '';
+}
+
+/**
  * Calcula trafico con cache por zonas y throttling.
  *
  * Uso:
@@ -104,7 +130,7 @@ function trafficGetConditions(float $originLat, float $originLng, float $destLat
         return $cached;
     }
 
-    $apiKey = (string) env_value('GOOGLE_MAPS_API_KEY', '');
+    $apiKey = trafficResolveGoogleApiKey();
     if ($apiKey === '') {
         $historical = trafficCacheGetHistorical($zonePairKey);
         if (is_array($historical)) {
@@ -112,7 +138,7 @@ function trafficGetConditions(float $originLat, float $originLng, float $destLat
             $historical['api_called'] = false;
             return $historical;
         }
-        return trafficBuildDefaultResult('no_api_key', 'GOOGLE_MAPS_API_KEY_no_configurada');
+        return trafficBuildDefaultResult('no_api_key', 'GOOGLE_MAPS_API_KEY_o_GOOGLE_PLACES_API_KEY_no_configurada');
     }
 
     if (!trafficCacheTryAcquireLock($zonePairKey, 15)) {

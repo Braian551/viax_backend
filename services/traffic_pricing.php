@@ -70,32 +70,165 @@ function calculateTrafficSurcharge(float $ratio): float
 
 function colombiaHolidayCacheKey(string $dateYmd): string
 {
-    return 'traffic:holiday:co:' . $dateYmd;
+    // v2 invalida caches creados con reglas antiguas.
+    return 'traffic:holiday:co:v2:' . $dateYmd;
 }
 
 /**
- * Fallback local basico para no bloquear pricing si la API falla.
+ * Convierte cualquier fecha/hora entrante a zona horaria Colombia.
+ *
+ * Si no logra parsear, retorna "ahora" en Bogota o el fallback indicado.
+ */
+function trafficToColombiaDateTime($rawDate, ?DateTimeInterface $fallback = null): DateTime
+{
+    $tzCo = new DateTimeZone('America/Bogota');
+    if ($rawDate instanceof DateTimeInterface) {
+        $dt = new DateTime($rawDate->format('Y-m-d H:i:s'));
+        $dt->setTimezone($tzCo);
+        return $dt;
+    }
+
+    if (is_string($rawDate) && trim($rawDate) !== '') {
+        try {
+            $dt = new DateTime(trim($rawDate));
+            $dt->setTimezone($tzCo);
+            return $dt;
+        } catch (Throwable $e) {
+            // sigue a fallback
+        }
+    }
+
+    if ($fallback !== null) {
+        $dt = new DateTime($fallback->format('Y-m-d H:i:s'));
+        $dt->setTimezone($tzCo);
+        return $dt;
+    }
+
+    return new DateTime('now', $tzCo);
+}
+
+/**
+ * Mueve una fecha al lunes siguiente (Ley Emiliani).
+ */
+function colombiaHolidayMoveToNextMonday(DateTimeInterface $date): DateTime
+{
+    $dt = new DateTime($date->format('Y-m-d'), new DateTimeZone('America/Bogota'));
+    $weekday = intval($dt->format('N')); // 1=lunes ... 7=domingo
+    if ($weekday === 1) {
+        return $dt;
+    }
+
+    $daysToAdd = 8 - $weekday;
+    $dt->modify('+' . $daysToAdd . ' day');
+    return $dt;
+}
+
+/**
+ * Retorna festivos oficiales de Colombia para un año (Ley 51 de 1983).
+ *
+ * Fuente de verdad local para contingencia cuando la API externa falla.
+ */
+function colombiaLegalHolidaysForYear(int $year): array
+{
+    $tz = new DateTimeZone('America/Bogota');
+    $dates = [];
+
+    $add = static function (DateTimeInterface $d) use (&$dates): void {
+        $dates[$d->format('Y-m-d')] = true;
+    };
+
+    // Festivos fijos.
+    $fixed = [
+        "$year-01-01", // Año nuevo
+        "$year-05-01", // Dia del trabajo
+        "$year-07-20", // Independencia
+        "$year-08-07", // Batalla de Boyaca
+        "$year-12-08", // Inmaculada Concepcion
+        "$year-12-25", // Navidad
+    ];
+    foreach ($fixed as $f) {
+        $add(new DateTime($f, $tz));
+    }
+
+    // Emiliani (se trasladan al lunes siguiente).
+    $emiliani = [
+        "$year-01-06", // Reyes Magos
+        "$year-03-19", // San Jose
+        "$year-06-29", // San Pedro y San Pablo
+        "$year-08-15", // Asuncion de la Virgen
+        "$year-10-12", // Dia de la Raza
+        "$year-11-01", // Todos los Santos
+        "$year-11-11", // Independencia de Cartagena
+    ];
+    foreach ($emiliani as $e) {
+        $add(colombiaHolidayMoveToNextMonday(new DateTime($e, $tz)));
+    }
+
+    // Festivos de pascua.
+    $easter = new DateTime('@' . easter_date($year));
+    $easter->setTimezone($tz);
+
+    // Jueves y Viernes Santo.
+    $holyThursday = (clone $easter)->modify('-3 day');
+    $holyFriday = (clone $easter)->modify('-2 day');
+    $add($holyThursday);
+    $add($holyFriday);
+
+    // Ascension, Corpus Christi y Sagrado Corazon (trasladados a lunes).
+    $ascension = colombiaHolidayMoveToNextMonday((clone $easter)->modify('+40 day'));
+    $corpus = colombiaHolidayMoveToNextMonday((clone $easter)->modify('+61 day'));
+    $sagrado = colombiaHolidayMoveToNextMonday((clone $easter)->modify('+68 day'));
+    $add($ascension);
+    $add($corpus);
+    $add($sagrado);
+
+    return array_keys($dates);
+}
+
+/**
+ * Fallback legal para no bloquear pricing si la API falla.
+ *
+ * Importante:
+ * - Sabado y domingo NO son festivo por defecto en Colombia.
+ * - Solo se marcan festivos oficiales de ley.
  */
 function trafficLocalHolidayFallback(DateTimeInterface $dt): bool
 {
-    $month = intval($dt->format('m'));
-    $day = intval($dt->format('d'));
+    $dateYmd = $dt->format('Y-m-d');
+    $holidays = colombiaLegalHolidaysForYear(intval($dt->format('Y')));
+    return in_array($dateYmd, $holidays, true);
+}
 
-    $fixed = [
-        '1-1',
-        '5-1',
-        '7-20',
-        '8-7',
-        '12-8',
-        '12-25',
+/**
+ * Normaliza diferentes formatos de fecha del API de festivos.
+ */
+function trafficNormalizeHolidayDateFromApi(array $row): ?string
+{
+    $candidates = [
+        $row['date'] ?? null,
+        $row['fecha'] ?? null,
+        $row['day'] ?? null,
     ];
 
-    if (in_array($month . '-' . $day, $fixed, true)) {
-        return true;
+    foreach ($candidates as $candidate) {
+        if (!is_string($candidate) || trim($candidate) === '') {
+            continue;
+        }
+
+        $value = trim($candidate);
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) === 1) {
+            return $value;
+        }
+
+        try {
+            $dt = new DateTime($value, new DateTimeZone('America/Bogota'));
+            return $dt->format('Y-m-d');
+        } catch (Throwable $e) {
+            continue;
+        }
     }
 
-    // Domingo como recargo dominical/festivo de negocio.
-    return intval($dt->format('w')) === 0;
+    return null;
 }
 
 /**
@@ -105,7 +238,7 @@ function trafficLocalHolidayFallback(DateTimeInterface $dt): bool
  */
 function trafficIsHolidayColombia(DateTimeInterface $dt, ?array &$meta = null): bool
 {
-    $dateYmd = $dt->format('Y-m-d');
+    $dateYmd = trafficToColombiaDateTime($dt)->format('Y-m-d');
     $year = intval($dt->format('Y'));
     $meta = ['source' => 'unknown'];
 
@@ -147,8 +280,8 @@ function trafficIsHolidayColombia(DateTimeInterface $dt, ?array &$meta = null): 
                     if (!is_array($row)) {
                         continue;
                     }
-                    $candidate = $row['date'] ?? $row['fecha'] ?? $row['day'] ?? null;
-                    if (is_string($candidate) && substr($candidate, 0, 10) === $dateYmd) {
+                    $candidateDate = trafficNormalizeHolidayDateFromApi($row);
+                    if ($candidateDate !== null && $candidateDate === $dateYmd) {
                         $isHoliday = true;
                         break;
                     }

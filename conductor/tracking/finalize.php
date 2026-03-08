@@ -672,7 +672,11 @@ try {
     $recargo_espera = $tiempo_espera_cobrable * floatval($config['costo_tiempo_espera'] ?? 0);
     
     // 4. Determinar recargos con contexto Colombia + trafico real por zonas.
-    $fecha_colombia = trafficNowInColombia();
+    // Usamos el timestamp mas cercano al fin real del viaje, no el "ahora" del servidor.
+    $fechaReferenciaRaw = $ultimo_tracking['timestamp_gps']
+        ?? $ultimo_tracking['actualizado_en']
+        ?? null;
+    $fecha_colombia = trafficToColombiaDateTime($fechaReferenciaRaw, trafficNowInColombia());
     $h_noc_ini = (string) ($config['hora_nocturna_inicio'] ?? '22:00:00');
     $h_noc_fin = (string) ($config['hora_nocturna_fin'] ?? '06:00:00');
 

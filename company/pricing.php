@@ -109,7 +109,18 @@ function handleGetPricing($db, $empresaId) {
             $merged[$type] = $p;
         }
         
-        // 5. FILTRADO FINAL: solo devolver lo que está activo para la empresa
+        // 5. Completar vehículos activos faltantes.
+        // Caso real observado: empresa_tipos_vehiculo tiene 'mototaxi' activo,
+        // pero configuracion_precios no tiene fila y el tipo desaparece del UI.
+        if ($hasNormalizedData) {
+            foreach ($vehiculosActivos as $activeType) {
+                if (!isset($merged[$activeType])) {
+                    $merged[$activeType] = buildFallbackPricingForActiveVehicle($merged, $activeType);
+                }
+            }
+        }
+
+        // 6. FILTRADO FINAL: solo devolver lo que está activo para la empresa
         $finalResult = [];
         
         foreach ($merged as $type => $price) {
@@ -315,5 +326,51 @@ function getVehicleTypeAliases($canonicalType) {
     ];
 
     return $aliasByCanonical[$canonical] ?? [$canonical];
+}
+
+function buildFallbackPricingForActiveVehicle($mergedPricing, $activeType) {
+    $type = normalizeVehicleTypeCode($activeType);
+
+    // Intentar primero con un tipo cercano para heredar valores razonables.
+    // Prioridad: mismo tipo (si apareciera por alias), moto, carro, taxi.
+    $candidateOrder = [$type, 'moto', 'carro', 'taxi'];
+    $base = null;
+
+    foreach ($candidateOrder as $candidate) {
+        if (isset($mergedPricing[$candidate])) {
+            $base = $mergedPricing[$candidate];
+            break;
+        }
+    }
+
+    if ($base === null) {
+        $base = [];
+    }
+
+    // Mantener forma de respuesta consistente para app y sitioweb.
+    $base['id'] = $base['id'] ?? null;
+    $base['tipo_vehiculo'] = $type;
+    $base['tarifa_base'] = $base['tarifa_base'] ?? 0;
+    $base['costo_por_km'] = $base['costo_por_km'] ?? 0;
+    $base['costo_por_minuto'] = $base['costo_por_minuto'] ?? 0;
+    $base['tarifa_minima'] = $base['tarifa_minima'] ?? 0;
+    $base['tarifa_maxima'] = array_key_exists('tarifa_maxima', $base) ? $base['tarifa_maxima'] : null;
+    $base['recargo_hora_pico'] = $base['recargo_hora_pico'] ?? 0;
+    $base['recargo_nocturno'] = $base['recargo_nocturno'] ?? 0;
+    $base['recargo_festivo'] = $base['recargo_festivo'] ?? 0;
+    $base['descuento_distancia_larga'] = $base['descuento_distancia_larga'] ?? 0;
+    $base['umbral_km_descuento'] = $base['umbral_km_descuento'] ?? 15;
+    $base['comision_plataforma'] = $base['comision_plataforma'] ?? 0;
+    $base['comision_metodo_pago'] = $base['comision_metodo_pago'] ?? 0;
+    $base['distancia_minima'] = $base['distancia_minima'] ?? 1;
+    $base['distancia_maxima'] = $base['distancia_maxima'] ?? 50;
+    $base['tiempo_espera_gratis'] = $base['tiempo_espera_gratis'] ?? 3;
+    $base['costo_tiempo_espera'] = $base['costo_tiempo_espera'] ?? 0;
+    $base['activo'] = 1;
+    $base['es_global'] = true;
+    $base['heredado'] = true;
+    $base['requiere_configuracion'] = true;
+
+    return $base;
 }
 ?>

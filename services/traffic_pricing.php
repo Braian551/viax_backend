@@ -74,6 +74,29 @@ function colombiaHolidayCacheKey(string $dateYmd): string
     return 'traffic:holiday:co:v2:' . $dateYmd;
 }
 
+function colombiaHolidayYearCacheKey(int $year): string
+{
+    return 'traffic:holiday:co:year:v1:' . $year;
+}
+
+/**
+ * Politica de negocio: domingo puede cobrarse como recargo dominical/festivo.
+ */
+function trafficShouldApplySundayAsHoliday(): bool
+{
+    $raw = strtolower(trim((string) env_value('APPLY_SUNDAY_AS_HOLIDAY_SURCHARGE', '1')));
+    return in_array($raw, ['1', 'true', 'yes', 'si'], true);
+}
+
+/**
+ * Detecta si la fecha cae en domingo en Colombia.
+ */
+function trafficIsSundayColombia(DateTimeInterface $dt): bool
+{
+    $co = trafficToColombiaDateTime($dt);
+    return intval($co->format('w')) === 0;
+}
+
 /**
  * Convierte cualquier fecha/hora entrante a zona horaria Colombia.
  *
@@ -232,15 +255,118 @@ function trafficNormalizeHolidayDateFromApi(array $row): ?string
 }
 
 /**
+ * Construye lista de endpoints candidatos para festivos por año.
+ */
+function trafficHolidayApiCandidateUrls(int $year): array
+{
+    $candidates = [];
+
+    $fromEnv = trim((string) env_value('COLOMBIA_HOLIDAYS_API_URL', ''));
+    if ($fromEnv !== '') {
+        if (strpos($fromEnv, '{year}') !== false) {
+            $candidates[] = str_replace('{year}', strval($year), $fromEnv);
+        } else {
+            $candidates[] = rtrim($fromEnv, '/') . '?year=' . $year;
+        }
+    }
+
+    // API Colombia (variantes por posibles diferencias de case/ruta).
+    $candidates[] = 'https://api-colombia.com/api/v1/Holiday?year=' . $year;
+    $candidates[] = 'https://api-colombia.com/api/v1/holiday?year=' . $year;
+
+    // Fallback global robusto de festivos oficiales por pais.
+    $candidates[] = 'https://date.nager.at/api/v3/PublicHolidays/' . $year . '/CO';
+
+    return array_values(array_unique($candidates));
+}
+
+/**
+ * Descarga calendario anual de festivos desde API externa.
+ *
+ * Retorna null si no se logra obtener un arreglo valido.
+ */
+function trafficFetchHolidayDatesFromApi(int $year, ?array &$meta = null): ?array
+{
+    $meta = ['source' => null, 'url' => null];
+    $urls = trafficHolidayApiCandidateUrls($year);
+
+    foreach ($urls as $url) {
+        try {
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 8,
+                CURLOPT_CONNECTTIMEOUT => 3,
+                CURLOPT_HTTPHEADER => ['Accept: application/json'],
+            ]);
+
+            $resp = curl_exec($ch);
+            $status = intval(curl_getinfo($ch, CURLINFO_HTTP_CODE));
+            $err = curl_error($ch);
+            curl_close($ch);
+
+            if ($resp === false || $status < 200 || $status >= 300) {
+                error_log('[traffic_holiday] HTTP ' . $status . ' url=' . $url . ' error=' . $err);
+                continue;
+            }
+
+            $decoded = json_decode($resp, true);
+            if (!is_array($decoded)) {
+                continue;
+            }
+
+            // Algunos APIs envuelven en { data: [...] }.
+            $rows = $decoded;
+            if (isset($decoded['data']) && is_array($decoded['data'])) {
+                $rows = $decoded['data'];
+            }
+
+            $dates = [];
+            foreach ($rows as $row) {
+                if (!is_array($row)) {
+                    continue;
+                }
+                $candidateDate = trafficNormalizeHolidayDateFromApi($row);
+                if ($candidateDate !== null && preg_match('/^' . $year . '-\d{2}-\d{2}$/', $candidateDate) === 1) {
+                    $dates[$candidateDate] = true;
+                }
+            }
+
+            if (!empty($dates)) {
+                $meta['source'] = 'colombia_api';
+                $meta['url'] = $url;
+                return array_keys($dates);
+            }
+        } catch (Throwable $e) {
+            error_log('[traffic_holiday] exception url=' . $url . ' msg=' . $e->getMessage());
+            continue;
+        }
+    }
+
+    return null;
+}
+
+/**
  * Consulta API de festivos Colombia, cachea por fecha y retorna bool.
  *
  * API por defecto: https://api-colombia.com/api/v1/Holiday?year=YYYY
  */
 function trafficIsHolidayColombia(DateTimeInterface $dt, ?array &$meta = null): bool
 {
-    $dateYmd = trafficToColombiaDateTime($dt)->format('Y-m-d');
-    $year = intval($dt->format('Y'));
+    $coDate = trafficToColombiaDateTime($dt);
+    $dateYmd = $coDate->format('Y-m-d');
+    $year = intval($coDate->format('Y'));
     $meta = ['source' => 'unknown'];
+
+    // Cache anual prioritaria para reducir llamadas y cubrir todo el calendario.
+    $yearCacheRaw = Cache::get(colombiaHolidayYearCacheKey($year));
+    if (is_string($yearCacheRaw) && trim($yearCacheRaw) !== '') {
+        $yearCache = json_decode($yearCacheRaw, true);
+        if (is_array($yearCache) && isset($yearCache['dates']) && is_array($yearCache['dates'])) {
+            $meta['source'] = $yearCache['source'] ?? 'cache_year';
+            return in_array($dateYmd, $yearCache['dates'], true);
+        }
+    }
 
     $cachedRaw = Cache::get(colombiaHolidayCacheKey($dateYmd));
     if (is_string($cachedRaw) && trim($cachedRaw) !== '') {
@@ -253,51 +379,41 @@ function trafficIsHolidayColombia(DateTimeInterface $dt, ?array &$meta = null): 
 
     $isHoliday = null;
 
-    try {
-        $apiBase = rtrim((string) env_value('COLOMBIA_HOLIDAYS_API_URL', 'https://api-colombia.com/api/v1/Holiday'), '/');
-        $url = strpos($apiBase, '{year}') !== false
-            ? str_replace('{year}', strval($year), $apiBase)
-            : $apiBase . '?year=' . $year;
-
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => 8,
-            CURLOPT_CONNECTTIMEOUT => 3,
-            CURLOPT_HTTPHEADER => ['Accept: application/json'],
-        ]);
-
-        $resp = curl_exec($ch);
-        $status = intval(curl_getinfo($ch, CURLINFO_HTTP_CODE));
-        $err = curl_error($ch);
-        curl_close($ch);
-
-        if ($resp !== false && $status >= 200 && $status < 300) {
-            $rows = json_decode($resp, true);
-            if (is_array($rows)) {
-                $isHoliday = false;
-                foreach ($rows as $row) {
-                    if (!is_array($row)) {
-                        continue;
-                    }
-                    $candidateDate = trafficNormalizeHolidayDateFromApi($row);
-                    if ($candidateDate !== null && $candidateDate === $dateYmd) {
-                        $isHoliday = true;
-                        break;
-                    }
-                }
-                $meta['source'] = 'colombia_api';
-            }
-        } else {
-            error_log('[traffic_holiday] HTTP ' . $status . ' error=' . $err);
+    $apiMeta = [];
+    $apiDates = trafficFetchHolidayDatesFromApi($year, $apiMeta);
+    if (is_array($apiDates)) {
+        $isHoliday = in_array($dateYmd, $apiDates, true);
+        $meta['source'] = $apiMeta['source'] ?? 'colombia_api';
+        if (!empty($apiMeta['url'])) {
+            $meta['url'] = $apiMeta['url'];
         }
-    } catch (Throwable $e) {
-        error_log('[traffic_holiday] exception: ' . $e->getMessage());
+
+        Cache::set(
+            colombiaHolidayYearCacheKey($year),
+            (string) json_encode([
+                'source' => $meta['source'],
+                'url' => $meta['url'] ?? null,
+                'year' => $year,
+                'dates' => array_values(array_unique($apiDates)),
+            ]),
+            86400
+        );
     }
 
     if ($isHoliday === null) {
-        $isHoliday = trafficLocalHolidayFallback($dt);
+        $fallbackDates = colombiaLegalHolidaysForYear($year);
+        $isHoliday = in_array($dateYmd, $fallbackDates, true);
         $meta['source'] = 'fallback_local';
+
+        Cache::set(
+            colombiaHolidayYearCacheKey($year),
+            (string) json_encode([
+                'source' => 'fallback_local',
+                'year' => $year,
+                'dates' => $fallbackDates,
+            ]),
+            86400
+        );
     }
 
     Cache::set(

@@ -681,7 +681,10 @@ try {
     $h_noc_fin = (string) ($config['hora_nocturna_fin'] ?? '06:00:00');
 
     $holidayMeta = [];
-    $es_festivo = trafficIsHolidayColombia($fecha_colombia, $holidayMeta);
+    $es_festivo_legal = trafficIsHolidayColombia($fecha_colombia, $holidayMeta);
+    $es_dominical = trafficIsSundayColombia($fecha_colombia);
+    $aplicarDominicalComoFestivo = trafficShouldApplySundayAsHoliday();
+    $es_festivo = $es_festivo_legal || ($aplicarDominicalComoFestivo && $es_dominical);
     $es_nocturno = trafficIsNocturnoColombia($fecha_colombia, $h_noc_ini, $h_noc_fin);
 
     $originLat = isset($viaje['latitud_recogida']) ? floatval($viaje['latitud_recogida']) : 0.0;
@@ -738,7 +741,13 @@ try {
 
     $tiposRecargo = [];
     if ($recargo_festivo > 0) {
-        $tiposRecargo[] = 'festivo';
+        if ($es_festivo_legal) {
+            $tiposRecargo[] = 'festivo';
+        } elseif ($es_dominical && $aplicarDominicalComoFestivo) {
+            $tiposRecargo[] = 'dominical';
+        } else {
+            $tiposRecargo[] = 'festivo';
+        }
     }
     if ($recargo_nocturno > 0) {
         $tiposRecargo[] = 'nocturno';
@@ -824,7 +833,11 @@ try {
         'contexto_colombia' => [
             'fecha_hora_bogota' => $fecha_colombia->format('Y-m-d H:i:s'),
             'es_festivo' => $es_festivo,
+            'es_festivo_legal' => $es_festivo_legal,
+            'es_dominical' => $es_dominical,
+            'aplica_dominical_como_festivo' => $aplicarDominicalComoFestivo,
             'fuente_festivo' => $holidayMeta['source'] ?? 'desconocida',
+            'url_api_festivos' => $holidayMeta['url'] ?? null,
             'es_nocturno' => $es_nocturno,
             'horario_nocturno' => [
                 'inicio' => $h_noc_ini,
@@ -1195,7 +1208,11 @@ try {
             'contexto_colombia' => [
                 'fecha_hora_bogota' => $fecha_colombia->format('Y-m-d H:i:s'),
                 'es_festivo' => $es_festivo,
+                'es_festivo_legal' => $es_festivo_legal,
+                'es_dominical' => $es_dominical,
+                'aplica_dominical_como_festivo' => $aplicarDominicalComoFestivo,
                 'fuente_festivo' => $holidayMeta['source'] ?? 'desconocida',
+                'url_api_festivos' => $holidayMeta['url'] ?? null,
                 'es_nocturno' => $es_nocturno,
             ],
             'trafico' => [

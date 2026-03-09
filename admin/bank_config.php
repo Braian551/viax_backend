@@ -1,0 +1,119 @@
+<?php
+/**
+ * API: Configuración de cuenta bancaria del administrador
+ * Endpoint: GET/POST admin/bank_config.php
+ * 
+ * GET: Obtener configuración actual de cuenta bancaria
+ * POST: Actualizar configuración de cuenta bancaria
+ * 
+ * Esta cuenta es la que las empresas usarán para hacer transferencias.
+ */
+
+error_reporting(E_ERROR | E_PARSE);
+ini_set('display_errors', '0');
+
+header('Content-Type: application/json; charset=UTF-8');
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type, Accept');
+
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
+    exit();
+}
+
+require_once __DIR__ . '/../config/database.php';
+
+try {
+    $database = new Database();
+    $db = $database->getConnection();
+
+    // ─── GET: Obtener configuración ───
+    if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+        $adminId = isset($_GET['admin_id']) ? intval($_GET['admin_id']) : 0;
+
+        $stmt = $db->prepare("SELECT * FROM admin_configuracion_banco WHERE admin_id = :admin_id LIMIT 1");
+        $stmt->execute([':admin_id' => $adminId > 0 ? $adminId : 0]);
+        $config = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        // Si no hay registro para ese admin, buscar cualquiera
+        if (!$config) {
+            $stmt = $db->query("SELECT * FROM admin_configuracion_banco LIMIT 1");
+            $config = $stmt->fetch(PDO::FETCH_ASSOC);
+        }
+
+        echo json_encode([
+            'success' => true,
+            'data' => $config ?: [
+                'configurada' => false,
+                'banco_nombre' => null,
+                'tipo_cuenta' => null,
+                'numero_cuenta' => null,
+                'titular_cuenta' => null,
+                'documento_titular' => null,
+            ],
+        ]);
+        exit();
+    }
+
+    // ─── POST: Actualizar configuración ───
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        throw new Exception('Método no permitido');
+    }
+
+    $input = json_decode(file_get_contents('php://input'), true);
+
+    $adminId = intval($input['admin_id'] ?? 0);
+    $bancoCodigo = trim($input['banco_codigo'] ?? '');
+    $bancoNombre = trim($input['banco_nombre'] ?? '');
+    $tipoCuenta = trim($input['tipo_cuenta'] ?? '');
+    $numeroCuenta = trim($input['numero_cuenta'] ?? '');
+    $titularCuenta = trim($input['titular_cuenta'] ?? '');
+    $documentoTitular = trim($input['documento_titular'] ?? '');
+    $referencia = trim($input['referencia_transferencia'] ?? '');
+
+    if ($adminId <= 0) {
+        throw new Exception('admin_id es requerido');
+    }
+
+    if ($bancoNombre === '' || $numeroCuenta === '' || $titularCuenta === '') {
+        throw new Exception('Banco, número de cuenta y titular son requeridos');
+    }
+
+    // Upsert
+    $stmt = $db->prepare("INSERT INTO admin_configuracion_banco
+        (admin_id, banco_codigo, banco_nombre, tipo_cuenta, numero_cuenta,
+         titular_cuenta, documento_titular, referencia_transferencia, actualizado_en)
+        VALUES
+        (:admin_id, :banco_codigo, :banco_nombre, :tipo_cuenta, :numero_cuenta,
+         :titular_cuenta, :documento_titular, :referencia, NOW())
+        ON CONFLICT (admin_id) DO UPDATE SET
+            banco_codigo = EXCLUDED.banco_codigo,
+            banco_nombre = EXCLUDED.banco_nombre,
+            tipo_cuenta = EXCLUDED.tipo_cuenta,
+            numero_cuenta = EXCLUDED.numero_cuenta,
+            titular_cuenta = EXCLUDED.titular_cuenta,
+            documento_titular = EXCLUDED.documento_titular,
+            referencia_transferencia = EXCLUDED.referencia_transferencia,
+            actualizado_en = NOW()");
+
+    $stmt->execute([
+        ':admin_id' => $adminId,
+        ':banco_codigo' => $bancoCodigo ?: null,
+        ':banco_nombre' => $bancoNombre,
+        ':tipo_cuenta' => $tipoCuenta,
+        ':numero_cuenta' => $numeroCuenta,
+        ':titular_cuenta' => $titularCuenta,
+        ':documento_titular' => $documentoTitular ?: null,
+        ':referencia' => $referencia ?: null,
+    ]);
+
+    echo json_encode([
+        'success' => true,
+        'message' => 'Configuración bancaria actualizada correctamente',
+    ]);
+
+} catch (Exception $e) {
+    http_response_code(400);
+    echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+}

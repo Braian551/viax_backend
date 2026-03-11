@@ -114,7 +114,15 @@ class PushNotificationService
             return 'viajes';
         }
 
-        if (in_array($tipo, ['payment_received', 'payment_pending'], true)) {
+        if (in_array($tipo, [
+            'payment_received',
+            'payment_pending',
+            'empresa_payment_submitted',
+            'empresa_payment_approved',
+            'empresa_payment_rejected',
+            'empresa_payment_confirmed',
+            'invoice_generated',
+        ], true)) {
             return 'pagos';
         }
 

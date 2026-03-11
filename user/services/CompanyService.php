@@ -323,6 +323,16 @@ class CompanyService {
             $tipoNormalizado = $this->normalizeVehicleType($row['tipo_vehiculo_codigo']);
             $tiposPorEmpresa[$row['empresa_id']][] = $tipoNormalizado;
         }
+        
+        // Auto-incluir 'mototaxi' para empresas que tienen 'moto',
+        // ya que mototaxi es un servicio basado en moto.
+        foreach ($tiposPorEmpresa as $empresaId => &$tipos) {
+            if (in_array('moto', $tipos) && !in_array('mototaxi', $tipos)) {
+                $tipos[] = 'mototaxi';
+            }
+        }
+        unset($tipos);
+        
         return $tiposPorEmpresa;
     }
 
@@ -433,7 +443,12 @@ class CompanyService {
                 $conductorData = $conductoresIndex[$key] ?? null;
                 
                 // Get pricing
+                // Mototaxi reuses moto pricing when explicit mototaxi pricing is missing.
                 $tarifa = $tarifasIndex[$key] ?? $tarifasGlobales[$tipoVehiculo] ?? null;
+                if (!$tarifa && $tipoVehiculo === 'mototaxi') {
+                    $fallbackKey = $empresaId . '_moto';
+                    $tarifa = $tarifasIndex[$fallbackKey] ?? $tarifasGlobales['moto'] ?? null;
+                }
                 if (!$tarifa) continue; // Skip if no pricing found
 
                 // Calculate price

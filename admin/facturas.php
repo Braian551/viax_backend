@@ -102,6 +102,9 @@ try {
     $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
 
     $facturas = array_map(function ($f) use ($protocol, $host) {
+        $montoNormalizado = floatval($f['total'] ?? $f['subtotal'] ?? 0);
+        $f['monto'] = $montoNormalizado;
+
         if (!empty($f['pdf_ruta'])) {
             $f['pdf_url'] = "$protocol://$host/r2_proxy.php?key=" . urlencode($f['pdf_ruta']);
         } else {

@@ -20,6 +20,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 require_once '../config/database.php';
 
+date_default_timezone_set('America/Bogota');
+
+function formatDateTimeColombiaAmPm(?string $value): ?string {
+    if (empty($value)) {
+        return null;
+    }
+
+    try {
+        $dt = new DateTimeImmutable($value, new DateTimeZone('America/Bogota'));
+        $ampm = strtolower($dt->format('a')) === 'am' ? 'a. m.' : 'p. m.';
+        return $dt->format('d/m/Y h:i') . ' ' . $ampm;
+    } catch (Throwable $e) {
+        return (string)$value;
+    }
+}
+
 try {
     $database = new Database();
     $conn = $database->getConnection();
@@ -202,6 +218,10 @@ try {
             'fecha_solicitud' => to_iso8601($viaje['fecha_solicitud']),
             'fecha_aceptado' => to_iso8601($viaje['fecha_aceptado'] ?? null),
             'fecha_completado' => to_iso8601($viaje['fecha_completado']),
+            // Fechas formateadas Colombia (12h a. m./p. m.)
+            'fecha_solicitud_colombia' => formatDateTimeColombiaAmPm($viaje['fecha_solicitud'] ?? null),
+            'fecha_aceptado_colombia' => formatDateTimeColombiaAmPm($viaje['fecha_aceptado'] ?? null),
+            'fecha_completado_colombia' => formatDateTimeColombiaAmPm($viaje['fecha_completado'] ?? null),
             // Conductor
             'conductor_id' => isset($viaje['conductor_id']) ? (int)$viaje['conductor_id'] : null,
             'conductor_nombre' => $viaje['conductor_nombre'],

@@ -29,6 +29,7 @@ try {
 
     $database = new Database();
     $db = $database->getConnection();
+    $debtEpsilon = 1.0;
 
     // Datos de la empresa y su deuda
     $stmtEmpresa = $db->prepare("SELECT id, nombre, email, saldo_pendiente, comision_admin_porcentaje
@@ -41,6 +42,10 @@ try {
     }
 
     $deudaActual = floatval($empresa['saldo_pendiente'] ?? 0);
+    if (abs($deudaActual) < $debtEpsilon) {
+        $deudaActual = 0.0;
+    }
+    $deudaActiva = $deudaActual >= $debtEpsilon;
 
     // Total pagado históricamente
     $stmtTotalPagado = $db->prepare("SELECT COALESCE(SUM(monto), 0) FROM pagos_empresas WHERE empresa_id = :id AND tipo = 'pago'");
@@ -61,8 +66,15 @@ try {
 
     $cuentaTransferencia = null;
     if ($adminBank && !empty($adminBank['banco_nombre']) && !empty($adminBank['numero_cuenta'])) {
+        $tipoCuenta = strtolower(trim((string)($adminBank['tipo_cuenta'] ?? '')));
+        $bancoNombre = strtolower(trim((string)($adminBank['banco_nombre'] ?? '')));
+        $metodoRecaudo = ($tipoCuenta === 'nequi' || $bancoNombre === 'nequi')
+            ? 'nequi'
+            : 'cuenta_bancaria';
+
         $cuentaTransferencia = [
             'configurada' => true,
+            'metodo_recaudo' => $metodoRecaudo,
             'banco_codigo' => $adminBank['banco_codigo'],
             'banco_nombre' => $adminBank['banco_nombre'],
             'tipo_cuenta' => $adminBank['tipo_cuenta'],
@@ -72,7 +84,10 @@ try {
             'referencia_transferencia' => $adminBank['referencia_transferencia'],
         ];
     } else {
-        $cuentaTransferencia = ['configurada' => false];
+        $cuentaTransferencia = [
+            'configurada' => false,
+            'metodo_recaudo' => 'cuenta_bancaria',
+        ];
     }
 
     // Último reporte de pago
@@ -108,7 +123,7 @@ try {
         ? $hoy->format('Y-m') . '-Q1'
         : $hoy->format('Y-m') . '-Q2';
 
-    $mostrarAlerta = $deudaActual > 0;
+    $mostrarAlerta = $deudaActiva;
     $alertaObligatoria = false;
 
     if ($mostrarAlerta) {
@@ -139,6 +154,7 @@ try {
         'success' => true,
         'data' => [
             'deuda_actual' => $deudaActual,
+            'deuda_activa' => $deudaActiva,
             'total_pagado' => $totalPagado,
             'total_cargos' => $totalCargos,
             'comision_porcentaje' => floatval($empresa['comision_admin_porcentaje'] ?? 0),

@@ -61,6 +61,9 @@ try {
 
     $saldo_actual = floatval($empresa['saldo_pendiente']);
     $nuevo_saldo = max(0, $saldo_actual - $monto); // No permitir saldo negativo
+    if (abs($nuevo_saldo) < 1.0) {
+        $nuevo_saldo = 0.0;
+    }
 
     // Actualizar saldo pendiente
     $stmt = $db->prepare("UPDATE empresas_transporte SET saldo_pendiente = :nuevo_saldo, actualizado_en = NOW() WHERE id = :id");

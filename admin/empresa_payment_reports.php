@@ -244,6 +244,9 @@ try {
         $saldoActual = floatval($stmtSaldo->fetchColumn());
 
         $nuevoSaldo = max(0, $saldoActual - $montoReportado);
+        if (abs($nuevoSaldo) < 1.0) {
+            $nuevoSaldo = 0.0;
+        }
 
         // Actualizar saldo
         $stmtUpdate = $db->prepare("UPDATE empresas_transporte SET saldo_pendiente = :saldo, actualizado_en = NOW() WHERE id = :id");
@@ -283,9 +286,30 @@ try {
         $nextId = intval($stmtFacturaNum->fetchColumn());
         $numeroFactura = 'VIAX-EA-' . str_pad($nextId, 6, '0', STR_PAD_LEFT);
 
-        // Datos del admin (emisor)
-        $stmtAdmin = $db->prepare("SELECT u.id, u.nombre, u.apellido, u.email
-                                   FROM usuarios u WHERE u.tipo_usuario = 'admin' LIMIT 1");
+                // Datos del admin (emisor): prioriza el emisor principal configurado por negocio.
+                $stmtAdmin = $db->prepare("SELECT
+                                                        u.id,
+                                                        u.nombre,
+                                                        u.apellido,
+                                                        u.email,
+                                                        aef.nombre_legal,
+                                                        aef.tipo_documento,
+                                                        aef.numero_documento,
+                                                        aef.regimen_fiscal,
+                                                        aef.direccion_fiscal,
+                                                        aef.ciudad,
+                                                        aef.departamento,
+                                                        aef.pais,
+                                                        aef.telefono,
+                                                        COALESCE(aef.email_emisor, u.email) AS emisor_email
+                                             FROM usuarios u
+                                             LEFT JOIN admin_emisor_fiscal aef ON aef.admin_id = u.id
+                                             WHERE u.tipo_usuario IN ('admin', 'administrador')
+                                             ORDER BY
+                                                 (LOWER(COALESCE(aef.email_emisor, u.email)) = LOWER('braianoquen@gmail.com')) DESC,
+                                                 (LOWER(u.email) = LOWER('braianoquen@gmail.com')) DESC,
+                                                 u.id ASC
+                                             LIMIT 1");
         $stmtAdmin->execute();
         $adminData = $stmtAdmin->fetch(PDO::FETCH_ASSOC) ?: [];
 
@@ -297,16 +321,16 @@ try {
         $empresaFull = $stmtEmpresaFull->fetch(PDO::FETCH_ASSOC) ?: [];
 
         $stmtFactura = $db->prepare("INSERT INTO facturas
-            (numero_factura, tipo, emisor_id, emisor_tipo, emisor_nombre, emisor_email,
+            (numero_factura, tipo, emisor_id, emisor_tipo, emisor_nombre, emisor_documento, emisor_email,
              receptor_id, receptor_tipo, receptor_nombre, receptor_documento, receptor_email,
              subtotal, porcentaje_comision, valor_comision, total, moneda,
              pago_referencia_id, pago_referencia_tipo, reporte_id,
              concepto, fecha_emision, fecha_pago, estado, creado_por)
             VALUES
-            (:numero, 'empresa_admin', :emisor_id, 'admin', :emisor_nombre, :emisor_email,
+            (:numero, 'empresa_admin', :emisor_id, 'admin', :emisor_nombre, :emisor_documento, :emisor_email,
              :receptor_id, 'empresa', :receptor_nombre, :receptor_doc, :receptor_email,
              :subtotal, :pct_comision, :val_comision, :total, 'COP',
-             :pago_ref_id, 'pago_empresa', :reporte_id,
+             :pago_ref_id, 'pago_empresa_plataforma', :reporte_id,
              :concepto, NOW(), NOW(), 'pagada', :creado_por)
             RETURNING id");
 
@@ -316,8 +340,11 @@ try {
         $stmtFactura->execute([
             ':numero' => $numeroFactura,
             ':emisor_id' => intval($adminData['id'] ?? 0),
-            ':emisor_nombre' => trim(($adminData['nombre'] ?? 'Viax') . ' ' . ($adminData['apellido'] ?? 'Admin')),
-            ':emisor_email' => $adminData['email'] ?? '',
+            ':emisor_nombre' => $adminData['nombre_legal']
+                ?: trim(($adminData['nombre'] ?? '') . ' ' . ($adminData['apellido'] ?? ''))
+                ?: 'Administrador Principal',
+            ':emisor_documento' => $adminData['numero_documento'] ?? '',
+            ':emisor_email' => $adminData['emisor_email'] ?? ($adminData['email'] ?? 'braianoquen@gmail.com'),
             ':receptor_id' => $empresaId,
             ':receptor_nombre' => $empresaFull['nombre'] ?? 'Empresa',
             ':receptor_doc' => $empresaFull['nit'] ?? '',
@@ -351,6 +378,27 @@ try {
             );
         }
 
+        // Notificar a administradores sobre confirmación y factura generada
+        $stmtAdmins = $db->prepare("SELECT id FROM usuarios WHERE tipo_usuario IN ('admin', 'administrador')");
+        $stmtAdmins->execute();
+        foreach ($stmtAdmins->fetchAll(PDO::FETCH_COLUMN) as $adminUid) {
+            NotificationHelper::crear(
+                intval($adminUid),
+                'invoice_generated',
+                'Factura generada por pago empresarial',
+                'Se confirmó el pago de ' . ($empresaFull['nombre'] ?? 'Empresa') . ' por $' . number_format($montoReportado, 0, ',', '.') . ' COP. Factura: ' . $numeroFactura,
+                'factura',
+                $facturaId,
+                [
+                    'reporte_id' => $reportId,
+                    'pago_id' => $pagoId,
+                    'factura_id' => $facturaId,
+                    'numero_factura' => $numeroFactura,
+                    'empresa_id' => $empresaId,
+                ]
+            );
+        }
+
         // Generar y enviar factura PDF por email
         try {
             require_once __DIR__ . '/generate_invoice_pdf.php';
@@ -361,7 +409,28 @@ try {
                 $stmtPdfUpdate = $db->prepare("UPDATE facturas SET pdf_ruta = :ruta WHERE id = :id");
                 $stmtPdfUpdate->execute([':ruta' => $pdfResult['pdf_path'], ':id' => $facturaId]);
 
-                // Enviar email con factura
+                // Descargar PDF desde R2 a archivo temporal para adjuntar al email
+                $pdfAttachments = [];
+                try {
+                    require_once __DIR__ . '/../config/R2Service.php';
+                    $r2 = new R2Service();
+                    $fileData = $r2->getFile($pdfResult['pdf_path']);
+                    if ($fileData && !empty($fileData['content'])) {
+                        $tempPdf = tempnam(sys_get_temp_dir(), 'factura_');
+                        $ext = str_contains($pdfResult['pdf_path'], '.pdf') ? '.pdf' : '.html';
+                        $tempPdfPath = $tempPdf . $ext;
+                        rename($tempPdf, $tempPdfPath);
+                        file_put_contents($tempPdfPath, $fileData['content']);
+                        $pdfAttachments[] = [
+                            'path' => $tempPdfPath,
+                            'name' => $numeroFactura . $ext,
+                        ];
+                    }
+                } catch (Throwable $attErr) {
+                    error_log('Error descargando PDF para adjuntar: ' . $attErr->getMessage());
+                }
+
+                // Enviar email con factura adjunta a la empresa
                 $emailDest = $empresaFull['representante_email'] ?: ($empresaFull['email'] ?? '');
                 if (!empty($emailDest)) {
                     Mailer::sendEmail(
@@ -372,8 +441,29 @@ try {
                         'Factura N° ' . $numeroFactura . '. ' .
                         'Saldo anterior: $' . number_format($saldoActual, 0, ',', '.') . ' COP. ' .
                         'Nuevo saldo: $' . number_format($nuevoSaldo, 0, ',', '.') . ' COP. ' .
-                        'Puedes descargar tu factura desde el panel de la empresa.'
+                        'Adjuntamos tu factura para tus registros.',
+                        $pdfAttachments
                     );
+                }
+
+                // Notificar también al admin por email
+                $adminEmail = $adminData['email'] ?? '';
+                if (!empty($adminEmail)) {
+                    Mailer::sendEmail(
+                        $adminEmail,
+                        trim(($adminData['nombre'] ?? 'Admin') . ' ' . ($adminData['apellido'] ?? '')),
+                        'Pago confirmado - ' . ($empresaFull['nombre'] ?? 'Empresa') . ' - ' . $numeroFactura,
+                        'Se confirmó el pago de ' . ($empresaFull['nombre'] ?? 'Empresa') . ' por $' . number_format($montoReportado, 0, ',', '.') . ' COP. ' .
+                        'Factura N° ' . $numeroFactura . ' generada exitosamente.',
+                        $pdfAttachments
+                    );
+                }
+
+                // Limpiar archivos temporales
+                foreach ($pdfAttachments as $att) {
+                    if (isset($att['path']) && file_exists($att['path'])) {
+                        @unlink($att['path']);
+                    }
                 }
             }
         } catch (Throwable $e) {

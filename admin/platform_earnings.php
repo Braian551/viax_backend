@@ -25,6 +25,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 require_once __DIR__ . '/../config/database.php';
 
+date_default_timezone_set('America/Bogota');
+
 try {
     $database = new Database();
     $db = $database->getConnection();
@@ -50,24 +52,43 @@ try {
             $fecha_inicio = date('Y-m-01');
     }
 
+    $debtEpsilon = 1.0;
+
     // 1. Total que deben TODAS las empresas (cuenta por cobrar)
-    $stmt = $db->query("SELECT COALESCE(SUM(saldo_pendiente), 0) as total_por_cobrar FROM empresas_transporte WHERE estado = 'activo'");
+    $stmt = $db->query("SELECT COALESCE(SUM(saldo_pendiente), 0) as total_por_cobrar FROM empresas_transporte WHERE estado IN ('activo', 'activa')");
     $total_por_cobrar = floatval($stmt->fetchColumn());
+    if (abs($total_por_cobrar) < $debtEpsilon) {
+        $total_por_cobrar = 0.0;
+    }
 
     // 2. Total de pagos recibidos de empresas (histórico)
     $stmt = $db->query("SELECT COALESCE(SUM(monto), 0) as total_recibido FROM pagos_empresas WHERE tipo = 'pago'");
     $total_recibido_historico = floatval($stmt->fetchColumn());
 
     // 3. Comisiones generadas en el período (ganancias del período)
+    // Fuente principal: cargos contables registrados a empresas.
     $stmt = $db->prepare("
-        SELECT COALESCE(SUM(comision_admin_valor), 0) as ganancias_periodo
-        FROM viaje_resumen_tracking vrt
-        WHERE DATE(vrt.fin_viaje_real) >= :fecha_inicio
-        AND DATE(vrt.fin_viaje_real) <= :fecha_fin
-        AND comision_admin_valor > 0
+        SELECT COALESCE(SUM(monto), 0) as ganancias_periodo
+        FROM pagos_empresas
+        WHERE tipo = 'cargo'
+        AND DATE(creado_en) >= :fecha_inicio
+        AND DATE(creado_en) <= :fecha_fin
     ");
     $stmt->execute([':fecha_inicio' => $fecha_inicio, ':fecha_fin' => $fecha_fin]);
     $ganancias_periodo = floatval($stmt->fetchColumn());
+
+    // Fallback para historicos que solo tengan tracking.
+    if ($ganancias_periodo <= 0) {
+        $stmt = $db->prepare("
+            SELECT COALESCE(SUM(comision_plataforma_valor), 0) as ganancias_periodo
+            FROM viaje_resumen_tracking vrt
+            WHERE DATE(vrt.fin_viaje_real) >= :fecha_inicio
+            AND DATE(vrt.fin_viaje_real) <= :fecha_fin
+            AND comision_plataforma_valor > 0
+        ");
+        $stmt->execute([':fecha_inicio' => $fecha_inicio, ':fecha_fin' => $fecha_fin]);
+        $ganancias_periodo = floatval($stmt->fetchColumn());
+    }
 
     // 4. Pagos recibidos en el período
     $stmt = $db->prepare("
@@ -91,7 +112,7 @@ try {
             et.total_viajes_completados,
             (SELECT COALESCE(SUM(monto), 0) FROM pagos_empresas pe WHERE pe.empresa_id = et.id AND pe.tipo = 'pago') as total_pagado
         FROM empresas_transporte et
-        WHERE et.estado = 'activo'
+        WHERE et.estado IN ('activo', 'activa')
         ORDER BY et.saldo_pendiente DESC
         LIMIT 10
     ");
@@ -148,13 +169,14 @@ try {
                 'total_comisiones_empresa' => floatval($stats_viajes['total_comisiones_empresa']),
                 'total_comisiones_admin' => floatval($stats_viajes['total_comisiones_admin'])
             ],
-            'empresas_deudoras' => array_map(function($e) {
+            'empresas_deudoras' => array_map(function($e) use ($debtEpsilon) {
                 return [
                     'id' => intval($e['id']),
                     'nombre' => $e['nombre'],
                     'logo_url' => $e['logo_url'],
                     'comision_porcentaje' => floatval($e['comision_admin_porcentaje']),
-                    'saldo_pendiente' => floatval($e['saldo_pendiente']),
+                    'saldo_pendiente' => (abs(floatval($e['saldo_pendiente'])) < $debtEpsilon ? 0.0 : floatval($e['saldo_pendiente'])),
+                    'deuda_activa' => abs(floatval($e['saldo_pendiente'])) >= $debtEpsilon,
                     'total_viajes' => intval($e['total_viajes_completados']),
                     'total_pagado' => floatval($e['total_pagado'])
                 ];

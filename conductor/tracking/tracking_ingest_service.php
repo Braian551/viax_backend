@@ -25,7 +25,7 @@ function processTrackingPoints(PDO $db, int $solicitudId, int $conductorId, arra
     validarConductorYEstado($viaje, $conductorId);
     $config = obtenerConfigTarifaTracking($db, $viaje);
 
-    [$lastLat, $lastLng, $lastTiempo] = obtenerUltimoEstadoTracking($db, $solicitudId);
+    [$lastLat, $lastLng, $lastTiempo, $lastDistKm] = obtenerUltimoEstadoTracking($db, $solicitudId);
 
     $insertStmt = $db->prepare(
         "INSERT INTO viaje_tracking_realtime (
@@ -100,14 +100,27 @@ function processTrackingPoints(PDO $db, int $solicitudId, int $conductorId, arra
         }
 
         $distanciaDesdeAnterior = 0.0;
+        $deltaTiempoSeg = $lastTiempo !== null ? max(0, $tiempoSeg - $lastTiempo) : 0;
         if ($lastLat !== null && $lastLng !== null) {
             $distanciaDesdeAnterior = calcularDistanciaHaversine($lastLat, $lastLng, $lat, $lng);
+
+            if (esSaltoGpsInvalido($distanciaDesdeAnterior, $deltaTiempoSeg, $precisionGps, $velocidad, $evento)) {
+                $skipped++;
+                continue;
+            }
 
             if ($distanciaDesdeAnterior < 3.0 && empty($evento)) {
                 $skipped++;
                 continue;
             }
         }
+
+        $distAcumuladaKm = normalizarDistanciaAcumulada(
+            $lastDistKm,
+            $distAcumuladaKm,
+            $distanciaDesdeAnterior,
+            $deltaTiempoSeg
+        );
 
         $precioParcial = calcularPrecioParcialDesdeConfig($config, $distAcumuladaKm, $tiempoSeg);
 
@@ -141,6 +154,7 @@ function processTrackingPoints(PDO $db, int $solicitudId, int $conductorId, arra
         $lastLat = $lat;
         $lastLng = $lng;
         $lastTiempo = $tiempoSeg;
+        $lastDistKm = $distAcumuladaKm;
     }
 
     if ($inserted > 0 && $ultimoPunto !== null) {
@@ -224,11 +238,24 @@ function refreshRealtimeTrackingCache(
     string $faseViaje
 ): void {
     try {
+        $now = time();
+        $statePayload = [
+            'trip_id' => $solicitudId,
+            'lat' => $latitud,
+            'lng' => $longitud,
+            'timestamp' => gmdate('c', $now),
+            'distance_km' => round($distanciaKm, 4),
+            'elapsed_time_sec' => $tiempoSeg,
+            'price' => round($precioParcial, 2),
+            'fase' => $faseViaje,
+            'source' => 'tracking_ingest',
+        ];
+
         Cache::set('driver_location:' . $conductorId, (string) json_encode([
             'lat' => $latitud,
             'lng' => $longitud,
             'speed' => null,
-            'timestamp' => time(),
+            'timestamp' => $now,
         ]), 30);
         Cache::sAdd('active_drivers', (string) $conductorId);
 
@@ -241,8 +268,30 @@ function refreshRealtimeTrackingCache(
             'tiempo_seg' => $tiempoSeg,
             'precio_parcial' => $precioParcial,
             'fase_viaje' => $faseViaje,
-            'timestamp' => time(),
-        ]), 120);
+            'timestamp' => $now,
+        ]), 7200);
+
+        // Estado realtime normalizado para canales push (SSE/WebSocket gateway).
+        Cache::set('trip:' . $solicitudId . ':state', (string) json_encode($statePayload), 7200);
+
+        $redis = Cache::redis();
+        if ($redis) {
+            // Métricas O(1) compactas para pricing/tracking canónico.
+            $redis->setex('trip:' . $solicitudId . ':metrics', 7200, json_encode([
+                'distance_km' => round($distanciaKm, 4),
+                'elapsed_time_sec' => $tiempoSeg,
+                'avg_speed_kmh' => $tiempoSeg > 0 ? round(($distanciaKm * 3600) / $tiempoSeg, 2) : 0,
+                'price' => round($precioParcial, 2),
+                'last_timestamp' => gmdate('c', $now),
+                'last_ts' => $now,
+                'last_lat' => $latitud,
+                'last_lng' => $longitud,
+                'phase' => $faseViaje,
+            ], JSON_UNESCAPED_UNICODE));
+
+            // Canal de actualización en vivo para pasajeros.
+            $redis->publish('trip_updates:' . $solicitudId, json_encode($statePayload, JSON_UNESCAPED_UNICODE));
+        }
     } catch (Throwable $e) {
         // Redis es capa secundaria: no bloquear flujo principal por cache.
         error_log('[tracking_ingest] cache warning: ' . $e->getMessage());
@@ -368,7 +417,7 @@ function obtenerUltimoEstadoTracking(PDO $db, int $solicitudId): array
 {
     if (trackingSnapshotTableAvailable($db)) {
         $stmt = $db->prepare(
-            "SELECT latitud, longitud, tiempo_transcurrido_seg
+            "SELECT latitud, longitud, tiempo_transcurrido_seg, distancia_acumulada_km
             FROM viaje_tracking_snapshot
             WHERE solicitud_id = :solicitud_id
             LIMIT 1"
@@ -381,12 +430,13 @@ function obtenerUltimoEstadoTracking(PDO $db, int $solicitudId): array
                 floatval($snapshot['latitud']),
                 floatval($snapshot['longitud']),
                 intval($snapshot['tiempo_transcurrido_seg']),
+                floatval($snapshot['distancia_acumulada_km'] ?? 0),
             ];
         }
     }
 
     $stmt = $db->prepare(
-        "SELECT latitud, longitud, tiempo_transcurrido_seg
+        "SELECT latitud, longitud, tiempo_transcurrido_seg, distancia_acumulada_km
         FROM viaje_tracking_realtime
         WHERE solicitud_id = :solicitud_id
         ORDER BY timestamp_gps DESC
@@ -400,10 +450,56 @@ function obtenerUltimoEstadoTracking(PDO $db, int $solicitudId): array
             floatval($ultimo['latitud']),
             floatval($ultimo['longitud']),
             intval($ultimo['tiempo_transcurrido_seg']),
+            floatval($ultimo['distancia_acumulada_km'] ?? 0),
         ];
     }
 
-    return [null, null, null];
+    return [null, null, null, 0.0];
+}
+
+function esSaltoGpsInvalido(float $distanciaMetros, int $deltaTiempoSeg, ?float $precisionGps, float $velocidadKmh, ?string $evento): bool
+{
+    if (!empty($evento)) {
+        return false;
+    }
+
+    if ($precisionGps !== null && $precisionGps > 120) {
+        return true;
+    }
+
+    if ($deltaTiempoSeg <= 0) {
+        return $distanciaMetros > 120;
+    }
+
+    $velocidadCalculadaKmh = ($distanciaMetros / 1000.0) / ($deltaTiempoSeg / 3600.0);
+    $velocidadReferencia = max($velocidadCalculadaKmh, $velocidadKmh);
+
+    if ($velocidadReferencia > 180) {
+        return true;
+    }
+
+    return $distanciaMetros > 1500 && $deltaTiempoSeg < 8;
+}
+
+function normalizarDistanciaAcumulada(float $distAnteriorKm, float $distReportadaKm, float $distanciaDesdeAnteriorM, int $deltaTiempoSeg): float
+{
+    $distanciaBaseKm = max(0.0, $distAnteriorKm);
+
+    // Nunca permitir regresión del acumulado por paquetes atrasados.
+    $normalizadaKm = max($distReportadaKm, $distanciaBaseKm);
+
+    $maxIncByJumpKm = max(0.0, ($distanciaDesdeAnteriorM / 1000.0) + 0.15);
+    $maxIncByTimeKm = $deltaTiempoSeg > 0
+        ? (($deltaTiempoSeg / 3600.0) * 130.0) + 0.2
+        : 0.2;
+    $maxIncrementoKm = min($maxIncByJumpKm, $maxIncByTimeKm);
+    $maxPermitidaKm = $distanciaBaseKm + $maxIncrementoKm;
+
+    if ($normalizadaKm > $maxPermitidaKm) {
+        $normalizadaKm = $maxPermitidaKm;
+    }
+
+    return round($normalizadaKm, 6);
 }
 
 function upsertTrackingSnapshot(

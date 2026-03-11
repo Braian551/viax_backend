@@ -25,6 +25,8 @@ require_once __DIR__ . '/../config/database.php';
 try {
     $database = new Database();
     $db = $database->getConnection();
+    // En COP los saldos se manejan como enteros; residuos sub-peso se tratan como cero.
+    $debtEpsilon = 1.0;
 
     // Obtener todas las empresas activas con sus deudas
     $stmt = $db->query("
@@ -61,17 +63,22 @@ try {
 
     foreach ($empresas as &$e) {
         $e['id'] = intval($e['id']);
-        $e['saldo_pendiente'] = floatval($e['saldo_pendiente']);
+        $saldoPendiente = floatval($e['saldo_pendiente']);
+        if (abs($saldoPendiente) < $debtEpsilon) {
+            $saldoPendiente = 0.0;
+        }
+        $e['saldo_pendiente'] = $saldoPendiente;
         $e['total_cargos'] = floatval($e['total_cargos']);
         $e['total_pagado'] = floatval($e['total_pagado']);
         $e['comision_admin_porcentaje'] = floatval($e['comision_admin_porcentaje']);
         $e['total_viajes_completados'] = intval($e['total_viajes_completados']);
         $e['reportes_pendientes'] = intval($e['reportes_pendientes']);
+        $e['deuda_activa'] = $saldoPendiente >= $debtEpsilon;
 
-        $deudaTotal += $e['saldo_pendiente'];
+        $deudaTotal += $saldoPendiente;
         $totalPagadoGlobal += $e['total_pagado'];
         $totalReportesPendientes += $e['reportes_pendientes'];
-        if ($e['saldo_pendiente'] > 0) {
+        if ($e['deuda_activa']) {
             $empresasConDeuda++;
         }
     }

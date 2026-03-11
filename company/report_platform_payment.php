@@ -170,7 +170,7 @@ try {
     $reportId = intval($stmtInsert->fetchColumn());
 
     // Notificar a todos los administradores
-    $stmtAdmins = $db->prepare("SELECT id FROM usuarios WHERE tipo_usuario = 'admin'");
+    $stmtAdmins = $db->prepare("SELECT id FROM usuarios WHERE tipo_usuario IN ('admin', 'administrador')");
     $stmtAdmins->execute();
     $adminUsers = $stmtAdmins->fetchAll(PDO::FETCH_COLUMN);
 
@@ -187,7 +187,7 @@ try {
     }
 
     // Enviar email a administradores
-    $stmtAdminEmails = $db->prepare("SELECT email, nombre FROM usuarios WHERE tipo_usuario = 'admin' AND email IS NOT NULL AND email <> ''");
+    $stmtAdminEmails = $db->prepare("SELECT email, nombre FROM usuarios WHERE tipo_usuario IN ('admin', 'administrador') AND email IS NOT NULL AND email <> ''");
     $stmtAdminEmails->execute();
     $adminEmails = $stmtAdminEmails->fetchAll(PDO::FETCH_ASSOC);
 

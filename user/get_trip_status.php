@@ -42,6 +42,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once __DIR__ . '/../config/app.php';
+require_once __DIR__ . '/../conductor/tracking/tracking_schema_helpers.php';
 
 /* ═══════════════════════════════════════════════════════════════════════
  * 1. VALIDACIÓN DE ENTRADA
@@ -254,12 +255,38 @@ function getDriverLocationFromCache(int $conductorId): ?array
  */
 function buildFullTripStmt(PDO $db): PDOStatement
 {
+    $hasMetricsLocked = trackingColumnExists($db, 'solicitudes_servicio', 'metrics_locked');
+    $hasDistanceFinal = trackingColumnExists($db, 'solicitudes_servicio', 'distance_final');
+    $hasDurationFinal = trackingColumnExists($db, 'solicitudes_servicio', 'duration_final');
+    $hasFinalizedAt = trackingColumnExists($db, 'solicitudes_servicio', 'finalized_at');
+    $hasPriceFinalEn = trackingColumnExists($db, 'solicitudes_servicio', 'price_final');
+
+    $metricsLockedExpr = $hasMetricsLocked
+        ? 'COALESCE(s.metrics_locked, FALSE) AS metrics_locked,'
+        : 'FALSE AS metrics_locked,';
+    $distanceFinalExpr = $hasDistanceFinal
+        ? 's.distance_final,'
+        : 'NULL::numeric AS distance_final,';
+    $durationFinalExpr = $hasDurationFinal
+        ? 's.duration_final,'
+        : 'NULL::integer AS duration_final,';
+    $finalizedAtExpr = $hasFinalizedAt
+        ? 's.finalized_at,'
+        : 'NULL::timestamp AS finalized_at,';
+    $priceFinalEnExpr = $hasPriceFinalEn
+        ? 's.price_final AS price_final_en,'
+        : 'NULL::numeric AS price_final_en,';
+
     return $db->prepare("
         SELECT
             -- Datos del viaje (solicitudes_servicio) --
             s.id,
             s.uuid_solicitud,
             s.estado,
+            $metricsLockedExpr
+            $distanceFinalExpr
+            $durationFinalExpr
+            $finalizedAtExpr
             s.tipo_servicio,
             s.latitud_recogida,
             s.longitud_recogida,
@@ -276,8 +303,10 @@ function buildFullTripStmt(PDO $db): PDOStatement
             s.tiempo_transcurrido,
             s.precio_estimado,
             s.precio_final,
+            $priceFinalEnExpr
             s.precio_en_tracking,
             s.precio_ajustado_por_tracking,
+            s.desglose_precio,
 
             -- Asignación --
             ac.conductor_id,
@@ -334,6 +363,20 @@ function buildFullTripStmt(PDO $db): PDOStatement
             ON vts.solicitud_id = s.id
         WHERE s.id = ?
     ");
+}
+
+function parseDesglosePrecio($raw): ?array
+{
+    if (is_array($raw)) {
+        return $raw;
+    }
+
+    if (!is_string($raw) || trim($raw) === '') {
+        return null;
+    }
+
+    $parsed = json_decode($raw, true);
+    return is_array($parsed) ? $parsed : null;
 }
 
 /**
@@ -486,25 +529,99 @@ function buildRealtimeSignature(array $trip, ?float $distConductorKm, ?int $eta)
  */
 function resolveTrackingValues(array $trip): array
 {
-    // Distancia: tracking > distancia_recorrida de BD
-    $distancia = null;
-    if (isset($trip['tracking_distancia']) && $trip['tracking_distancia'] > 0) {
-        $distancia = (float) $trip['tracking_distancia'];
-    } elseif (isset($trip['distancia_recorrida']) && $trip['distancia_recorrida'] > 0) {
-        $distancia = (float) $trip['distancia_recorrida'];
+    // Regla canónica: en terminal + metrics_locked, usar únicamente métricas finales.
+    $estado = strtolower(trim((string)($trip['estado'] ?? '')));
+    $isTerminal = in_array($estado, [
+        'completada', 'completado', 'entregado', 'finalizada', 'finalizado',
+        'cancelada', 'cancelado', 'rechazada', 'rechazado', 'rejected',
+    ], true);
+    $metricsLocked = !empty($trip['metrics_locked']);
+
+    if ($isTerminal) {
+        $distanciaFinal = $trip['distance_final'];
+        if ($distanciaFinal === null || $distanciaFinal === '') {
+            $distanciaFinal = $trip['tracking_distancia'] ?? $trip['distancia_recorrida'] ?? 0;
+        }
+
+        $duracionFinalSeg = $trip['duration_final'];
+        if ($duracionFinalSeg === null || $duracionFinalSeg === '') {
+            if (isset($trip['tracking_tiempo']) && $trip['tracking_tiempo'] !== null && $trip['tracking_tiempo'] !== '') {
+                $duracionFinalSeg = (int)$trip['tracking_tiempo'] * 60;
+            } elseif (isset($trip['tiempo_transcurrido']) && $trip['tiempo_transcurrido'] !== null && $trip['tiempo_transcurrido'] !== '') {
+                $duracionFinalSeg = (int)$trip['tiempo_transcurrido'];
+            } else {
+                $duracionFinalSeg = 0;
+            }
+        }
+
+        $precioFinal = $trip['price_final_en'];
+        if ($precioFinal === null || $precioFinal === '') {
+            $precioFinal = $trip['tracking_precio'] ?? $trip['precio_final'] ?? 0;
+        }
+
+        error_log('[CanonicalMetricsUsed] trip_id=' . (int)$trip['id']
+            . ' distance_final=' . floatval($distanciaFinal)
+            . ' duration_final=' . intval($duracionFinalSeg)
+            . ' price_final=' . floatval($precioFinal));
+
+        return [
+            'distancia' => (float) $distanciaFinal,
+            'tiempo_minutos' => (int) ceil(((int) $duracionFinalSeg) / 60),
+            'precio' => (float) $precioFinal,
+            'duracion_segundos' => (int) $duracionFinalSeg,
+            'metrics_locked' => $metricsLocked,
+            'terminal' => true,
+        ];
     }
 
-    // Tiempo: tracking > tiempo_transcurrido de BD > cálculo desde timestamps
+    // Modo no terminal: usar cadena legacy/tiempo real para UI en vivo.
+    $estimatedKm = isset($trip['distancia_estimada']) ? (float)$trip['distancia_estimada'] : 0.0;
+
+    $tiempoSegBase = 0;
+    if (isset($trip['tiempo_transcurrido']) && $trip['tiempo_transcurrido'] !== null && $trip['tiempo_transcurrido'] !== '') {
+        $rawTiempo = (float)$trip['tiempo_transcurrido'];
+        // En muchos registros legacy este campo viene en minutos; normalizar a segundos.
+        $tiempoSegBase = $rawTiempo > 0 ? (int)round($rawTiempo * 60) : 0;
+    }
+
+    if (isset($trip['tracking_tiempo']) && $trip['tracking_tiempo'] !== null && $trip['tracking_tiempo'] !== '') {
+        $trackingTiempoSeg = (int)round((float)$trip['tracking_tiempo'] * 60);
+        if ($trackingTiempoSeg > $tiempoSegBase) {
+            $tiempoSegBase = $trackingTiempoSeg;
+        }
+    }
+
+    $coherenceCapByTime = $tiempoSegBase > 0
+        ? (($tiempoSegBase / 3600.0) * 140.0) + 0.2
+        : 0.0;
+    $coherenceCapByRoute = $estimatedKm > 0
+        ? ($estimatedKm * 1.6) + 1.0
+        : 120.0;
+
+    $distancia = null;
+    if (isset($trip['tracking_distancia']) && $trip['tracking_distancia'] > 0) {
+        $candidate = (float) $trip['tracking_distancia'];
+        if ($tiempoSegBase > 0) {
+            $candidate = min($candidate, $coherenceCapByTime, $coherenceCapByRoute);
+            $distancia = max(0.0, $candidate);
+        }
+    } elseif (isset($trip['distancia_recorrida']) && $trip['distancia_recorrida'] > 0) {
+        $candidate = (float) $trip['distancia_recorrida'];
+        if ($tiempoSegBase > 0) {
+            $candidate = min($candidate, $coherenceCapByTime, $coherenceCapByRoute);
+            $distancia = max(0.0, $candidate);
+        }
+    }
+
     $tiempo = null;
     if (isset($trip['tracking_tiempo']) && $trip['tracking_tiempo'] > 0) {
         $tiempo = (int) $trip['tracking_tiempo'];
     } elseif (isset($trip['tiempo_transcurrido']) && $trip['tiempo_transcurrido'] > 0) {
-        $tiempo = (int) ceil($trip['tiempo_transcurrido'] / 60);
+        $tiempo = (int) ceil((float)$trip['tiempo_transcurrido']);
     } elseif (isset($trip['tiempo_calculado_min']) && $trip['tiempo_calculado_min'] > 0) {
         $tiempo = (int) ceil($trip['tiempo_calculado_min']);
     }
 
-    // Precio: tracking > precio_final de BD
     $precio = null;
     if (isset($trip['tracking_precio']) && $trip['tracking_precio'] > 0) {
         $precio = (float) $trip['tracking_precio'];
@@ -512,7 +629,14 @@ function resolveTrackingValues(array $trip): array
         $precio = (float) $trip['precio_final'];
     }
 
-    return ['distancia' => $distancia, 'tiempo_minutos' => $tiempo, 'precio' => $precio];
+    return [
+        'distancia' => $distancia,
+        'tiempo_minutos' => $tiempo,
+        'precio' => $precio,
+        'duracion_segundos' => $tiempo !== null ? ($tiempo * 60) : 0,
+        'metrics_locked' => $metricsLocked,
+        'terminal' => $isTerminal,
+    ];
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -547,12 +671,13 @@ function resolveTrackingValues(array $trip): array
 function buildResponse(array $trip, string $signature, int $waitSeconds, ?float $distConductorKm, ?int $eta): array
 {
     $tv = resolveTrackingValues($trip);
+    $desglosePrecio = parseDesglosePrecio($trip['desglose_precio'] ?? null);
 
-    // Tiempo en segundos: prioriza campo de BD, luego convierte de minutos.
-    $tiempoSeg = 0;
-    if (isset($trip['tiempo_transcurrido']) && $trip['tiempo_transcurrido'] > 0) {
+    // Si viene duración canónica explícita, usarla tal cual para evitar recomputar.
+    $tiempoSeg = (int) ($tv['duracion_segundos'] ?? 0);
+    if ($tiempoSeg <= 0 && isset($trip['tiempo_transcurrido']) && $trip['tiempo_transcurrido'] > 0) {
         $tiempoSeg = (int) $trip['tiempo_transcurrido'];
-    } elseif ($tv['tiempo_minutos'] !== null) {
+    } elseif ($tiempoSeg <= 0 && $tv['tiempo_minutos'] !== null) {
         $tiempoSeg = $tv['tiempo_minutos'] * 60;
     }
 
@@ -587,6 +712,7 @@ function buildResponse(array $trip, string $signature, int $waitSeconds, ?float 
             'signature'    => $signature,
             'generated_at' => gmdate('c'),
             'wait_seconds' => $waitSeconds,
+            'metrics_locked' => (bool) ($tv['metrics_locked'] ?? false),
         ],
         'trip' => [
             'id'                           => (int) $trip['id'],
@@ -608,9 +734,15 @@ function buildResponse(array $trip, string $signature, int $waitSeconds, ?float 
             'distancia_km'                 => $tv['distancia'] ?? (float) ($trip['distancia_estimada'] ?? 0),
             'duracion_minutos'             => $tv['tiempo_minutos'] ?? (int) ($trip['tiempo_estimado'] ?? 0),
             'duracion_segundos'            => $tiempoSeg,
+            'distance_final'               => isset($trip['distance_final']) && $trip['distance_final'] !== null ? (float) $trip['distance_final'] : ($tv['distancia'] ?? null),
+            'duration_final'               => isset($trip['duration_final']) && $trip['duration_final'] !== null ? (int) $trip['duration_final'] : $tiempoSeg,
+            'price_final_canonical'        => isset($trip['price_final_en']) && $trip['price_final_en'] !== null ? (float) $trip['price_final_en'] : ($tv['precio'] ?? null),
+            'metrics_locked'               => (bool) ($tv['metrics_locked'] ?? false),
+            'finalized_at'                 => to_iso8601($trip['finalized_at'] ?? null),
             'fecha_creacion'               => to_iso8601($trip['fecha_creacion']),
             'fecha_aceptado'               => to_iso8601($trip['aceptado_en'] ?? null),
             'fecha_completado'             => to_iso8601($trip['completado_en'] ?? null),
+            // Compatibilidad legacy: estos campos se rellenan con canónicos cuando aplica lock.
             'distancia_recorrida'          => $tv['distancia'],
             'tiempo_transcurrido'          => $tv['tiempo_minutos'],
             'tiempo_transcurrido_seg'      => $tiempoSeg,
@@ -618,6 +750,7 @@ function buildResponse(array $trip, string $signature, int $waitSeconds, ?float 
             'precio_final'                 => $tv['precio'] ?? (float) ($trip['precio_estimado'] ?? 0),
             'precio_en_tracking'           => isset($trip['precio_en_tracking']) ? (float) $trip['precio_en_tracking'] : null,
             'precio_ajustado_por_tracking' => isset($trip['precio_ajustado_por_tracking']) ? (bool) $trip['precio_ajustado_por_tracking'] : false,
+            'desglose_precio'              => $desglosePrecio,
             'conductor'                    => $conductor,
         ],
     ];

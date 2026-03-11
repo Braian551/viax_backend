@@ -29,7 +29,8 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     exit();
 }
 
-require_once '../../config/database.php';
+require_once '../../config/app.php';
+require_once __DIR__ . '/tracking_schema_helpers.php';
 
 function parseWaitSeconds($rawValue): int {
     $value = intval($rawValue ?? 0);
@@ -45,8 +46,94 @@ function parseSinceTs($rawValue): ?string {
     return substr($clean, 0, 40);
 }
 
+function parseEpochToIsoUtc($epoch): ?string {
+    $ts = intval($epoch ?? 0);
+    if ($ts <= 0) {
+        return null;
+    }
+    return gmdate('c', $ts);
+}
+
+function getLatestTrackingPointFromCache(int $solicitudId): ?array {
+    $raw = Cache::get('trip_tracking_latest:' . $solicitudId);
+    if (!is_string($raw) || trim($raw) === '') {
+        return null;
+    }
+
+    $parsed = json_decode($raw, true);
+    if (!is_array($parsed)) {
+        return null;
+    }
+
+    if (!isset($parsed['latitud'], $parsed['longitud'])) {
+        return null;
+    }
+
+    $isoTs = parseEpochToIsoUtc($parsed['timestamp'] ?? null);
+
+    return [
+        'latitud' => floatval($parsed['latitud']),
+        'longitud' => floatval($parsed['longitud']),
+        'velocidad' => 0,
+        'distancia_acumulada_km' => floatval($parsed['distancia_km'] ?? 0),
+        'tiempo_transcurrido_seg' => intval($parsed['tiempo_seg'] ?? 0),
+        'precio_parcial' => floatval($parsed['precio_parcial'] ?? 0),
+        'fase_viaje' => $parsed['fase_viaje'] ?? 'hacia_destino',
+        'timestamp_gps' => $isoTs,
+        '__source' => 'redis',
+    ];
+}
+
+function getLatestTrackingPointFromMetricsCache(int $solicitudId): ?array {
+    $redis = Cache::redis();
+    if (!$redis) {
+        return null;
+    }
+
+    $rawState = Cache::get('trip:' . $solicitudId . ':state');
+    $state = is_string($rawState) ? json_decode($rawState, true) : null;
+    if (!is_array($state) || !isset($state['lat'], $state['lng'])) {
+        return null;
+    }
+
+    $rawMetrics = $redis->get('trip:' . $solicitudId . ':metrics');
+    $metrics = is_string($rawMetrics) ? json_decode($rawMetrics, true) : null;
+    if (!is_array($metrics)) {
+        $legacy = $redis->hGetAll('trip:' . $solicitudId . ':metrics');
+        if (is_array($legacy) && !empty($legacy)) {
+            $metrics = [
+                'distance_km' => isset($legacy['distance_total_km']) ? floatval($legacy['distance_total_km']) : 0,
+                'elapsed_time_sec' => isset($legacy['elapsed_time_sec']) ? intval($legacy['elapsed_time_sec']) : 0,
+                'price' => isset($legacy['price']) ? floatval($legacy['price']) : 0,
+            ];
+        } else {
+            $metrics = [];
+        }
+    }
+
+    return [
+        'latitud' => floatval($state['lat']),
+        'longitud' => floatval($state['lng']),
+        'velocidad' => isset($state['speed']) ? floatval($state['speed']) : 0,
+        'distancia_acumulada_km' => isset($metrics['distance_km']) ? floatval($metrics['distance_km']) : 0,
+        'tiempo_transcurrido_seg' => isset($metrics['elapsed_time_sec']) ? intval($metrics['elapsed_time_sec']) : 0,
+        'precio_parcial' => isset($metrics['price']) ? floatval($metrics['price']) : 0,
+        'fase_viaje' => $state['fase'] ?? 'hacia_destino',
+        'timestamp_gps' => $state['timestamp'] ?? gmdate('c'),
+        '__source' => 'redis_metrics',
+    ];
+}
+
 function getLatestTrackingPoint(PDO $db, int $solicitudId): ?array {
-    $ultimo_punto = null;
+    $ultimo_punto = getLatestTrackingPointFromCache($solicitudId);
+    if ($ultimo_punto) {
+        return $ultimo_punto;
+    }
+
+    $metricsPoint = getLatestTrackingPointFromMetricsCache($solicitudId);
+    if ($metricsPoint) {
+        return $metricsPoint;
+    }
 
     $stmt = $db->prepare("\n        SELECT to_regclass('public.viaje_tracking_snapshot') AS table_name
     ");
@@ -133,35 +220,76 @@ function maxIntOrZero(array $values): int {
     return (int) max($filtered);
 }
 
-function isCompletedTripState(string $estado): bool {
+function isTerminalTripState(string $estado): bool {
     $normalized = strtolower(trim($estado));
-    return in_array($normalized, ['completada', 'completado', 'finalizada', 'finalizado', 'entregado'], true);
+    return in_array($normalized, [
+        'completada',
+        'completado',
+        'finalizada',
+        'finalizado',
+        'entregado',
+        'cancelada',
+        'cancelado',
+        'rechazada',
+        'rechazado',
+        'rejected',
+    ], true);
 }
 
-function buildCanonicalCompletedTrackingActual(array $solicitud, ?array $resumen, ?array $ultimoPunto): array {
-    $distanciaKm = maxFloatOrZero([
-        positiveFloatOrNull($resumen['distancia_real_km'] ?? null),
-        positiveFloatOrNull($solicitud['distancia_recorrida'] ?? null),
-        positiveFloatOrNull($ultimoPunto['distancia_acumulada_km'] ?? null),
-    ]);
+function nullOrFloat($value): ?float {
+    if ($value === null || $value === '') {
+        return null;
+    }
+    return floatval($value);
+}
 
-    $tiempoSegundos = maxIntOrZero([
-        positiveIntOrNull(isset($resumen['tiempo_real_minutos']) ? intval($resumen['tiempo_real_minutos']) * 60 : null),
-        positiveIntOrNull($solicitud['tiempo_transcurrido'] ?? null),
-        positiveIntOrNull($ultimoPunto['tiempo_transcurrido_seg'] ?? null),
-    ]);
+function nullOrInt($value): ?int {
+    if ($value === null || $value === '') {
+        return null;
+    }
+    return intval($value);
+}
 
-    $precioActual = maxFloatOrZero([
-        positiveFloatOrNull($resumen['precio_final_aplicado'] ?? null),
-        positiveFloatOrNull($solicitud['precio_final'] ?? null),
-        positiveFloatOrNull($ultimoPunto['precio_parcial'] ?? null),
-        positiveFloatOrNull($solicitud['precio_estimado'] ?? null),
-    ]);
+function buildCanonicalTerminalTrackingActual(array $solicitud, ?array $resumen, ?array $ultimoPunto, bool $metricsLocked): array {
+    // En estado terminal, las métricas canónicas deben prevalecer para
+    // evitar que latencia o polling fuera de orden desalineen cliente/conductor.
+    $distanceFinal = nullOrFloat($solicitud['distance_final'] ?? null);
+    $durationFinal = nullOrInt($solicitud['duration_final'] ?? null);
+    $priceFinalCanonical = nullOrFloat($solicitud['price_final_en'] ?? null);
+
+    if ($distanceFinal === null) {
+        $distanceFinal = nullOrFloat($resumen['distancia_real_km'] ?? null)
+            ?? nullOrFloat($solicitud['distancia_recorrida'] ?? null)
+            ?? nullOrFloat($ultimoPunto['distancia_acumulada_km'] ?? null);
+    }
+
+    if ($durationFinal === null) {
+        $durationFinal = nullOrInt(isset($resumen['tiempo_real_minutos']) ? intval($resumen['tiempo_real_minutos']) * 60 : null)
+            ?? nullOrInt($solicitud['tiempo_transcurrido'] ?? null)
+            ?? nullOrInt($ultimoPunto['tiempo_transcurrido_seg'] ?? null);
+    }
+
+    if ($priceFinalCanonical === null) {
+        $priceFinalCanonical = nullOrFloat($resumen['precio_final_aplicado'] ?? null)
+            ?? nullOrFloat($solicitud['precio_final'] ?? null)
+            ?? nullOrFloat($ultimoPunto['precio_parcial'] ?? null);
+    }
+
+    $distanciaKm = $distanceFinal ?? 0.0;
+    $tiempoSegundos = $durationFinal ?? 0;
+    $precioActual = $priceFinalCanonical ?? 0.0;
 
     $ultimaActualizacion = $resumen['actualizado_en']
+        ?? ($solicitud['finalized_at'] ?? null)
         ?? $solicitud['completado_en']
         ?? $ultimoPunto['timestamp_gps']
         ?? null;
+
+    error_log('[CanonicalMetricsUsed] trip_id=' . intval($solicitud['id'] ?? 0)
+        . ' locked=' . ($metricsLocked ? '1' : '0')
+        . ' distance_final=' . $distanciaKm
+        . ' duration_final=' . $tiempoSegundos
+        . ' price_final=' . $precioActual);
 
     return [
         'ubicacion' => null,
@@ -225,16 +353,33 @@ try {
     $stmt->execute([':solicitud_id' => $solicitud_id]);
     $resumen = $stmt->fetch(PDO::FETCH_ASSOC);
     
+    $hasMetricsLocked = trackingColumnExists($db, 'solicitudes_servicio', 'metrics_locked');
+    $hasDistanceFinal = trackingColumnExists($db, 'solicitudes_servicio', 'distance_final');
+    $hasDurationFinal = trackingColumnExists($db, 'solicitudes_servicio', 'duration_final');
+    $hasFinalizedAt = trackingColumnExists($db, 'solicitudes_servicio', 'finalized_at');
+    $hasPriceFinalEn = trackingColumnExists($db, 'solicitudes_servicio', 'price_final');
+
     // Obtener datos de la solicitud
+    $metricsLockedExpr = $hasMetricsLocked ? 's.metrics_locked' : 'FALSE AS metrics_locked';
+    $distanceFinalExpr = $hasDistanceFinal ? 's.distance_final' : 'NULL::numeric AS distance_final';
+    $durationFinalExpr = $hasDurationFinal ? 's.duration_final' : 'NULL::integer AS duration_final';
+    $finalizedAtExpr = $hasFinalizedAt ? 's.finalized_at' : 'NULL::timestamp AS finalized_at';
+    $priceFinalEnExpr = $hasPriceFinalEn ? 's.price_final AS price_final_en' : 'NULL::numeric AS price_final_en';
+
     $stmt = $db->prepare("
         SELECT 
             s.id,
             s.tipo_servicio,
             s.estado,
+            $metricsLockedExpr,
+            $distanceFinalExpr,
+            $durationFinalExpr,
+            $finalizedAtExpr,
             s.distancia_estimada,
             s.tiempo_estimado,
             s.precio_estimado,
             s.precio_final,
+            $priceFinalEnExpr,
             s.distancia_recorrida,
             s.tiempo_transcurrido,
             s.completado_en,
@@ -277,13 +422,28 @@ try {
         'comparacion' => null
     ];
     
-    $estadoCompletado = isCompletedTripState((string)($solicitud['estado'] ?? ''));
+    $estadoTerminal = isTerminalTripState((string)($solicitud['estado'] ?? ''));
+    $metricsLocked = !empty($solicitud['metrics_locked']) && intval($solicitud['metrics_locked']) === 1;
 
     // Si el viaje ya terminó, responder siempre con métricas finales canónicas.
-    if ($estadoCompletado) {
-        $trackingFinal = buildCanonicalCompletedTrackingActual($solicitud, $resumen ?: null, $ultimo_punto ?: null);
+    if ($estadoTerminal) {
+        $trackingFinal = buildCanonicalTerminalTrackingActual(
+            $solicitud,
+            $resumen ?: null,
+            $ultimo_punto ?: null,
+            $metricsLocked
+        );
         $response['tracking_actual'] = $trackingFinal;
         $response['meta']['latest_tracking_ts'] = $trackingFinal['ultima_actualizacion'];
+        $response['meta']['metrics_locked'] = $metricsLocked;
+
+        // Campos canónicos explícitos.
+        $response['status'] = $solicitud['estado'];
+        $response['distance_final'] = $trackingFinal['distancia_km'];
+        $response['duration_final'] = $trackingFinal['tiempo_segundos'];
+        $response['price_final'] = $trackingFinal['precio_actual'];
+        $response['metrics_locked'] = $metricsLocked;
+        $response['finalized_at'] = $solicitud['finalized_at'] ?? $trackingFinal['ultima_actualizacion'];
 
         $diff_distancia = $trackingFinal['distancia_km'] - floatval($solicitud['distancia_estimada']);
         $diff_tiempo = $trackingFinal['tiempo_minutos'] - intval($solicitud['tiempo_estimado']);
@@ -321,6 +481,9 @@ try {
         ];
 
         $response['meta']['latest_tracking_ts'] = $ultimo_punto['timestamp_gps'];
+        if (!empty($ultimo_punto['__source'])) {
+            $response['meta']['tracking_source'] = $ultimo_punto['__source'];
+        }
         
         // Calcular diferencias con estimados
         $diff_distancia = $distancia_actual - floatval($solicitud['distancia_estimada']);

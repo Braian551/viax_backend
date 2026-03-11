@@ -114,8 +114,10 @@ try {
     
     // Obtener el último punto para calcular distancia incremental
     $distancia_desde_anterior = 0;
+    $delta_tiempo_seg = 0;
+    $distancia_anterior_km = 0.0;
     $stmt = $db->prepare("
-        SELECT latitud, longitud, distancia_acumulada_km
+        SELECT latitud, longitud, distancia_acumulada_km, tiempo_transcurrido_seg
         FROM viaje_tracking_realtime
         WHERE solicitud_id = :solicitud_id
         ORDER BY timestamp_gps DESC
@@ -125,12 +127,37 @@ try {
     $ultimo_punto = $stmt->fetch(PDO::FETCH_ASSOC);
     
     if ($ultimo_punto) {
+        $distancia_anterior_km = floatval($ultimo_punto['distancia_acumulada_km'] ?? 0);
+        $delta_tiempo_seg = max(0, $tiempo_transcurrido_seg - intval($ultimo_punto['tiempo_transcurrido_seg'] ?? 0));
+
         // Calcular distancia desde el último punto (en metros)
         $distancia_desde_anterior = calcularDistanciaHaversine(
             floatval($ultimo_punto['latitud']),
             floatval($ultimo_punto['longitud']),
             $latitud,
             $longitud
+        );
+
+        if (esSaltoGpsInvalido($distancia_desde_anterior, $delta_tiempo_seg, $precision_gps, $velocidad, $evento)) {
+            echo json_encode([
+                'success' => true,
+                'message' => 'Punto descartado por salto GPS',
+                'data' => [
+                    'punto_descartado' => true,
+                    'distancia_acumulada_km' => round($distancia_anterior_km, 3),
+                    'tiempo_transcurrido_seg' => max(intval($ultimo_punto['tiempo_transcurrido_seg'] ?? 0), $tiempo_transcurrido_seg),
+                    'precio_parcial' => calcularPrecioParcial($db, $solicitud_id, $distancia_anterior_km, max(intval($ultimo_punto['tiempo_transcurrido_seg'] ?? 0), $tiempo_transcurrido_seg)),
+                    'distancia_desde_anterior_m' => round($distancia_desde_anterior, 2)
+                ]
+            ]);
+            exit();
+        }
+
+        $distancia_acumulada_km = normalizarDistanciaAcumulada(
+            $distancia_anterior_km,
+            $distancia_acumulada_km,
+            $distancia_desde_anterior,
+            $delta_tiempo_seg
         );
     }
     
@@ -263,6 +290,47 @@ function calcularDistanciaHaversine($lat1, $lon1, $lat2, $lon2) {
     $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
     
     return $earthRadius * $c;
+}
+
+function esSaltoGpsInvalido($distanciaMetros, $deltaTiempoSeg, $precisionGps, $velocidadKmh, $evento) {
+    if (!empty($evento)) {
+        return false;
+    }
+
+    if ($precisionGps !== null && floatval($precisionGps) > 120) {
+        return true;
+    }
+
+    if ($deltaTiempoSeg <= 0) {
+        return $distanciaMetros > 120;
+    }
+
+    $velocidadCalculadaKmh = ($distanciaMetros / 1000.0) / ($deltaTiempoSeg / 3600.0);
+    $velocidadReferencia = max($velocidadCalculadaKmh, max(0, floatval($velocidadKmh)));
+
+    if ($velocidadReferencia > 180) {
+        return true;
+    }
+
+    return $distanciaMetros > 1500 && $deltaTiempoSeg < 8;
+}
+
+function normalizarDistanciaAcumulada($distAnteriorKm, $distReportadaKm, $distanciaDesdeAnteriorM, $deltaTiempoSeg) {
+    $distanciaBaseKm = max(0.0, floatval($distAnteriorKm));
+    $normalizadaKm = max(floatval($distReportadaKm), $distanciaBaseKm);
+
+    $maxIncByJumpKm = max(0.0, ($distanciaDesdeAnteriorM / 1000.0) + 0.15);
+    $maxIncByTimeKm = $deltaTiempoSeg > 0
+        ? (($deltaTiempoSeg / 3600.0) * 130.0) + 0.2
+        : 0.2;
+    $maxIncrementoKm = min($maxIncByJumpKm, $maxIncByTimeKm);
+    $maxPermitidaKm = $distanciaBaseKm + $maxIncrementoKm;
+
+    if ($normalizadaKm > $maxPermitidaKm) {
+        $normalizadaKm = $maxPermitidaKm;
+    }
+
+    return round($normalizadaKm, 6);
 }
 
 /**

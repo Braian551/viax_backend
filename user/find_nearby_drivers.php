@@ -23,6 +23,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
 
 require_once __DIR__ . '/../config/app.php';
 require_once __DIR__ . '/../utils/Distance.php';
+require_once __DIR__ . '/../services/driver_service.php';
 
 /** Mapea tipo de vehículo de app al valor esperado en BD. */
 function mapVehiculoTipo(string $tipoVehiculo): string
@@ -43,45 +44,33 @@ function mapVehiculoTipo(string $tipoVehiculo): string
  */
 function findNearbyFromRedis(float $lat, float $lng, float $radioKm, int $limit): array
 {
-    $ids = Cache::sMembers('active_drivers');
-    if (empty($ids)) {
+    $geoCandidates = DriverGeoService::searchAvailableNearby($lat, $lng, $radioKm, $limit);
+    if (empty($geoCandidates)) {
         return [];
     }
 
-    $candidates = [];
-    foreach ($ids as $idRaw) {
-        $driverId = (int) $idRaw;
+    $out = [];
+    foreach ($geoCandidates as $candidate) {
+        $driverId = (int)($candidate['id'] ?? 0);
         if ($driverId <= 0) {
             continue;
         }
 
-        $cached = Cache::get("driver_location:{$driverId}");
-        if (!$cached) {
-            continue;
-        }
-
-        $loc = json_decode((string) $cached, true);
+        $cached = Cache::get('driver_location:' . $driverId);
+        $loc = is_string($cached) ? json_decode($cached, true) : null;
         if (!is_array($loc) || !isset($loc['lat'], $loc['lng'])) {
             continue;
         }
 
-        $dLat = (float) $loc['lat'];
-        $dLng = (float) $loc['lng'];
-        $distance = distance_between_points_km($lat, $lng, $dLat, $dLng);
-        if ($distance > $radioKm) {
-            continue;
-        }
-
-        $candidates[] = [
+        $out[] = [
             'id' => $driverId,
-            'distancia_km' => $distance,
-            'latitud_actual' => $dLat,
-            'longitud_actual' => $dLng,
+            'distancia_km' => (float)($candidate['distance_km'] ?? 0),
+            'latitud_actual' => (float)$loc['lat'],
+            'longitud_actual' => (float)$loc['lng'],
         ];
     }
 
-    usort($candidates, static fn(array $a, array $b): int => $a['distancia_km'] <=> $b['distancia_km']);
-    return array_slice($candidates, 0, $limit);
+    return $out;
 }
 
 /**

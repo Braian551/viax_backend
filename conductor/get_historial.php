@@ -16,6 +16,22 @@ header('Access-Control-Allow-Headers: Content-Type, Accept');
 
 require_once '../config/database.php';
 
+date_default_timezone_set('America/Bogota');
+
+function formatDateTimeColombiaAmPm(?string $value): ?string {
+    if (empty($value)) {
+        return null;
+    }
+
+    try {
+        $dt = new DateTimeImmutable($value, new DateTimeZone('America/Bogota'));
+        $ampm = strtolower($dt->format('a')) === 'am' ? 'a. m.' : 'p. m.';
+        return $dt->format('d/m/Y h:i') . ' ' . $ampm;
+    } catch (Throwable $e) {
+        return (string)$value;
+    }
+}
+
 if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     http_response_code(405);
     echo json_encode(['success' => false, 'message' => 'Método no permitido']);
@@ -217,6 +233,10 @@ try {
             'fecha_solicitud' => to_iso8601($viaje['fecha_solicitud']),
             'fecha_completado' => to_iso8601($viaje['fecha_completado']),
             'fecha_aceptado' => to_iso8601($viaje['fecha_aceptado'] ?? null),
+            // Fechas formateadas Colombia (12h a. m./p. m.)
+            'fecha_solicitud_colombia' => formatDateTimeColombiaAmPm($viaje['fecha_solicitud'] ?? null),
+            'fecha_completado_colombia' => formatDateTimeColombiaAmPm($viaje['fecha_completado'] ?? null),
+            'fecha_aceptado_colombia' => formatDateTimeColombiaAmPm($viaje['fecha_aceptado'] ?? null),
             // Ubicaciones
             'origen' => $viaje['origen'],
             'destino' => $viaje['destino'],

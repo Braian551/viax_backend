@@ -113,14 +113,21 @@ function maxIntOrZero(array $values): int {
     return (int) max($filtered);
 }
 
-function resolveCanonicalFinalMetrics(array $viaje, ?array $ultimoTracking, ?float $bodyDistanciaKm, ?int $bodyTiempoSeg): array {
+function formatDateTimeCoAmPm(DateTimeInterface $dateTime): string {
+    $ampm = strtolower($dateTime->format('a')) === 'am' ? 'a. m.' : 'p. m.';
+    return $dateTime->format('d/m/Y h:i') . ' ' . $ampm;
+}
+
+function resolveCanonicalFinalMetrics(array $viaje, ?array $ultimoTracking, ?array $redisMetrics, ?float $bodyDistanciaKm, ?int $bodyTiempoSeg): array {
     $distanciaReal = maxFloatOrZero([
+        positiveFloatOrNull($redisMetrics['distance_km'] ?? null),
         positiveFloatOrNull($bodyDistanciaKm),
         positiveFloatOrNull($ultimoTracking['distancia_acumulada_km'] ?? null),
         positiveFloatOrNull($viaje['distancia_recorrida'] ?? null),
     ]);
 
     $tiempoRealSeg = maxIntOrZero([
+        positiveIntOrNull($redisMetrics['elapsed_time_sec'] ?? null),
         positiveIntOrNull($bodyTiempoSeg),
         positiveIntOrNull($ultimoTracking['tiempo_transcurrido_seg'] ?? null),
         positiveIntOrNull($viaje['tiempo_transcurrido'] ?? null),
@@ -130,6 +137,35 @@ function resolveCanonicalFinalMetrics(array $viaje, ?array $ultimoTracking, ?flo
         'distancia_real_km' => $distanciaReal,
         'tiempo_real_seg' => $tiempoRealSeg,
     ];
+}
+
+function readCanonicalMetricsFromRedis(int $solicitudId): ?array {
+    $redis = Cache::redis();
+    if (!$redis) {
+        return null;
+    }
+
+    try {
+        $raw = $redis->get('trip:' . $solicitudId . ':metrics');
+        if (is_string($raw) && trim($raw) !== '') {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded)) {
+                return $decoded;
+            }
+        }
+
+        $legacy = $redis->hGetAll('trip:' . $solicitudId . ':metrics');
+        if (is_array($legacy) && !empty($legacy)) {
+            return [
+                'distance_km' => isset($legacy['distance_total_km']) ? floatval($legacy['distance_total_km']) : 0,
+                'elapsed_time_sec' => isset($legacy['elapsed_time_sec']) ? intval($legacy['elapsed_time_sec']) : 0,
+            ];
+        }
+    } catch (Throwable $e) {
+        error_log('[finalize] redis metrics warning: ' . $e->getMessage());
+    }
+
+    return null;
 }
 
 function haversineMeters(float $lat1, float $lon1, float $lat2, float $lon2): float {
@@ -230,6 +266,24 @@ function reconcileDistanceKmFromGps(PDO $db, int $solicitudId, float $fallbackKm
                 continue;
             }
 
+            // Descarta saltos con velocidad implausible aunque vengan con velocidad GPS en 0.
+            if ($deltaSec > 0) {
+                $computedSpeedKmh = ($jumpMeters / 1000.0) / ($deltaSec / 3600.0);
+                if ($computedSpeedKmh > 180) {
+                    $rejected++;
+                    continue;
+                }
+            } elseif ($jumpMeters > 120) {
+                $rejected++;
+                continue;
+            }
+
+            // Aun con delta mayor, un salto muy grande en poco tiempo suele ser GPS drift.
+            if ($deltaSec <= 30 && $jumpMeters > 1000) {
+                $rejected++;
+                continue;
+            }
+
             // Duplicado o jitter ínfimo, no suma distancia.
             if ($jumpMeters < 1.0) {
                 $accepted++;
@@ -289,6 +343,18 @@ function resolveDurationSegFromServer(PDO $db, int $solicitudId, int $fallbackSe
     }
 
     return max(0, $fallbackSeg);
+}
+
+function clampDistanceByDuration(float $distanceKm, int $durationSeg): float {
+    // IMPORTANTE:
+    // Evita que un salto de GPS o latencia termine bloqueando métricas imposibles.
+    // Regla conservadora: máximo 130 km/h + margen pequeño.
+    if ($durationSeg <= 0) {
+        return min($distanceKm, 0.2);
+    }
+
+    $maxDistanceKm = (($durationSeg / 3600.0) * 130.0) + 0.2;
+    return min($distanceKm, max(0.0, $maxDistanceKm));
 }
 
 function buildLockedSummaryResponse(PDO $db, int $solicitudId, int $conductorId): array {
@@ -580,9 +646,12 @@ try {
     
     // Resolver valores finales canónicos con criterio monotónico.
     // Esto evita que un snapshot atrasado o un batch tardío pise el valor real final.
+    $redisMetrics = readCanonicalMetricsFromRedis($solicitud_id);
+
     $metricasFinales = resolveCanonicalFinalMetrics(
         $viaje,
         $ultimo_tracking ?: null,
+        $redisMetrics,
         $distancia_final_km,
         $tiempo_final_seg
     );
@@ -594,10 +663,9 @@ try {
         $metricasFinales['distancia_real_km']
     );
 
-    $distancia_real = max(
-        $metricasFinales['distancia_real_km'],
-        floatval($reconciliacion['distance_km'] ?? 0)
-    );
+    $distanciaBody = floatval($metricasFinales['distancia_real_km'] ?? 0);
+    $distanciaReconciliada = floatval($reconciliacion['distance_km'] ?? 0);
+    $gpsAceptados = intval($reconciliacion['accepted_points'] ?? 0);
 
     // Duración basada en timestamps del servidor para eliminar sesgo de latencia cliente.
     $tiempo_real_seg = resolveDurationSegFromServer(
@@ -606,8 +674,26 @@ try {
         $metricasFinales['tiempo_real_seg']
     );
 
+    // Si hay trazas GPS suficientes, la reconciliación del servidor manda.
+    // Si no hay trazas, usar fallback pero con candado de plausibilidad temporal.
+    if ($gpsAceptados >= 2) {
+        $distancia_real = $distanciaReconciliada;
+    } else {
+        $distancia_real = max($distanciaBody, $distanciaReconciliada);
+    }
+
+    $distanciaClamped = clampDistanceByDuration($distancia_real, $tiempo_real_seg);
+    if ($distanciaClamped < $distancia_real) {
+        error_log('[TripFinalize] Distancia clamped por plausibilidad trip_id=' . $solicitud_id
+            . ' raw=' . $distancia_real
+            . ' clamped=' . $distanciaClamped
+            . ' duration_seg=' . $tiempo_real_seg
+            . ' gps_accepted=' . $gpsAceptados);
+        $distancia_real = $distanciaClamped;
+    }
+
     if ($distancia_real <= 0 && $distancia_final_km !== null && $distancia_final_km > 0) {
-        $distancia_real = (float) $distancia_final_km;
+        $distancia_real = clampDistanceByDuration((float) $distancia_final_km, $tiempo_real_seg);
     }
 
     if ($tiempo_real_seg <= 0 && $tiempo_final_seg !== null && $tiempo_final_seg > 0) {
@@ -831,7 +917,8 @@ try {
         'porcentaje_recargo_nocturno' => round($porcentaje_recargo_nocturno, 2),
         'porcentaje_recargo_trafico' => round($porcentaje_recargo_trafico, 2),
         'contexto_colombia' => [
-            'fecha_hora_bogota' => $fecha_colombia->format('Y-m-d H:i:s'),
+            'fecha_hora_bogota' => formatDateTimeCoAmPm($fecha_colombia),
+            'fecha_hora_bogota_24h' => $fecha_colombia->format('Y-m-d H:i:s'),
             'es_festivo' => $es_festivo,
             'es_festivo_legal' => $es_festivo_legal,
             'es_dominical' => $es_dominical,
@@ -1173,6 +1260,13 @@ try {
             'estado' => 'trip_completed',
             'timestamp' => time(),
         ]), 300);
+
+        $redis = Cache::redis();
+        if ($redis) {
+            $redis->del('trip:' . $solicitud_id . ':state');
+            $redis->del('trip:' . $solicitud_id . ':metrics');
+            $redis->del('trip:' . $solicitud_id . ':anomalies');
+        }
     } catch (Throwable $cacheError) {
         error_log('finalize.php cache warning: ' . $cacheError->getMessage());
     }
@@ -1206,7 +1300,8 @@ try {
             'precio_antes_redondeo' => round($precio_total, 2),
             'precio_final' => $precio_final,
             'contexto_colombia' => [
-                'fecha_hora_bogota' => $fecha_colombia->format('Y-m-d H:i:s'),
+                'fecha_hora_bogota' => formatDateTimeCoAmPm($fecha_colombia),
+                'fecha_hora_bogota_24h' => $fecha_colombia->format('Y-m-d H:i:s'),
                 'es_festivo' => $es_festivo,
                 'es_festivo_legal' => $es_festivo_legal,
                 'es_dominical' => $es_dominical,

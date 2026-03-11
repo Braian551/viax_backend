@@ -42,10 +42,22 @@ try {
             $config = $stmt->fetch(PDO::FETCH_ASSOC);
         }
 
+        $metodoRecaudo = 'cuenta_bancaria';
+        if ($config) {
+            $tipoCuenta = strtolower(trim((string)($config['tipo_cuenta'] ?? '')));
+            $bancoNombre = strtolower(trim((string)($config['banco_nombre'] ?? '')));
+            if ($tipoCuenta === 'nequi' || $bancoNombre === 'nequi') {
+                $metodoRecaudo = 'nequi';
+            }
+            $config['metodo_recaudo'] = $metodoRecaudo;
+            $config['configurada'] = true;
+        }
+
         echo json_encode([
             'success' => true,
             'data' => $config ?: [
                 'configurada' => false,
+                'metodo_recaudo' => 'cuenta_bancaria',
                 'banco_nombre' => null,
                 'tipo_cuenta' => null,
                 'numero_cuenta' => null,
@@ -71,13 +83,38 @@ try {
     $titularCuenta = trim($input['titular_cuenta'] ?? '');
     $documentoTitular = trim($input['documento_titular'] ?? '');
     $referencia = trim($input['referencia_transferencia'] ?? '');
+    $metodoRecaudo = trim($input['metodo_recaudo'] ?? 'cuenta_bancaria');
 
     if ($adminId <= 0) {
         throw new Exception('admin_id es requerido');
     }
 
-    if ($bancoNombre === '' || $numeroCuenta === '' || $titularCuenta === '') {
-        throw new Exception('Banco, número de cuenta y titular son requeridos');
+    if (!in_array($metodoRecaudo, ['cuenta_bancaria', 'nequi'], true)) {
+        $metodoRecaudo = 'cuenta_bancaria';
+    }
+
+    // Compatibilidad: si llega tipo_cuenta=banco, normalizar.
+    if (strtolower($tipoCuenta) === 'banco') {
+        $tipoCuenta = '';
+    }
+
+    if ($metodoRecaudo === 'nequi') {
+        if ($numeroCuenta === '' || $titularCuenta === '') {
+            throw new Exception('Número de Nequi y titular son requeridos');
+        }
+        if ($bancoNombre === '') {
+            $bancoNombre = 'Nequi';
+        }
+        if ($tipoCuenta === '') {
+            $tipoCuenta = 'nequi';
+        }
+    } else {
+        if ($bancoNombre === '' || $numeroCuenta === '' || $titularCuenta === '') {
+            throw new Exception('Banco, número de cuenta y titular son requeridos');
+        }
+        if ($tipoCuenta === '') {
+            throw new Exception('Tipo de cuenta es requerido');
+        }
     }
 
     // Upsert

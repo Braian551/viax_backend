@@ -92,13 +92,13 @@ class Mailer {
     /**
      * Envía un correo genérico (para futuros usos).
      */
-    public static function sendEmail($toEmail, $userName, $subject, $message) {
+    public static function sendEmail($toEmail, $userName, $subject, $message, $attachments = []) {
         $bodyContent = "
             <div class='greeting'>Hola, $userName</div>
             <p class='message'>$message</p>
         ";
         $htmlBody = self::wrapLayout($bodyContent);
-        return self::send($toEmail, $userName, $subject, $htmlBody);
+        return self::send($toEmail, $userName, $subject, $htmlBody, null, $attachments);
     }
 
     /**

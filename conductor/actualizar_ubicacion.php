@@ -15,6 +15,7 @@ header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Accept');
 
 require_once __DIR__ . '/../config/app.php';
+require_once __DIR__ . '/../services/driver_service.php';
 
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
     http_response_code(200);
@@ -57,6 +58,7 @@ function writeLocationToRedis(int $conductorId, float $lat, float $lng, ?float $
 
     Cache::set("driver_location:{$conductorId}", (string) $payload, 30);
     Cache::sAdd('active_drivers', (string) $conductorId);
+    DriverGeoService::upsertDriverLocation($conductorId, $lat, $lng, $speed);
 }
 
 /**
@@ -108,6 +110,7 @@ try {
 
     // Escritura rápida en cache (camino crítico realtime).
     writeLocationToRedis($conductorId, $latitud, $longitud, $velocidad);
+    DriverGeoService::setDriverState($conductorId, 'available');
 
     // Persistencia periódica en BD para descargar I/O.
     $persistirBd = shouldPersistToDatabase($conductorId);
@@ -140,31 +143,9 @@ try {
             $stmtInsert->execute();
         }
 
-        // Actualiza métricas de viaje activo si vienen en el payload.
-        $solicitudId = isset($input['solicitud_id']) ? (int) $input['solicitud_id'] : 0;
-        $distanciaRecorrida = isset($input['distancia_recorrida']) ? (float) $input['distancia_recorrida'] : null;
-        $tiempoTranscurrido = isset($input['tiempo_transcurrido']) ? (int) $input['tiempo_transcurrido'] : null;
-
-        if ($solicitudId > 0 && ($distanciaRecorrida !== null || $tiempoTranscurrido !== null)) {
-            $updateParts = [];
-            $params = [':solicitud_id' => $solicitudId];
-
-            if ($distanciaRecorrida !== null && $distanciaRecorrida >= 0) {
-                $updateParts[] = 'distancia_recorrida = :distancia';
-                $params[':distancia'] = $distanciaRecorrida;
-            }
-
-            if ($tiempoTranscurrido !== null && $tiempoTranscurrido >= 0) {
-                $updateParts[] = 'tiempo_transcurrido = :tiempo';
-                $params[':tiempo'] = $tiempoTranscurrido;
-            }
-
-            if (!empty($updateParts)) {
-                $sqlTrip = 'UPDATE solicitudes_servicio SET ' . implode(', ', $updateParts) . ' WHERE id = :solicitud_id';
-                $stmtTrip = $db->prepare($sqlTrip);
-                $stmtTrip->execute($params);
-            }
-        }
+        // Importante: este endpoint SOLO actualiza ubicación del conductor.
+        // Las métricas canónicas de distancia/tiempo se calculan en
+        // /driver/tracking/update y en finalize para evitar inflado por payloads legacy.
     }
 
     echo json_encode([

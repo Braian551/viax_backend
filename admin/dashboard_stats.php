@@ -5,9 +5,8 @@
  */
 
 // Configuración de errores y CORS
-error_reporting(E_ALL);
-ini_set('display_errors', 1);
-ini_set('log_errors', 1);
+error_reporting(E_ERROR | E_PARSE);
+ini_set('display_errors', '0');
 
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
@@ -20,6 +19,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once '../config/config.php';
+
+date_default_timezone_set('America/Bogota');
 
 try {
     // Verificar que sea un administrador
@@ -37,7 +38,7 @@ try {
     $db = $database->getConnection();
 
     // Verificar que el usuario sea administrador
-    $checkAdmin = "SELECT id, tipo_usuario, nombre, email, telefono FROM usuarios WHERE id = ? AND tipo_usuario = 'administrador'";
+    $checkAdmin = "SELECT id, tipo_usuario, nombre, email, telefono FROM usuarios WHERE id = ? AND tipo_usuario IN ('administrador', 'admin')";
     $stmtCheck = $db->prepare($checkAdmin);
     $stmtCheck->execute([$input['admin_id']]);
     
@@ -79,31 +80,24 @@ try {
     $stmtSolicitudes = $db->query($querySolicitudes);
     $solicitudStats = $stmtSolicitudes->fetch(PDO::FETCH_ASSOC);
 
-    // Ingresos (de tabla transacciones si existe)
+    // Ingresos de plataforma desde pagos empresariales confirmados.
     $queryIngresos = "SELECT 
-        COALESCE(SUM(CASE WHEN estado = 'completado' THEN monto_total ELSE 0 END), 0) as ingresos_totales,
-        COALESCE(SUM(CASE WHEN estado = 'completado' AND DATE(fecha_creacion) = CURRENT_DATE THEN monto_total ELSE 0 END), 0) as ingresos_hoy
-    FROM transacciones";
-    
-    try {
-        $stmtIngresos = $db->query($queryIngresos);
-        $ingresosStats = $stmtIngresos->fetch(PDO::FETCH_ASSOC);
-    } catch (Exception $e) {
-        // Si la tabla transacciones no existe aún
-        $ingresosStats = ['ingresos_totales' => 0, 'ingresos_hoy' => 0];
-    }
+        COALESCE(SUM(CASE WHEN tipo = 'pago' THEN monto ELSE 0 END), 0) AS ingresos_totales,
+        COALESCE(SUM(CASE WHEN tipo = 'pago' AND DATE(creado_en) = :hoy THEN monto ELSE 0 END), 0) AS ingresos_hoy
+    FROM pagos_empresas";
+    $stmtIngresos = $db->prepare($queryIngresos);
+    $stmtIngresos->execute([':hoy' => date('Y-m-d')]);
+    $ingresosStats = $stmtIngresos->fetch(PDO::FETCH_ASSOC) ?: ['ingresos_totales' => 0, 'ingresos_hoy' => 0];
 
-    // Reportes pendientes
-    $queryReportes = "SELECT COUNT(*) as reportes_pendientes 
-                      FROM reportes_usuarios 
-                      WHERE estado = 'pendiente'";
-    
-    try {
-        $stmtReportes = $db->query($queryReportes);
-        $reportesStats = $stmtReportes->fetch(PDO::FETCH_ASSOC);
-    } catch (Exception $e) {
-        $reportesStats = ['reportes_pendientes' => 0];
-    }
+    // Reportes pendientes (usuarios + comprobantes de pago de empresa).
+    $queryReportes = "SELECT
+        (
+            COALESCE((SELECT COUNT(*) FROM reportes_usuarios WHERE estado = 'pendiente'), 0)
+            +
+            COALESCE((SELECT COUNT(*) FROM pagos_empresa_reportes WHERE estado = 'pendiente_revision'), 0)
+        ) AS reportes_pendientes";
+    $stmtReportes = $db->query($queryReportes);
+    $reportesStats = $stmtReportes->fetch(PDO::FETCH_ASSOC) ?: ['reportes_pendientes' => 0];
 
     // Últimas actividades (logs de auditoría)
     $queryActividades = "SELECT 

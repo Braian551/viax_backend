@@ -216,6 +216,92 @@ try {
         // Actualizar asignación a 'en_curso'
         $stmtAsig = $db->prepare("UPDATE asignaciones_conductor SET estado = 'en_curso' WHERE solicitud_id = ? AND conductor_id = ?");
         $stmtAsig->execute([$solicitud_id, $conductor_id]);
+
+        // Sembrar estado realtime inicial para que cliente renderice tracking inmediato.
+        $seedLat = null;
+        $seedLng = null;
+        $seedTs = time();
+
+        try {
+            $driverLocRaw = Cache::get('driver_location:' . $conductor_id);
+            if (is_string($driverLocRaw) && trim($driverLocRaw) !== '') {
+                $driverLoc = json_decode($driverLocRaw, true);
+                if (is_array($driverLoc)) {
+                    if (isset($driverLoc['lat'])) {
+                        $seedLat = floatval($driverLoc['lat']);
+                    }
+                    if (isset($driverLoc['lng'])) {
+                        $seedLng = floatval($driverLoc['lng']);
+                    }
+                    // Importante: no reutilizar timestamp histórico del conductor,
+                    // porque genera saltos iniciales de tiempo/distancia en tracking.
+                }
+            }
+        } catch (Throwable $e) {
+            // Cache secundaria; no interrumpir transición de estado.
+        }
+
+        if ($seedLat === null || $seedLng === null) {
+            $stmtLoc = $db->prepare("SELECT latitud_actual, longitud_actual FROM detalles_conductor WHERE usuario_id = ? LIMIT 1");
+            $stmtLoc->execute([$conductor_id]);
+            $locRow = $stmtLoc->fetch(PDO::FETCH_ASSOC);
+            if ($locRow) {
+                $seedLat = isset($locRow['latitud_actual']) ? floatval($locRow['latitud_actual']) : null;
+                $seedLng = isset($locRow['longitud_actual']) ? floatval($locRow['longitud_actual']) : null;
+            }
+        }
+
+        if ($seedLat !== null && $seedLng !== null) {
+            $statePayload = [
+                'lat' => $seedLat,
+                'lng' => $seedLng,
+                'timestamp' => gmdate('c', $seedTs),
+                'speed' => 0,
+                'heading' => 0,
+                'fase' => 'hacia_destino',
+            ];
+            $metricsPayload = [
+                'distance_km' => 0,
+                'elapsed_time_sec' => 0,
+                'avg_speed_kmh' => 0,
+                'price' => 0,
+                'last_timestamp' => gmdate('c', $seedTs),
+                'last_ts' => $seedTs,
+                'last_lat' => $seedLat,
+                'last_lng' => $seedLng,
+            ];
+
+            Cache::set('trip:' . $solicitud_id . ':state', (string) json_encode($statePayload, JSON_UNESCAPED_UNICODE), 7200);
+            Cache::set('trip_tracking_latest:' . $solicitud_id, (string) json_encode([
+                'solicitud_id' => intval($solicitud_id),
+                'conductor_id' => intval($conductor_id),
+                'latitud' => $seedLat,
+                'longitud' => $seedLng,
+                'distancia_km' => 0,
+                'tiempo_seg' => 0,
+                'precio_parcial' => 0,
+                'fase_viaje' => 'hacia_destino',
+                'timestamp' => $seedTs,
+            ], JSON_UNESCAPED_UNICODE), 7200);
+
+            $redis = Cache::redis();
+            if ($redis) {
+                $redis->setex('trip:' . $solicitud_id . ':metrics', 7200, json_encode($metricsPayload, JSON_UNESCAPED_UNICODE));
+                $redis->publish('trip_updates:' . $solicitud_id, json_encode([
+                    'trip_id' => intval($solicitud_id),
+                    'tracking_actual' => [
+                        'ubicacion' => ['latitud' => $seedLat, 'longitud' => $seedLng],
+                        'distancia_km' => 0,
+                        'tiempo_segundos' => 0,
+                        'precio_actual' => 0,
+                        'velocidad_kmh' => 0,
+                        'heading_deg' => 0,
+                        'fase' => 'hacia_destino',
+                        'ultima_actualizacion' => gmdate('c', $seedTs),
+                    ],
+                ], JSON_UNESCAPED_UNICODE));
+            }
+        }
         
     } elseif ($nuevo_estado === 'completada') {
         $update_fields[] = "completado_en = NOW()";

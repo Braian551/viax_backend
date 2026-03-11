@@ -22,6 +22,9 @@ require_once '../config/concurrency_service.php';
 require_once '../utils/NotificationHelper.php';
 require_once '../config/redis.php';
 require_once '../core/Cache.php';
+require_once __DIR__ . '/tracking/tracking_schema_helpers.php';
+require_once '../services/trip_state_machine.php';
+require_once '../services/driver_service.php';
 
 /**
  * Valida transición de estado permitida sin romper estados históricos.
@@ -48,6 +51,32 @@ function isValidStateTransition(string $estadoActual, string $nuevoEstado): bool
     }
 
     return in_array($nuevoEstado, $map[$estadoActual], true);
+}
+
+function canonicalTripState(string $estado): string
+{
+    $normalized = strtolower(trim($estado));
+    return match ($normalized) {
+        'pendiente' => TripStateMachine::REQUESTED,
+        'aceptada', 'asignado' => TripStateMachine::DRIVER_ASSIGNED,
+        'conductor_llego' => TripStateMachine::DRIVER_ARRIVED,
+        'recogido', 'en_curso' => TripStateMachine::TRIP_STARTED,
+        'completada', 'completado', 'entregado' => TripStateMachine::TRIP_COMPLETED,
+        'cancelada', 'cancelado', 'rechazada', 'rechazado', 'rejected' => TripStateMachine::TRIP_CANCELLED,
+        default => TripStateMachine::REQUESTED,
+    };
+}
+
+function canonicalTargetState(string $estado): string
+{
+    $normalized = strtolower(trim($estado));
+    return match ($normalized) {
+        'conductor_llego' => TripStateMachine::DRIVER_ARRIVED,
+        'recogido', 'en_curso' => TripStateMachine::TRIP_STARTED,
+        'completada' => TripStateMachine::TRIP_COMPLETED,
+        'cancelada' => TripStateMachine::TRIP_CANCELLED,
+        default => TripStateMachine::REQUESTED,
+    };
 }
 
 try {
@@ -132,6 +161,39 @@ try {
     if (!isValidStateTransition((string) $solicitud['estado'], $nuevo_estado)) {
         throw new Exception('Transición de estado inválida');
     }
+
+    $canonicalFrom = canonicalTripState((string)$solicitud['estado']);
+    $canonicalTo = canonicalTargetState((string)$nuevo_estado);
+    if ($canonicalFrom !== $canonicalTo) {
+        TripStateMachine::assertTransition($canonicalFrom, $canonicalTo);
+    }
+
+    $hasMetricsLocked = trackingColumnExists($db, 'solicitudes_servicio', 'metrics_locked');
+    $hasDistanceFinal = trackingColumnExists($db, 'solicitudes_servicio', 'distance_final');
+    $hasDurationFinal = trackingColumnExists($db, 'solicitudes_servicio', 'duration_final');
+    $hasFinalizedAt = trackingColumnExists($db, 'solicitudes_servicio', 'finalized_at');
+    $hasPriceFinalEn = trackingColumnExists($db, 'solicitudes_servicio', 'price_final');
+
+    $estadoActualNorm = strtolower(trim((string)($solicitud['estado'] ?? '')));
+    $isTerminalActual = in_array($estadoActualNorm, [
+        'completada', 'completado', 'finalizada', 'finalizado', 'entregado',
+        'cancelada', 'cancelado', 'rechazada', 'rechazado', 'rejected'
+    ], true);
+    $metricsLockedActual = $hasMetricsLocked && !empty($solicitud['metrics_locked']);
+
+    // Si ya está terminal y bloqueado, no permitir sobrescrituras tardías.
+    if ($isTerminalActual && $metricsLockedActual) {
+        error_log('[TripFinalize] Ignorado update tardío para trip_id=' . intval($solicitud_id));
+        $db->commit();
+        echo json_encode([
+            'success' => true,
+            'message' => 'Viaje ya cerrado con métricas bloqueadas',
+            'nuevo_estado' => $solicitud['estado'],
+            'metrics_locked' => true,
+        ]);
+        $concurrencyService->releaseLock('solicitud', (int) $solicitud_id);
+        exit();
+    }
     
     // Construir QUERY dinámico
     $update_fields = ["estado = :estado"];
@@ -158,26 +220,65 @@ try {
     } elseif ($nuevo_estado === 'completada') {
         $update_fields[] = "completado_en = NOW()";
         $update_fields[] = "entregado_en = NOW()";
+
+        // Arquitectura canónica: al cerrar viaje se congelan métricas finales.
+        if ($hasMetricsLocked) {
+            $update_fields[] = "metrics_locked = TRUE";
+        }
+        if ($hasFinalizedAt) {
+            $update_fields[] = "finalized_at = COALESCE(finalized_at, NOW())";
+        }
         
         if ($precio_final !== null) {
             $update_fields[] = "precio_final = :precio";
             $params[':precio'] = $precio_final;
+            if ($hasPriceFinalEn) {
+                $update_fields[] = "price_final = :price_final_en";
+                $params[':price_final_en'] = $precio_final;
+            }
         }
+
+        if ($distancia_recorrida !== null) {
+            if ($hasDistanceFinal) {
+                $update_fields[] = "distance_final = :distance_final";
+                $params[':distance_final'] = $distancia_recorrida;
+            }
+            $update_fields[] = "distancia_recorrida = :distancia";
+            $params[':distancia'] = $distancia_recorrida;
+        }
+
+        if ($tiempo_transcurrido !== null) {
+            if ($hasDurationFinal) {
+                $update_fields[] = "duration_final = :duration_final";
+                $params[':duration_final'] = $tiempo_transcurrido;
+            }
+            $update_fields[] = "tiempo_transcurrido = :tiempo";
+            $params[':tiempo'] = $tiempo_transcurrido;
+        }
+
+        error_log('[TripFinalize] Final metrics stored for trip_id=' . intval($solicitud_id));
     } elseif ($nuevo_estado === 'cancelada') {
         $update_fields[] = "cancelado_en = NOW()";
         if ($motivo_cancelacion) {
             $update_fields[] = "motivo_cancelacion = :motivo";
             $params[':motivo'] = $motivo_cancelacion;
         }
+
+        if ($hasMetricsLocked) {
+            $update_fields[] = "metrics_locked = TRUE";
+        }
+        if ($hasFinalizedAt) {
+            $update_fields[] = "finalized_at = COALESCE(finalized_at, NOW())";
+        }
     }
 
     // --- GUARDAR DATOS FINALES DEL VIAJE ---
     // Siempre guardar distancia y tiempo si vienen en la petición
-    if ($distancia_recorrida !== null && $distancia_recorrida > 0) {
+    if ($distancia_recorrida !== null && $distancia_recorrida > 0 && $nuevo_estado !== 'completada') {
         $update_fields[] = "distancia_recorrida = :distancia";
         $params[':distancia'] = $distancia_recorrida;
     }
-    if ($tiempo_transcurrido !== null && $tiempo_transcurrido > 0) {
+    if ($tiempo_transcurrido !== null && $tiempo_transcurrido > 0 && $nuevo_estado !== 'completada') {
         $update_fields[] = "tiempo_transcurrido = :tiempo";
         $params[':tiempo'] = $tiempo_transcurrido;
     }
@@ -317,6 +418,40 @@ try {
     // Invalidar cache temporal de solicitud al cerrar ciclo.
     if ($nuevo_estado === 'completada' || $nuevo_estado === 'cancelada') {
         Cache::set('ride_request:' . (int) $solicitud_id, '{}', 1);
+    }
+
+    try {
+        $redis = Cache::redis();
+        if ($redis) {
+            if ($nuevo_estado === 'completada') {
+                $redis->incr('metrics:rides_completed');
+
+                $actualSec = $tiempo_transcurrido !== null ? (int)$tiempo_transcurrido : 0;
+                $estimatedSec = isset($solicitud['tiempo_estimado']) ? ((int)$solicitud['tiempo_estimado'] * 60) : 0;
+                if ($actualSec > 0 && $estimatedSec > 0) {
+                    $error = abs($actualSec - $estimatedSec) / $estimatedSec;
+                    if ($error <= 0.20) {
+                        $redis->incr('metrics:eta_accuracy');
+                    }
+                    $redis->incr('metrics:eta_accuracy_total');
+                }
+            }
+        }
+    } catch (Throwable $e) {}
+
+    if ($nuevo_estado === 'completada' || $nuevo_estado === 'cancelada') {
+        DriverGeoService::setDriverState((int)$conductor_id, 'available');
+        Cache::set('driver:' . (int)$conductor_id . ':last_trip_end', (string)time(), 86400);
+
+        $driverStatsKey = 'driver:' . (int)$conductor_id . ':stats';
+        $redis = Cache::redis();
+        if ($redis) {
+            try {
+                $recentTrips = intval($redis->hGet($driverStatsKey, 'recent_trips') ?: 0);
+                $redis->hSet($driverStatsKey, 'recent_trips', (string)min(100, $recentTrips + 1));
+                $redis->expire($driverStatsKey, 86400);
+            } catch (Throwable $e) {}
+        }
     }
     
     try {

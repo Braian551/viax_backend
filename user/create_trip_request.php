@@ -23,6 +23,9 @@ if (isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'OPTIONS
 }
 
 require_once __DIR__ . '/../config/app.php';
+require_once __DIR__ . '/../services/matching_service.php';
+require_once __DIR__ . '/../services/eta_service.php';
+require_once __DIR__ . '/../services/pricing_service.php';
 
 /** Valida coordenadas geográficas para evitar payloads corruptos. */
 function isValidCoordinate(float $lat, float $lng): bool
@@ -95,6 +98,15 @@ try {
     
     $database = new Database();
     $db = $database->getConnection();
+
+    try {
+        $redis = Cache::redis();
+        if ($redis) {
+            $redis->incr('metrics:rides_requested');
+        }
+    } catch (Throwable $e) {
+        // Métrica secundaria, no rompe flujo.
+    }
     
     // Obtener clave de idempotencia
     $idempotencyKey = $_SERVER['HTTP_X_IDEMPOTENCY_KEY'] ?? $data['idempotency_key'] ?? null;
@@ -248,86 +260,88 @@ try {
     // Buscar conductores cercanos disponibles (si se proporciona tipo_vehiculo)
     $conductoresCercanos = [];
     if (isset($data['tipo_vehiculo'])) {
-        $radiusKm = 5.0; // Radio de búsqueda en kilómetros
-        
-        // Mapear tipo de vehículo de la app a la BD
         $vehiculoTipoMap = [
             'moto' => 'moto',
             'auto' => 'auto',
             'mototaxi' => 'mototaxi'
         ];
         $vehiculoTipo = $vehiculoTipoMap[$data['tipo_vehiculo']] ?? 'moto';
-        
-        // Construir query base
-        $query = "
-            SELECT 
-                u.id,
-                u.nombre,
-                u.apellido,
-                u.telefono,
-                u.foto_perfil,
-                u.empresa_id,
-                dc.vehiculo_tipo,
-                dc.vehiculo_marca,
-                dc.vehiculo_modelo,
-                dc.vehiculo_placa,
-                dc.vehiculo_color,
-                dc.calificacion_promedio,
-                dc.latitud_actual,
-                dc.longitud_actual,
-                (6371 * acos(
-                    cos(radians(?)) * cos(radians(dc.latitud_actual)) *
-                    cos(radians(dc.longitud_actual) - radians(?)) +
-                    sin(radians(?)) * sin(radians(dc.latitud_actual))
-                )) AS distancia
-            FROM usuarios u
-            INNER JOIN detalles_conductor dc ON u.id = dc.usuario_id
-            WHERE u.tipo_usuario = 'conductor'
-            AND u.es_activo = 1
-            AND dc.disponible = 1
-            AND dc.estado_verificacion = 'aprobado'
-            AND dc.vehiculo_tipo = ?
-            AND dc.latitud_actual IS NOT NULL
-            AND dc.longitud_actual IS NOT NULL
-            AND (6371 * acos(
-                cos(radians(?)) * cos(radians(dc.latitud_actual)) *
-                cos(radians(dc.longitud_actual) - radians(?)) +
-                sin(radians(?)) * sin(radians(dc.latitud_actual))
-            )) <= ?";
-        
-        // Parámetros base
-        $params = [
+
+        $matchingStart = microtime(true);
+        $conductoresCercanos = RideMatchingService::rankCandidates(
+            $db,
             $latOrigen,
             $lngOrigen,
-            $latOrigen,
+            5.0,
+            10,
             $vehiculoTipo,
-            $latOrigen,
-            $lngOrigen,
-            $latOrigen,
-            $radiusKm
-        ];
-        
-        // Agregar filtro de empresa si se proporciona
-        if ($empresaId !== null) {
-            $query .= " AND u.empresa_id = ?";
-            $params[] = $empresaId;
-        }
-        
-        $query .= " ORDER BY distancia ASC LIMIT 10";
-        
-        $stmt = $db->prepare($query);
-        $stmt->execute($params);
-        
-        $conductoresCercanos = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $empresaId
+        );
+
+        try {
+            $redis = Cache::redis();
+            if ($redis) {
+                $matchingLatencyMs = (int)round((microtime(true) - $matchingStart) * 1000);
+                $redis->incrBy('metrics:matching_latency', max(0, $matchingLatencyMs));
+                $redis->incr('metrics:matching_latency_count');
+            }
+        } catch (Throwable $e) {}
+
+        try {
+            $activeStmt = $db->query("SELECT COUNT(*) FROM solicitudes_servicio WHERE estado IN ('pendiente', 'aceptada', 'asignado')");
+            $activeRequests = (int)$activeStmt->fetchColumn();
+            $availableDrivers = max(1, count($conductoresCercanos));
+            $zoneKey = DynamicPricingService::zoneKey($latOrigen, $lngOrigen);
+            DynamicPricingService::updateZoneDemand($zoneKey, $activeRequests, $availableDrivers);
+        } catch (Throwable $e) {}
     }
+
+    $eta = EtaService::estimate(
+        $latOrigen,
+        $lngOrigen,
+        $latDestino,
+        $lngDestino,
+        'moderate',
+        null
+    );
+
+    $pricingPreview = DynamicPricingService::calculate([
+        'distance_km' => $distanciaKm,
+        'time_min' => $duracionMin,
+        'base_fare' => (float)($data['base_fare'] ?? 5000),
+        'per_km_rate' => (float)($data['per_km_rate'] ?? 1800),
+        'per_min_rate' => (float)($data['per_min_rate'] ?? 250),
+        'avg_speed_kmh' => 28,
+        'current_speed_kmh' => 24,
+        'lat' => $latOrigen,
+        'lng' => $lngOrigen,
+    ]);
     
     echo json_encode([
         'success' => true,
         'message' => 'Solicitud creada exitosamente',
         'solicitud_id' => $solicitudId,
         'conductores_encontrados' => count($conductoresCercanos),
-        'conductores' => $conductoresCercanos
+        'conductores' => $conductoresCercanos,
+        'eta' => $eta,
+        'pricing_preview' => $pricingPreview,
     ]);
+
+    try {
+        $redis = Cache::redis();
+        if ($redis) {
+            $redis->lPush('ride_requests_queue', (string)$solicitudId);
+            $redis->setex('ride:' . $solicitudId . ':radius', 600, '2');
+            $driverIds = array_values(array_map(static fn($x) => (string)($x['driver_id'] ?? $x['id'] ?? ''), $conductoresCercanos));
+            $driverIds = array_values(array_filter($driverIds, static fn($x) => $x !== ''));
+            if (!empty($driverIds)) {
+                $redis->setex('ride:' . $solicitudId . ':drivers', 600, json_encode($driverIds, JSON_UNESCAPED_UNICODE));
+            }
+            $redis->incr('metrics:dispatch_requests');
+        }
+    } catch (Throwable $e) {
+        error_log('[create_trip_request] dispatch queue warning: ' . $e->getMessage());
+    }
     
 } catch (Exception $e) {
     // Revertir transacción en caso de error

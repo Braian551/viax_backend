@@ -22,6 +22,7 @@ require_once '../config/concurrency_service.php';
 require_once '../utils/NotificationHelper.php';
 require_once '../config/redis.php';
 require_once '../core/Cache.php';
+require_once '../services/driver_service.php';
 
 /** Guarda asignación temporal en cache para acelerar consultas de estado. */
 function cacheTripAssignment(int $solicitudId, int $conductorId): void
@@ -60,6 +61,17 @@ try {
     
     if ($result['success']) {
         cacheTripAssignment($solicitudId, $conductorId);
+        DriverGeoService::setDriverState($conductorId, 'on_trip');
+        try {
+            $redis = Cache::redis();
+            if ($redis) {
+                $redis->incr('metrics:driver_acceptance_rate');
+                $redis->setex('ride:' . $solicitudId . ':accepted_driver', 120, (string)$conductorId);
+                $redis->del('driver:' . $conductorId . ':offer_lock');
+                $redis->incr('metrics:dispatch_accepts');
+                DriverGeoService::updateDriverStats($conductorId, 1.0, null, 0);
+            }
+        } catch (Throwable $e) {}
 
         try {
             if (empty($result['idempotent'])) {
@@ -197,6 +209,15 @@ try {
         
             $db->commit();
             cacheTripAssignment($solicitudId, $conductorId);
+            DriverGeoService::setDriverState($conductorId, 'on_trip');
+            try {
+                $redis = Cache::redis();
+                if ($redis) {
+                    $redis->setex('ride:' . $solicitudId . ':accepted_driver', 120, (string)$conductorId);
+                    $redis->del('driver:' . $conductorId . ':offer_lock');
+                    $redis->incr('metrics:dispatch_accepts');
+                }
+            } catch (Throwable $e) {}
 
             try {
                 $nombreConductor = trim(($conductor['nombre'] ?? '') . ' ' . ($conductor['apellido'] ?? ''));

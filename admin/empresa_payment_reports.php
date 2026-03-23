@@ -30,6 +30,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../utils/NotificationHelper.php';
 require_once __DIR__ . '/../utils/Mailer.php';
+require_once __DIR__ . '/../utils/SensitiveDataCrypto.php';
 
 /**
  * Genera la URL pública del proxy R2 para una ruta relativa.
@@ -85,6 +86,9 @@ try {
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
         $rows = array_map(function ($row) {
             $row['comprobante_url'] = getR2ProxyUrl($row['comprobante_ruta']);
+            $numeroPlano = decryptSensitiveData($row['numero_cuenta_destino'] ?? null);
+            $row['numero_cuenta_destino_masked'] = maskSensitiveAccount($numeroPlano);
+            $row['numero_cuenta_destino'] = $row['numero_cuenta_destino_masked'];
             return $row;
         }, $rows);
 
@@ -335,24 +339,28 @@ try {
             RETURNING id");
 
         $comisionPct = floatval($empresaFull['comision_admin_porcentaje'] ?? 0);
-        $concepto = sprintf('Pago de deuda empresarial - %s', $empresaFull['nombre'] ?? 'Empresa');
+        $valorComision = round($montoReportado, 2);
+        $subtotalBase = $comisionPct > 0
+            ? round($valorComision / ($comisionPct / 100), 2)
+            : $valorComision;
+        $concepto = sprintf('Comisión administrativa del periodo - %s', $empresaFull['nombre'] ?? 'Empresa');
+
+        $platformLegalName = 'VIAX TECHONOLOGY S.A.S';
 
         $stmtFactura->execute([
             ':numero' => $numeroFactura,
             ':emisor_id' => intval($adminData['id'] ?? 0),
-            ':emisor_nombre' => $adminData['nombre_legal']
-                ?: trim(($adminData['nombre'] ?? '') . ' ' . ($adminData['apellido'] ?? ''))
-                ?: 'Administrador Principal',
+            ':emisor_nombre' => $platformLegalName,
             ':emisor_documento' => $adminData['numero_documento'] ?? '',
             ':emisor_email' => $adminData['emisor_email'] ?? ($adminData['email'] ?? 'braianoquen@gmail.com'),
             ':receptor_id' => $empresaId,
             ':receptor_nombre' => $empresaFull['nombre'] ?? 'Empresa',
             ':receptor_doc' => $empresaFull['nit'] ?? '',
             ':receptor_email' => $empresaFull['representante_email'] ?: ($empresaFull['email'] ?? ''),
-            ':subtotal' => $montoReportado,
+            ':subtotal' => $subtotalBase,
             ':pct_comision' => $comisionPct,
-            ':val_comision' => 0,
-            ':total' => $montoReportado,
+            ':val_comision' => $valorComision,
+            ':total' => $valorComision,
             ':pago_ref_id' => $pagoId,
             ':reporte_id' => $reportId,
             ':concepto' => $concepto,

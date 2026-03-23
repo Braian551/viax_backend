@@ -166,8 +166,32 @@ function enrichDriversByIds(PDO $db, array $redisCandidates, string $vehiculoTip
     return array_slice($out, 0, 20);
 }
 
+/** Filtra conductores que estén bloqueados bidireccionalmente con el usuario solicitante. */
+function appendBlockedFilter(string $query, array &$params, ?int $usuarioId, string $driverColumn = 'u.id'): string
+{
+    if ($usuarioId === null || $usuarioId <= 0) {
+        return $query;
+    }
+
+    $query .= "
+      AND NOT EXISTS (
+          SELECT 1
+          FROM blocked_users bu
+          WHERE bu.active = true
+            AND (
+                (bu.user_id = ? AND bu.blocked_user_id = {$driverColumn})
+                OR
+                (bu.user_id = {$driverColumn} AND bu.blocked_user_id = ?)
+            )
+      )
+    ";
+    $params[] = $usuarioId;
+    $params[] = $usuarioId;
+    return $query;
+}
+
 /** Fallback SQL tradicional si no hay data suficiente en Redis. */
-function findNearbyFromDb(PDO $db, float $lat, float $lng, string $vehiculoTipoBD, ?int $empresaId, float $radioKm): array
+function findNearbyFromDb(PDO $db, float $lat, float $lng, string $vehiculoTipoBD, ?int $empresaId, float $radioKm, ?int $usuarioId): array
 {
     $query = "
         SELECT
@@ -213,6 +237,8 @@ function findNearbyFromDb(PDO $db, float $lat, float $lng, string $vehiculoTipoB
         $params[] = $empresaId;
     }
 
+    $query = appendBlockedFilter($query, $params, $usuarioId);
+
     $query .= ' ORDER BY distancia_km ASC LIMIT 20';
     $stmt = $db->prepare($query);
     $stmt->execute($params);
@@ -254,6 +280,7 @@ try {
     $longitud = (float) $data['longitud'];
     $tipoVehiculo = (string) $data['tipo_vehiculo'];
     $empresaId = isset($data['empresa_id']) ? (int) $data['empresa_id'] : null;
+    $usuarioId = isset($data['usuario_id']) ? (int) $data['usuario_id'] : null;
     $radioKm = isset($data['radio_km']) ? (float) $data['radio_km'] : 5.0;
     if ($radioKm <= 0 || $radioKm > 50) {
         $radioKm = 5.0;
@@ -268,9 +295,47 @@ try {
     $redisCandidates = findNearbyFromRedis($latitud, $longitud, $radioKm, 50);
     $conductoresFormateados = enrichDriversByIds($db, $redisCandidates, $vehiculoTipoBD, $empresaId);
 
+    if ($usuarioId !== null && $usuarioId > 0 && !empty($conductoresFormateados)) {
+        $ids = array_map(static fn(array $d): int => (int)($d['id'] ?? 0), $conductoresFormateados);
+        $ids = array_values(array_filter($ids, static fn(int $id): bool => $id > 0));
+
+        if (!empty($ids)) {
+            $placeholders = implode(',', array_fill(0, count($ids), '?'));
+            $params = $ids;
+            $params[] = $usuarioId;
+            $params[] = $usuarioId;
+
+            $stmtBlocked = $db->prepare(
+                "
+                SELECT u.id
+                FROM usuarios u
+                WHERE u.id IN ({$placeholders})
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM blocked_users bu
+                      WHERE bu.active = true
+                        AND (
+                            (bu.user_id = ? AND bu.blocked_user_id = u.id)
+                            OR
+                            (bu.user_id = u.id AND bu.blocked_user_id = ?)
+                        )
+                  )
+                "
+            );
+            $stmtBlocked->execute($params);
+            $allowedIds = array_map('intval', $stmtBlocked->fetchAll(PDO::FETCH_COLUMN));
+            $allowedSet = array_fill_keys($allowedIds, true);
+
+            $conductoresFormateados = array_values(array_filter(
+                $conductoresFormateados,
+                static fn(array $driver): bool => isset($allowedSet[(int)($driver['id'] ?? 0)])
+            ));
+        }
+    }
+
     // Fallback SQL si Redis no entrega resultados suficientes.
     if (empty($conductoresFormateados)) {
-        $conductoresFormateados = findNearbyFromDb($db, $latitud, $longitud, $vehiculoTipoBD, $empresaId, $radioKm);
+        $conductoresFormateados = findNearbyFromDb($db, $latitud, $longitud, $vehiculoTipoBD, $empresaId, $radioKm, $usuarioId);
     }
 
     echo json_encode([

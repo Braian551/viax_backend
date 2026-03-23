@@ -32,6 +32,18 @@ function formatDateTimeColombiaAmPm(?string $value): ?string {
     }
 }
 
+function canonicalVehicleTypeSqlExpr(string $column): string {
+    $clean = "LOWER(REPLACE(REPLACE(COALESCE($column, ''), '_', ''), ' ', ''))";
+    return "CASE $clean
+        WHEN 'auto' THEN 'carro'
+        WHEN 'automovil' THEN 'carro'
+        WHEN 'car' THEN 'carro'
+        WHEN 'motocarro' THEN 'mototaxi'
+        WHEN 'motocarga' THEN 'mototaxi'
+        ELSE $clean
+    END";
+}
+
 if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     http_response_code(405);
     echo json_encode(['success' => false, 'message' => 'Método no permitido']);
@@ -66,6 +78,7 @@ try {
     // Obtener historial con DESGLOSE COMPLETO del tracking
     $query = "SELECT 
                 s.id,
+                s.cliente_id,
                 s.tipo_servicio,
                 s.tipo_vehiculo,
                 s.estado,
@@ -98,12 +111,15 @@ try {
                 s.desglose_precio,
                 u.nombre as cliente_nombre,
                 u.apellido as cliente_apellido,
+                u.telefono as cliente_telefono,
+                u.email as cliente_email,
                 c.calificacion,
                 c.comentarios,
                 -- DATOS DEL TRACKING CON DESGLOSE COMPLETO
                 vrt.distancia_real_km as tracking_distancia,
                 vrt.tiempo_real_minutos as tracking_tiempo,
                 vrt.precio_final_aplicado as tracking_precio,
+                vrt.solicitud_id as tracking_id,
                 -- Desglose de precio del tracking
                 vrt.tarifa_base,
                 vrt.precio_distancia,
@@ -116,16 +132,12 @@ try {
                 -- Comisión REAL de la empresa
                 vrt.comision_plataforma_porcentaje,
                 vrt.comision_plataforma_valor,
-                vrt.ganancia_conductor,
-                -- Fallback: configuración de precios para comisión
-                cp.comision_plataforma as config_comision
+                                vrt.ganancia_conductor
               FROM solicitudes_servicio s
               INNER JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id
               INNER JOIN usuarios u ON s.cliente_id = u.id
               LEFT JOIN calificaciones c ON s.id = c.solicitud_id AND c.usuario_calificado_id = :conductor_id2
               LEFT JOIN viaje_resumen_tracking vrt ON s.id = vrt.solicitud_id
-              LEFT JOIN configuracion_precios cp ON s.empresa_id = cp.empresa_id 
-                  AND s.tipo_vehiculo = cp.tipo_vehiculo AND cp.activo = 1
               WHERE ac.conductor_id = :conductor_id
               AND s.estado IN ('completada', 'entregado')
               ORDER BY s.id DESC
@@ -152,22 +164,34 @@ try {
         }
         
         // Comisión REAL de la empresa
-        $comisionPorcentaje = 10.0; // Fallback
+        $comisionPorcentaje = 0.0;
         $comisionValor = 0;
         $gananciaViaje = 0;
+        $trackingGanancia = isset($viaje['ganancia_conductor']) ? (float)$viaje['ganancia_conductor'] : 0.0;
+        $hasTrackingSnapshot = !empty($viaje['tracking_id']);
         
-        // Prioridad: tracking > config > fallback 10%
+        // Prioridad: snapshot tracking del viaje. Evita recalcular con configuración mutable.
+        if (isset($viaje['comision_plataforma_porcentaje']) && $viaje['comision_plataforma_porcentaje'] !== null) {
+            $comisionPorcentaje = (float)$viaje['comision_plataforma_porcentaje'];
+        } elseif ($hasTrackingSnapshot) {
+            $comisionPorcentaje = 0.0;
+        }
+
         if (isset($viaje['comision_plataforma_valor']) && $viaje['comision_plataforma_valor'] > 0) {
             $comisionValor = (float)$viaje['comision_plataforma_valor'];
-            $comisionPorcentaje = (float)($viaje['comision_plataforma_porcentaje'] ?? 10);
-            $gananciaViaje = (float)($viaje['ganancia_conductor'] ?? ($precioReal - $comisionValor));
-        } elseif (isset($viaje['config_comision']) && $viaje['config_comision'] > 0) {
-            $comisionPorcentaje = (float)$viaje['config_comision'];
+            $gananciaViaje = $trackingGanancia > 0 ? $trackingGanancia : ($precioReal - $comisionValor);
+        } elseif ($precioReal > 0) {
+            $comisionValor = $precioReal * ($comisionPorcentaje / 100);
+            $gananciaViaje = $trackingGanancia > 0 ? $trackingGanancia : ($precioReal - $comisionValor);
+        } elseif ($trackingGanancia > 0) {
+            if ($comisionPorcentaje > 0 && $comisionPorcentaje < 100) {
+                $comisionValor = $trackingGanancia * ($comisionPorcentaje / (100 - $comisionPorcentaje));
+            }
+            $gananciaViaje = $trackingGanancia;
+            $precioReal = $gananciaViaje + $comisionValor;
+        } else {
             $comisionValor = $precioReal * ($comisionPorcentaje / 100);
             $gananciaViaje = $precioReal - $comisionValor;
-        } else {
-            $comisionValor = $precioReal * 0.10;
-            $gananciaViaje = $precioReal * 0.90;
         }
         
         // Construir desglose de precio
@@ -219,6 +243,7 @@ try {
         
         return [
             'id' => (int)$viaje['id'],
+            'cliente_id' => isset($viaje['cliente_id']) ? (int)$viaje['cliente_id'] : null,
             'tipo_servicio' => $viaje['tipo_servicio'],
             'tipo_vehiculo' => $viaje['tipo_vehiculo'],
             'estado' => $viaje['estado'],
@@ -243,6 +268,8 @@ try {
             // Cliente
             'cliente_nombre' => $viaje['cliente_nombre'],
             'cliente_apellido' => $viaje['cliente_apellido'],
+            'cliente_telefono' => $viaje['cliente_telefono'] ?? null,
+            'cliente_email' => $viaje['cliente_email'] ?? null,
             'calificacion' => $viaje['calificacion'] ? (int)$viaje['calificacion'] : null,
             'comentario' => $viaje['comentarios'],
             // Precios

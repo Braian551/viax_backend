@@ -48,6 +48,10 @@ if ($path === '') {
     $endpoint = substr($path, 5); // Remove 'auth/'
     $endpoint = preg_replace('/\.php$/', '', $endpoint); // Strip .php if present
     require_once __DIR__ . '/auth/' . $endpoint . '.php';
+} elseif (strpos($path, 'account/') === 0) {
+    $endpoint = substr($path, 8); // Remove 'account/'
+    $endpoint = preg_replace('/\.php$/', '', $endpoint); // Strip .php if present
+    require_once __DIR__ . '/account/' . $endpoint . '.php';
 } elseif (strpos($path, 'notifications/') === 0) {
     $endpoint = substr($path, 14); // Remove 'notifications/'
     $endpoint = preg_replace('/\.php$/', '', $endpoint); // Strip .php if present
@@ -59,6 +63,10 @@ if ($path === '') {
 } elseif (strpos($path, 'pricing/') === 0) {
     $endpoint = substr($path, 8); // Remove 'pricing/'
     require_once __DIR__ . '/pricing/' . $endpoint . '.php';
+} elseif (strpos($path, 'legal/') === 0) {
+    $endpoint = substr($path, 6); // Remove 'legal/'
+    $endpoint = preg_replace('/\.php$/', '', $endpoint);
+    require_once __DIR__ . '/legal/' . $endpoint . '.php';
 } elseif (strpos($path, 'location_sharing/') === 0) {
     $endpoint = substr($path, 17); // Remove 'location_sharing/'
     $endpoint = preg_replace('/\.php$/', '', $endpoint);

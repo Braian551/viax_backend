@@ -24,10 +24,77 @@ try {
         throw new Exception('ID de conductor requerido');
     }
     
-    $conductorId = $_GET['conductor_id'];
+    $conductorId = intval($_GET['conductor_id']);
+    if ($conductorId <= 0) {
+        throw new Exception('ID de conductor inválido');
+    }
     
     $database = new Database();
     $db = $database->getConnection();
+
+    $stmtConductor = $db->prepare("SELECT id, empresa_id FROM usuarios WHERE id = :id AND tipo_usuario = 'conductor' LIMIT 1");
+    $stmtConductor->execute([':id' => $conductorId]);
+    $conductor = $stmtConductor->fetch(PDO::FETCH_ASSOC);
+
+    if (!$conductor) {
+        throw new Exception('Conductor no encontrado');
+    }
+
+    // Deuda por ciclo: desde el último pago confirmado del conductor.
+    $stmtAnchor = $db->prepare("SELECT MAX(confirmado_en) AS ultimo_pago_confirmado
+        FROM pagos_comision_reportes
+        WHERE conductor_id = :conductor_id
+          AND estado = 'pagado_confirmado'");
+    $stmtAnchor->execute([':conductor_id' => $conductorId]);
+    $anchorData = $stmtAnchor->fetch(PDO::FETCH_ASSOC) ?: [];
+    $anchorTs = $anchorData['ultimo_pago_confirmado'] ?? null;
+
+    $queryResumen = "
+        SELECT
+            COALESCE(comisiones.total_comision, 0) AS total_comision,
+            COALESCE(pagos.total_pagado, 0) AS total_pagado
+        FROM usuarios u
+        LEFT JOIN (
+            SELECT
+                ac.conductor_id,
+                SUM(
+                    CASE
+                        WHEN vrt.comision_plataforma_valor > 0 THEN vrt.comision_plataforma_valor
+                        WHEN vrt.comision_plataforma_porcentaje > 0 THEN
+                            COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(s.precio_final, 0), s.precio_estimado)
+                            * (vrt.comision_plataforma_porcentaje / 100)
+                        ELSE 0
+                    END
+                ) AS total_comision
+            FROM solicitudes_servicio s
+            INNER JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id
+            LEFT JOIN viaje_resumen_tracking vrt ON s.id = vrt.solicitud_id
+            WHERE s.estado IN ('completada', 'entregado')
+              " . ($anchorTs ? "AND COALESCE(s.completado_en, s.solicitado_en) > :anchor_ts_comisiones" : "") . "
+            GROUP BY ac.conductor_id
+        ) comisiones ON comisiones.conductor_id = u.id
+        LEFT JOIN (
+            SELECT conductor_id, SUM(monto) AS total_pagado
+            FROM pagos_comision
+            " . ($anchorTs ? "WHERE fecha_pago > :anchor_ts_pagos" : "") . "
+            GROUP BY conductor_id
+        ) pagos ON pagos.conductor_id = u.id
+        WHERE u.id = :conductor_id
+        LIMIT 1
+    ";
+
+    $stmtResumen = $db->prepare($queryResumen);
+    $paramsResumen = [':conductor_id' => $conductorId];
+    if ($anchorTs) {
+        $paramsResumen[':anchor_ts_comisiones'] = $anchorTs;
+        $paramsResumen[':anchor_ts_pagos'] = $anchorTs;
+    }
+    $stmtResumen->execute($paramsResumen);
+    $resumen = $stmtResumen->fetch(PDO::FETCH_ASSOC) ?: [];
+
+    $totalComision = floatval($resumen['total_comision'] ?? 0);
+    $totalPagado = floatval($resumen['total_pagado'] ?? 0);
+    $deudaActual = max(0, $totalComision - $totalPagado);
     
     // Consulta UNION para obtener eventos cronológicos
     // Tipo: 'cargo' (comisión de viaje) o 'abono' (pago realizado)
@@ -44,7 +111,7 @@ try {
                     WHEN vrt.comision_plataforma_porcentaje > 0 THEN 
                         COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(s.precio_final, 0), s.precio_estimado) 
                         * (vrt.comision_plataforma_porcentaje / 100)
-                    ELSE COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(s.precio_final, 0), s.precio_estimado) * 0.10
+                    ELSE 0
                 END as monto,
                 CONCAT('Viaje #', s.id) as descripcion,
                 '' as detalle_extra
@@ -92,7 +159,12 @@ try {
     
     echo json_encode([
         'success' => true,
-        'data' => $historial
+        'data' => $historial,
+        'resumen' => [
+            'total_comision' => round($totalComision, 2),
+            'total_pagado' => round($totalPagado, 2),
+            'deuda_actual' => round($deudaActual, 2),
+        ]
     ]);
 
 } catch (Exception $e) {

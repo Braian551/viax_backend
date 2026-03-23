@@ -706,6 +706,23 @@ function buildResponse(array $trip, string $signature, int $waitSeconds, ?float 
         ];
     }
 
+    $surgeMultiplier = 1.0;
+    try {
+        $redis = Cache::redis();
+        if ($redis) {
+            $lat = (float)($trip['latitud_recogida'] ?? 0.0);
+            $lng = (float)($trip['longitud_recogida'] ?? 0.0);
+            $latCell = (int)floor($lat * 200);
+            $lngCell = (int)floor($lng * 200);
+            $gridId = $latCell . ':' . $lngCell;
+            $surgeRaw = $redis->get('surge:grid:' . $gridId);
+            $surgePayload = is_string($surgeRaw) ? json_decode($surgeRaw, true) : null;
+            if (is_array($surgePayload) && isset($surgePayload['multiplier'])) {
+                $surgeMultiplier = max(1.0, (float)$surgePayload['multiplier']);
+            }
+        }
+    } catch (Throwable $e) {}
+
     return [
         'success' => true,
         'meta' => [
@@ -752,6 +769,9 @@ function buildResponse(array $trip, string $signature, int $waitSeconds, ?float 
             'precio_ajustado_por_tracking' => isset($trip['precio_ajustado_por_tracking']) ? (bool) $trip['precio_ajustado_por_tracking'] : false,
             'desglose_precio'              => $desglosePrecio,
             'conductor'                    => $conductor,
+            'pickup_eta_minutes'           => $eta,
+            'surge_multiplier'             => round($surgeMultiplier, 2),
+            'driver_distance'              => $distConductorKm !== null ? round($distConductorKm, 2) : null,
         ],
     ];
 }

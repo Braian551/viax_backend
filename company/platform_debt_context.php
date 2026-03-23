@@ -19,6 +19,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once '../config/database.php';
+require_once '../utils/SensitiveDataCrypto.php';
 
 try {
     $empresaId = isset($_GET['empresa_id']) ? intval($_GET['empresa_id']) : 0;
@@ -42,6 +43,14 @@ try {
     }
 
     $deudaActual = floatval($empresa['saldo_pendiente'] ?? 0);
+
+    // Deuda dinámica de la empresa basada en deuda actual de sus conductores.
+    $stmtDynamicDebt = $db->prepare("\n        SELECT COALESCE(SUM(GREATEST(COALESCE(comisiones.total_comision, 0) - COALESCE(pagos.total_pagado, 0), 0)), 0) AS deuda_dinamica\n        FROM usuarios u\n        LEFT JOIN (\n            SELECT\n                ac.conductor_id,\n                SUM(\n                    CASE\n                        WHEN vrt.comision_plataforma_valor > 0 THEN vrt.comision_plataforma_valor\n                        WHEN vrt.comision_plataforma_porcentaje > 0 THEN\n                            COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(s.precio_final, 0), s.precio_estimado)\n                            * (vrt.comision_plataforma_porcentaje / 100)\n                        ELSE 0\n                    END\n                ) AS total_comision\n            FROM solicitudes_servicio s\n            INNER JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id\n            LEFT JOIN viaje_resumen_tracking vrt ON s.id = vrt.solicitud_id\n            WHERE s.estado IN ('completada', 'entregado')\n            GROUP BY ac.conductor_id\n        ) comisiones ON comisiones.conductor_id = u.id\n        LEFT JOIN (\n            SELECT conductor_id, SUM(monto) AS total_pagado\n            FROM pagos_comision\n            GROUP BY conductor_id\n        ) pagos ON pagos.conductor_id = u.id\n        WHERE u.empresa_id = :empresa_id\n          AND u.tipo_usuario = 'conductor'\n    ");
+    $stmtDynamicDebt->execute([':empresa_id' => $empresaId]);
+    $deudaDinamica = floatval($stmtDynamicDebt->fetchColumn() ?: 0);
+    if ($deudaDinamica > $deudaActual) {
+        $deudaActual = $deudaDinamica;
+    }
     if (abs($deudaActual) < $debtEpsilon) {
         $deudaActual = 0.0;
     }
@@ -58,14 +67,16 @@ try {
     $totalCargos = floatval($stmtTotalCargos->fetchColumn());
 
     // Cuenta bancaria del administrador
-    $stmtAdminBank = $db->prepare("SELECT banco_codigo, banco_nombre, tipo_cuenta, numero_cuenta,
+    $stmtAdminBank = $db->prepare("SELECT id, banco_codigo, banco_nombre, tipo_cuenta, numero_cuenta,
                                           titular_cuenta, documento_titular, referencia_transferencia
                                    FROM admin_configuracion_banco LIMIT 1");
     $stmtAdminBank->execute();
     $adminBank = $stmtAdminBank->fetch(PDO::FETCH_ASSOC);
 
     $cuentaTransferencia = null;
-    if ($adminBank && !empty($adminBank['banco_nombre']) && !empty($adminBank['numero_cuenta'])) {
+    $numeroCuentaPlano = decryptSensitiveData($adminBank['numero_cuenta'] ?? null);
+
+    if ($adminBank && !empty($adminBank['banco_nombre']) && !empty($numeroCuentaPlano)) {
         $tipoCuenta = strtolower(trim((string)($adminBank['tipo_cuenta'] ?? '')));
         $bancoNombre = strtolower(trim((string)($adminBank['banco_nombre'] ?? '')));
         $metodoRecaudo = ($tipoCuenta === 'nequi' || $bancoNombre === 'nequi')
@@ -78,10 +89,13 @@ try {
             'banco_codigo' => $adminBank['banco_codigo'],
             'banco_nombre' => $adminBank['banco_nombre'],
             'tipo_cuenta' => $adminBank['tipo_cuenta'],
-            'numero_cuenta' => $adminBank['numero_cuenta'],
+            'numero_cuenta' => maskSensitiveAccount($numeroCuentaPlano),
+            'numero_cuenta_masked' => maskSensitiveAccount($numeroCuentaPlano),
             'titular_cuenta' => $adminBank['titular_cuenta'],
             'documento_titular' => $adminBank['documento_titular'],
             'referencia_transferencia' => $adminBank['referencia_transferencia'],
+            'resource' => 'admin_bank',
+            'resource_id' => intval($adminBank['id'] ?? 0),
         ];
     } else {
         $cuentaTransferencia = [

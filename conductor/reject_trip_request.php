@@ -12,6 +12,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 require_once '../config/database.php';
 require_once '../config/redis.php';
 require_once '../core/Cache.php';
+require_once '../services/driver_service.php';
+require_once __DIR__ . '/driver_auth.php';
 
 try {
     $data = json_decode(file_get_contents('php://input'), true);
@@ -28,6 +30,14 @@ try {
     if ($solicitudId <= 0 || $conductorId <= 0) {
         throw new Exception('solicitud_id y conductor_id inválidos');
     }
+
+    // Validar sesión para evitar rechazos emitidos por sesiones huérfanas.
+    $sessionToken = driverSessionTokenFromRequest($data);
+    $session = validateDriverSession($conductorId, $sessionToken, false);
+    if (!$session['ok']) {
+        throw new Exception($session['message']);
+    }
+    DriverGeoService::touchDriverHeartbeat($conductorId, 20);
     
     $database = new Database();
     $db = $database->getConnection();
@@ -46,6 +56,29 @@ try {
 
     // Cache auxiliar para que matching no vuelva a sugerir este conductor.
     Cache::set('trip_rejected:' . $solicitudId . ':' . $conductorId, '1', 600);
+
+    try {
+        $redis = Cache::redis();
+        if ($redis) {
+            // Cooldown inmediato tras rechazo explícito.
+            $redis->setex('driver:cooldown:' . $conductorId, 30, '1');
+            $redis->del('driver_offer_lock:' . $conductorId);
+
+            $payload = json_encode([
+                'driver_id' => $conductorId,
+                'status' => 'rejected',
+                'reason' => $motivo,
+                'rejected_at' => gmdate('c'),
+            ], JSON_UNESCAPED_UNICODE);
+
+            $redis->publish('trip:responses:' . $solicitudId, $payload);
+            $redis->lPush('trip:responses_queue:' . $solicitudId, $payload);
+            $redis->expire('trip:responses_queue:' . $solicitudId, 120);
+            $redis->incr('metrics:driver_rejections');
+
+            DriverGeoService::updateDriverStats($conductorId, null, 1.0, null);
+        }
+    } catch (Throwable $e) {}
     
     echo json_encode([
         'success' => true,

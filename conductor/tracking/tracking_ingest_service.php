@@ -342,10 +342,7 @@ function obtenerConfigTarifaTracking(PDO $db, array $viaje): array
     $empresaId = $viaje['empresa_id'] ?? null;
     $config = null;
 
-    $tiposCandidatos = array_values(array_unique([
-        $tipoVehiculo,
-        'moto',
-    ]));
+    $tiposCandidatos = candidatosTipoVehiculoTracking($tipoVehiculo);
 
     if (!empty($empresaId)) {
         foreach ($tiposCandidatos as $tipo) {
@@ -391,16 +388,37 @@ function normalizarTipoVehiculoTracking(string $tipoVehiculo): string
 {
     $normalized = strtolower(trim($tipoVehiculo));
     $aliases = [
-        'mototaxi' => 'moto',
-        'motocarro' => 'moto',
-        'moto_carga' => 'moto',
+        'moto_taxi' => 'mototaxi',
+        'moto taxi' => 'mototaxi',
+        'motocarro' => 'mototaxi',
+        'moto_carga' => 'mototaxi',
         'motorcycle' => 'moto',
-        'auto' => 'carro',
+        'carro' => 'auto',
         'automovil' => 'carro',
         'car' => 'carro',
     ];
 
     return $aliases[$normalized] ?? ($normalized !== '' ? $normalized : 'moto');
+}
+
+function candidatosTipoVehiculoTracking(string $tipoVehiculo): array
+{
+    $base = normalizarTipoVehiculoTracking($tipoVehiculo);
+    $candidatos = [$base];
+
+    if ($base === 'mototaxi') {
+        $candidatos[] = 'moto';
+    } elseif ($base === 'auto') {
+        $candidatos[] = 'carro';
+    } elseif ($base === 'carro') {
+        $candidatos[] = 'auto';
+    }
+
+    if (!in_array('moto', $candidatos, true)) {
+        $candidatos[] = 'moto';
+    }
+
+    return array_values(array_unique($candidatos));
 }
 
 function configTarifaFallback(): array

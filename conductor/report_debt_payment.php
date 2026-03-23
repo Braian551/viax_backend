@@ -13,6 +13,7 @@ require_once '../config/database.php';
 require_once '../config/R2Service.php';
 require_once '../utils/NotificationHelper.php';
 require_once '../utils/Mailer.php';
+require_once '../utils/SensitiveDataCrypto.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     http_response_code(405);
@@ -58,7 +59,8 @@ try {
     $stmtConfig->execute([':empresa_id' => $empresaId]);
     $config = $stmtConfig->fetch(PDO::FETCH_ASSOC) ?: [];
 
-    $hasTransferAccount = !empty($config['banco_nombre']) && !empty($config['tipo_cuenta']) && !empty($config['numero_cuenta']);
+    $empresaNumeroCuentaPlano = decryptSensitiveData($config['numero_cuenta'] ?? null);
+    $hasTransferAccount = !empty($config['banco_nombre']) && !empty($config['tipo_cuenta']) && !empty($empresaNumeroCuentaPlano);
     if (!$hasTransferAccount) {
         throw new Exception('La empresa aún no ha configurado cuenta bancaria para transferencias');
     }
@@ -160,7 +162,7 @@ try {
         ':monto_reportado' => $monto,
         ':comprobante_ruta' => $relativeUrl,
         ':banco_nombre' => $config['banco_nombre'],
-        ':numero_cuenta' => $config['numero_cuenta'],
+        ':numero_cuenta' => encryptSensitiveData($empresaNumeroCuentaPlano),
         ':tipo_cuenta' => $config['tipo_cuenta'],
         ':observaciones' => $observaciones ?: null,
     ]);

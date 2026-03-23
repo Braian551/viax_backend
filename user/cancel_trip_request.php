@@ -32,19 +32,30 @@ try {
     $db->beginTransaction();
 
     // Verificar que la solicitud existe y está en estado cancelable
-    $stmt = $db->prepare("
-        SELECT ss.id, ss.estado, ss.cliente_id, ac.conductor_id
-            FROM solicitudes_servicio ss
-            LEFT JOIN asignaciones_conductor ac ON ss.id = ac.solicitud_id AND ac.estado IN ('asignado', 'llegado')
-        WHERE ss.id = ?
-        FOR UPDATE
-    ");
+        $stmt = $db->prepare("
+            SELECT id, estado, cliente_id
+            FROM solicitudes_servicio
+            WHERE id = ?
+            FOR UPDATE
+        ");
     $stmt->execute([$solicitudId]);
     $solicitud = $stmt->fetch(PDO::FETCH_ASSOC);
     
     if (!$solicitud) {
         throw new Exception('Solicitud no encontrada');
     }
+
+    $stmtAsignacion = $db->prepare("\n        SELECT conductor_id
+        FROM asignaciones_conductor
+        WHERE solicitud_id = ?
+          AND estado IN ('asignado', 'llegado')
+        ORDER BY asignado_en DESC NULLS LAST, id DESC
+        LIMIT 1
+        FOR UPDATE
+    ");
+    $stmtAsignacion->execute([$solicitudId]);
+    $asignacion = $stmtAsignacion->fetch(PDO::FETCH_ASSOC);
+    $solicitud['conductor_id'] = $asignacion['conductor_id'] ?? null;
     
     // Verificar que la solicitud puede ser cancelada
     // Estados cancelables: pendiente, aceptada, conductor_asignado

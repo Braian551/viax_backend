@@ -1,24 +1,16 @@
 -- =====================================================
--- MIGRACIÓN 024: Establecer Comisiones a Cero
+-- MIGRACIÓN 024: DESACTIVADA POR SEGURIDAD DE DATOS
 -- =====================================================
--- Descripción: Actualiza las comisiones a 0% ya que por el momento
---              el método de pago es solo efectivo y no se cobrará
---              comisión al conductor.
--- Fecha: 2025-12-29
+-- Esta migración alteraba comisiones actuales (UPDATE masivo) y podía
+-- dañar datos productivos si se re-ejecutaba en despliegues.
+--
+-- Política vigente:
+-- 1) Ninguna migración debe mutar datos actuales por defecto.
+-- 2) Cambios de datos solo mediante scripts controlados/manuales.
 -- =====================================================
 
--- Establecer todas las comisiones a 0
-UPDATE configuracion_precios 
-SET comision_plataforma = 0,
-    comision_metodo_pago = 0,
-    notas = CONCAT(COALESCE(notas, ''), ' | Comisiones establecidas a 0 - Dic 2025 (pago en efectivo, sin cobro a conductores)'),
-    fecha_actualizacion = NOW();
-
--- Verificar los cambios
-SELECT 
-    id,
-    tipo_vehiculo,
-    comision_plataforma,
-    comision_metodo_pago,
-    fecha_actualizacion
-FROM configuracion_precios;
+DO $$
+BEGIN
+    RAISE NOTICE '024_set_commissions_zero.sql desactivada por seguridad: no se aplican cambios de datos.';
+END
+$$;

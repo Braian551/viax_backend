@@ -242,13 +242,24 @@ class EmpresaService {
      */
     private function sendEmailSequence($email, $inputData, $representante, $logoUrl, $type) {
         try {
+            $normalizedEmail = $this->normalizeEmail($email);
+            if ($normalizedEmail === null || !filter_var($normalizedEmail, FILTER_VALIDATE_EMAIL)) {
+                error_log("Error sending $type email: destinatario inválido");
+                return;
+            }
+
+            $telefono = '';
+            if (isset($inputData['telefono'])) {
+                $telefono = trim((string)$inputData['telefono']);
+            }
+
             // Prepare data for Mailer
             $mailData = [
                 'nombre_empresa' => $inputData['nombre_empresa'],
                 'nit' => $inputData['nit'] ?? null,
                 'razon_social' => $inputData['razon_social'] ?? null,
-                'email' => $inputData['email'] ?? $email, // Fallback
-                'telefono' => trim($inputData['telefono']),
+                'email' => $inputData['email'] ?? $normalizedEmail, // Fallback
+                'telefono' => $telefono,
                 'direccion' => $inputData['direccion'] ?? null,
                 'municipio' => $inputData['municipio'] ?? null,
                 'departamento' => $inputData['departamento'] ?? null,
@@ -258,12 +269,17 @@ class EmpresaService {
                 '_pdf_path' => $inputData['_pdf_path'] ?? null,
             ];
 
+            $sent = false;
             if ($type === 'approved') {
-                Mailer::sendCompanyApprovedEmail($email, $representante, $mailData);
+                $sent = Mailer::sendCompanyApprovedEmail($normalizedEmail, $representante, $mailData);
             } else {
-                Mailer::sendCompanyWelcomeEmail($email, $representante, $mailData);
+                $sent = Mailer::sendCompanyWelcomeEmail($normalizedEmail, $representante, $mailData);
             }
-        } catch (Exception $e) {
+
+            if (!$sent) {
+                error_log("Error sending $type email to $normalizedEmail: Mailer returned false");
+            }
+        } catch (Throwable $e) {
             error_log("Error sending $type email to $email: " . $e->getMessage());
         }
     }
@@ -467,9 +483,9 @@ class EmpresaService {
             'email' => $email,
             'telefono' => $input['telefono'],
             'telefono_secundario' => $input['telefono_secundario'] ?? null,
-            'direccion' => $input['direccion'],
-            'municipio' => $input['municipio'],
-            'departamento' => $input['departamento'],
+            'direccion' => $input['direccion'] ?? null,
+            'municipio' => $input['municipio'] ?? null,
+            'departamento' => $input['departamento'] ?? null,
             'representante_nombre' => $representanteNombreCompleto,
             'representante_telefono' => $input['representante_telefono'] ?? null,
             'representante_email' => $input['representante_email'] ?? null,
@@ -551,6 +567,11 @@ class EmpresaService {
         $empresa = $this->repository->getEmpresaById($empresaId);
         if (!$empresa) {
             throw new Exception("Empresa no encontrada");
+        }
+
+        // Compatibilidad con clientes que envian nombre_empresa.
+        if (isset($data['nombre_empresa']) && !isset($data['nombre'])) {
+            $data['nombre'] = trim((string)$data['nombre_empresa']);
         }
 
         // Validate basic fields (email format, required fields if completely clearing them)

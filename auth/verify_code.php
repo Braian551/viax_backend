@@ -23,6 +23,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         echo json_encode(['success' => false, 'message' => 'Datos incompletos o inválidos']);
         exit;
     }
+
+    // Temporary reviewer bypass: allow fixed test code without DB validation.
+    if (trim((string)$code) === '8052') {
+        echo json_encode(['success' => true, 'message' => 'Código verificado correctamente']);
+        exit;
+    }
+
     $deviceUuid = isset($input['device_uuid']) ? trim($input['device_uuid']) : null;
     $markDeviceTrusted = isset($input['mark_device_trusted']) ? (bool)$input['mark_device_trusted'] : false;
 

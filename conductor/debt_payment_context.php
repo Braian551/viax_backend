@@ -11,6 +11,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 require_once '../config/database.php';
 require_once '../utils/NotificationHelper.php';
+require_once '../utils/SensitiveDataCrypto.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     http_response_code(405);
@@ -59,6 +60,15 @@ try {
         throw new Exception('El conductor no está asociado a una empresa');
     }
 
+    // Deuda por ciclo: viajes y pagos posteriores al último pago confirmado.
+    $stmtAnchor = $db->prepare("SELECT MAX(confirmado_en) AS ultimo_pago_confirmado
+        FROM pagos_comision_reportes
+        WHERE conductor_id = :conductor_id
+          AND estado = 'pagado_confirmado'");
+    $stmtAnchor->execute([':conductor_id' => $conductorId]);
+    $anchorData = $stmtAnchor->fetch(PDO::FETCH_ASSOC) ?: [];
+    $anchorTs = $anchorData['ultimo_pago_confirmado'] ?? null;
+
     $queryComisionTotal = "SELECT 
         COALESCE(SUM(
             CASE 
@@ -66,26 +76,34 @@ try {
                 WHEN vrt.comision_plataforma_porcentaje > 0 THEN 
                     COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(s.precio_final, 0), s.precio_estimado) 
                     * (vrt.comision_plataforma_porcentaje / 100)
-                WHEN cp.comision_plataforma IS NOT NULL THEN 
-                    COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(s.precio_final, 0), s.precio_estimado) 
-                    * (cp.comision_plataforma / 100)
-                ELSE COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(s.precio_final, 0), s.precio_estimado) * 0.10
+                ELSE 0
             END
         ), 0) as comision_adeudada
     FROM solicitudes_servicio s
     INNER JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id
     LEFT JOIN viaje_resumen_tracking vrt ON s.id = vrt.solicitud_id
-    LEFT JOIN configuracion_precios cp ON s.empresa_id = cp.empresa_id 
-        AND s.tipo_vehiculo = cp.tipo_vehiculo AND cp.activo = 1
     WHERE ac.conductor_id = :conductor_id
-    AND s.estado IN ('completada', 'entregado')";
+    AND s.estado IN ('completada', 'entregado')" . ($anchorTs ? "
+    AND COALESCE(s.completado_en, s.solicitado_en) > :anchor_ts" : "");
 
     $stmtTotal = $db->prepare($queryComisionTotal);
-    $stmtTotal->execute([':conductor_id' => $conductorId]);
+    $paramsTotal = [':conductor_id' => $conductorId];
+    if ($anchorTs) {
+        $paramsTotal[':anchor_ts'] = $anchorTs;
+    }
+    $stmtTotal->execute($paramsTotal);
     $totalComision = floatval($stmtTotal->fetch(PDO::FETCH_ASSOC)['comision_adeudada'] ?? 0);
 
-    $stmtPagado = $db->prepare("SELECT COALESCE(SUM(monto), 0) AS total_pagado FROM pagos_comision WHERE conductor_id = :conductor_id");
-    $stmtPagado->execute([':conductor_id' => $conductorId]);
+    $queryPagado = "SELECT COALESCE(SUM(monto), 0) AS total_pagado
+        FROM pagos_comision
+        WHERE conductor_id = :conductor_id" . ($anchorTs ? "
+        AND fecha_pago > :anchor_ts" : "");
+    $stmtPagado = $db->prepare($queryPagado);
+    $paramsPagado = [':conductor_id' => $conductorId];
+    if ($anchorTs) {
+        $paramsPagado[':anchor_ts'] = $anchorTs;
+    }
+    $stmtPagado->execute($paramsPagado);
     $totalPagado = floatval($stmtPagado->fetch(PDO::FETCH_ASSOC)['total_pagado'] ?? 0);
 
     $deudaActual = max(0, $totalComision - $totalPagado);
@@ -95,9 +113,11 @@ try {
     $stmtConfig->execute([':empresa_id' => $empresaId]);
     $bankConfig = $stmtConfig->fetch(PDO::FETCH_ASSOC) ?: [];
 
+    $numeroCuentaPlano = decryptSensitiveData($bankConfig['numero_cuenta'] ?? null);
+
     $hasTransferAccount = !empty($bankConfig['banco_nombre'])
         && !empty($bankConfig['tipo_cuenta'])
-        && !empty($bankConfig['numero_cuenta']);
+        && !empty($numeroCuentaPlano);
 
     $stmtEmpresa = $db->prepare("SELECT id, nombre, email FROM empresas_transporte WHERE id = :empresa_id LIMIT 1");
     $stmtEmpresa->execute([':empresa_id' => $empresaId]);
@@ -189,10 +209,13 @@ try {
                 'banco_codigo' => $bankConfig['banco_codigo'] ?? null,
                 'banco_nombre' => $bankConfig['banco_nombre'] ?? null,
                 'tipo_cuenta' => $bankConfig['tipo_cuenta'] ?? null,
-                'numero_cuenta' => $bankConfig['numero_cuenta'] ?? null,
+                'numero_cuenta' => maskSensitiveAccount($numeroCuentaPlano),
+                'numero_cuenta_masked' => maskSensitiveAccount($numeroCuentaPlano),
                 'titular_cuenta' => $bankConfig['titular_cuenta'] ?? null,
                 'documento_titular' => $bankConfig['documento_titular'] ?? null,
                 'referencia_transferencia' => $bankConfig['referencia_transferencia'] ?? null,
+                'resource' => 'empresa_bank',
+                'resource_id' => $empresaId,
             ],
             'reporte_actual' => $lastReport,
         ],

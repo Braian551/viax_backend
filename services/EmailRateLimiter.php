@@ -11,6 +11,7 @@ class EmailRateLimiter {
         'registration' => ['ip' => 15, 'user' => 5],
         'password_reset' => ['ip' => 12, 'user' => 5],
         'resend_verification' => ['ip' => 12, 'user' => 6],
+        'account_deletion' => ['ip' => 8, 'user' => 4],
     ];
 
     public function __construct(PDO $db, SecurityLogger $logger) {
@@ -120,6 +121,13 @@ class EmailRateLimiter {
 
     private function getLimit(string $action, string $scope): int {
         $default = $this->limits[$action][$scope] ?? ($scope === 'ip' ? 10 : 4);
+
+        if ($action === 'account_deletion') {
+            $envKey = $scope === 'ip'
+                ? 'RATE_LIMIT_ACCOUNT_DELETION_IP_PER_HOUR'
+                : 'RATE_LIMIT_ACCOUNT_DELETION_USER_PER_HOUR';
+            return (int) env_value($envKey, $default);
+        }
 
         $envKey = 'RATE_LIMIT_' . strtoupper($scope) . '_PER_HOUR';
         return (int) env_value($envKey, $default);

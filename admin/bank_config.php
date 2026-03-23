@@ -23,6 +23,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../utils/SensitiveDataCrypto.php';
 
 try {
     $database = new Database();
@@ -44,11 +45,14 @@ try {
 
         $metodoRecaudo = 'cuenta_bancaria';
         if ($config) {
+            $numeroCuentaPlano = decryptSensitiveData($config['numero_cuenta'] ?? null);
             $tipoCuenta = strtolower(trim((string)($config['tipo_cuenta'] ?? '')));
             $bancoNombre = strtolower(trim((string)($config['banco_nombre'] ?? '')));
             if ($tipoCuenta === 'nequi' || $bancoNombre === 'nequi') {
                 $metodoRecaudo = 'nequi';
             }
+            $config['numero_cuenta'] = $numeroCuentaPlano;
+            $config['numero_cuenta_masked'] = maskSensitiveAccount($numeroCuentaPlano);
             $config['metodo_recaudo'] = $metodoRecaudo;
             $config['configurada'] = true;
         }
@@ -139,7 +143,7 @@ try {
         ':banco_codigo' => $bancoCodigo ?: null,
         ':banco_nombre' => $bancoNombre,
         ':tipo_cuenta' => $tipoCuenta,
-        ':numero_cuenta' => $numeroCuenta,
+        ':numero_cuenta' => encryptSensitiveData($numeroCuenta),
         ':titular_cuenta' => $titularCuenta,
         ':documento_titular' => $documentoTitular ?: null,
         ':referencia' => $referencia ?: null,

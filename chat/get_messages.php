@@ -9,6 +9,7 @@
  *   - usuario_id (required): ID del usuario que consulta (para marcar como leídos)
  *   - desde_id (optional): Obtener solo mensajes después de este ID
  *   - limite (optional): Número máximo de mensajes (default: 50)
+ *   - marcar_leidos (optional): 1/true para marcar como leídos (default: true)
  */
 
 header('Content-Type: application/json');
@@ -28,6 +29,8 @@ try {
     $usuarioId = $_GET['usuario_id'] ?? null;
     $desdeId = $_GET['desde_id'] ?? null;
     $limite = min((int) ($_GET['limite'] ?? 50), 100); // Max 100
+    $marcarLeidosRaw = strtolower(trim((string)($_GET['marcar_leidos'] ?? '1')));
+    $marcarLeidos = in_array($marcarLeidosRaw, ['1', 'true', 'si', 'yes'], true);
     
     if (!$solicitudId) {
         http_response_code(400);
@@ -85,8 +88,8 @@ try {
     $stmt->execute($params);
     $mensajes = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    // Marcar mensajes como leídos (los que el usuario recibió)
-    if (count($mensajes) > 0) {
+    // Marcar mensajes como leídos (solo cuando el cliente lo solicita explícitamente)
+    if ($marcarLeidos && count($mensajes) > 0) {
         $stmtUpdate = $db->prepare("
             UPDATE mensajes_chat 
             SET leido = true, leido_en = CURRENT_TIMESTAMP

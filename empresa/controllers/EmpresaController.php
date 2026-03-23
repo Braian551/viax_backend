@@ -122,20 +122,24 @@ class EmpresaController {
         try {
             // 1. Process Database Registration (Fast)
             $result = $this->service->processRegistration($input);
+
+            // 2. Enviar notificaciones de registro en este mismo ciclo para evitar
+            // pérdidas de correo en entornos donde el proceso en background se corta.
+            if (isset($result['notification_context'])) {
+                try {
+                    $this->service->sendNotifications($result['notification_context']);
+                } catch (Throwable $notifyError) {
+                    error_log('Empresa registration notifications error: ' . $notifyError->getMessage());
+                }
+            }
             
-            // 2. Send Response to User (Closes connection)
+            // 3. Send Response to User
             http_response_code(200);
             $this->jsonResponse(
                 $result['success'],
                 $result['message'],
                 $result['data'] ?? []
             );
-            
-            // 3. Send Notifications (Slow - running in background)
-            // This happens AFTER the user gets the response
-            if (isset($result['notification_context'])) {
-                $this->service->sendNotifications($result['notification_context']);
-            }
             
             exit;
             

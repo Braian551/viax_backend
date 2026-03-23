@@ -9,6 +9,7 @@ use PHPMailer\PHPMailer\Exception;
 
 require_once __DIR__ . '/../vendor/autoload.php';
 require_once __DIR__ . '/../config/bootstrap.php';
+require_once __DIR__ . '/../services/SmtpMailProvider.php';
 
 class Mailer {
     
@@ -16,14 +17,41 @@ class Mailer {
     private const FROM_NAME = 'Viax';
 
     private static function getSmtpConfig() {
+        $smtpUser = env_value('SMTP_USER', env_value('MAIL_USERNAME', ''));
+        $smtpPass = env_value('SMTP_PASS', env_value('MAIL_PASSWORD', ''));
+        $smtpHost = env_value('SMTP_HOST', env_value('MAIL_HOST', 'smtp.gmail.com'));
+        $smtpPort = (int) env_value('SMTP_PORT', env_value('MAIL_PORT', 587));
+        $smtpEncryption = strtolower((string) env_value('SMTP_ENCRYPTION', env_value('MAIL_ENCRYPTION', 'tls')));
+
         return [
-            'host' => env_value('SMTP_HOST', 'smtp.gmail.com'),
-            'port' => (int) env_value('SMTP_PORT', 587),
-            'user' => env_value('SMTP_USER', ''),
-            'pass' => env_value('SMTP_PASS', ''),
+            'host' => $smtpHost,
+            'port' => $smtpPort,
+            'encryption' => $smtpEncryption,
+            'user' => $smtpUser,
+            'pass' => $smtpPass,
             'from_name' => env_value('SMTP_FROM_NAME', self::FROM_NAME),
-            'from_email' => env_value('SMTP_FROM_EMAIL', env_value('SMTP_USER', '')),
+            'from_email' => env_value('SMTP_FROM_EMAIL', env_value('MAIL_FROM_EMAIL', $smtpUser)),
         ];
+    }
+
+    private static function buildSmtpAttempts(array $smtp): array {
+        $attempts = [];
+
+        $enc = strtolower((string)($smtp['encryption'] ?? 'tls'));
+        $port = (int)($smtp['port'] ?? 587);
+
+        if ($enc === 'ssl') {
+            $attempts[] = ['encryption' => PHPMailer::ENCRYPTION_SMTPS, 'port' => $port > 0 ? $port : 465];
+            $attempts[] = ['encryption' => PHPMailer::ENCRYPTION_STARTTLS, 'port' => 587];
+        } else if ($enc === 'none' || $enc === '') {
+            $attempts[] = ['encryption' => '', 'port' => $port > 0 ? $port : 25];
+            $attempts[] = ['encryption' => PHPMailer::ENCRYPTION_STARTTLS, 'port' => 587];
+        } else {
+            $attempts[] = ['encryption' => PHPMailer::ENCRYPTION_STARTTLS, 'port' => $port > 0 ? $port : 587];
+            $attempts[] = ['encryption' => PHPMailer::ENCRYPTION_SMTPS, 'port' => 465];
+        }
+
+        return $attempts;
     }
 
     /**
@@ -1329,74 +1357,58 @@ class Mailer {
      * @param array $attachments Array of ['path' => string, 'name' => string, 'cid' => string|null]
      */
     private static function send($toEmail, $toName, $subject, $htmlBody, $altBody = null, $attachments = []) {
-        $mail = new PHPMailer(true);
         $smtp = self::getSmtpConfig();
-
         if (empty($smtp['user']) || empty($smtp['pass'])) {
             error_log('Mailer SMTP credentials not configured in environment variables.');
             return false;
         }
 
         try {
-            // Configuración del servidor
-            $mail->isSMTP();
-            $mail->Host       = $smtp['host'];
-            $mail->SMTPAuth   = true;
-            $mail->Username   = $smtp['user'];
-            $mail->Password   = $smtp['pass'];
-            $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
-            $mail->Port       = $smtp['port'];
-            $mail->CharSet    = 'UTF-8';
+            $finalHtmlBody = $htmlBody;
+            $finalAttachments = [];
 
-            // Destinatarios
-            $mail->setFrom($smtp['from_email'], $smtp['from_name']);
-            $mail->addAddress($toEmail, $toName);
-
-            // Contenido
-            $mail->isHTML(true);
-            $mail->Subject = $subject;
-            
-            // Embed Viax Logo (standard)
-            $logoPath = __DIR__ . '/../assets/images/logo.png';
-            if (file_exists($logoPath)) {
-                $mail->addEmbeddedImage($logoPath, 'viax_logo', 'logo.png');
-            }
-            
-            // Handle custom attachments
+            // Normalizar adjuntos externos
             if (!empty($attachments)) {
-                // If single path passed (backward compatibility or simple usage)
                 if (is_string($attachments)) {
                     $attachments = [['path' => $attachments, 'name' => 'attachment', 'cid' => 'company_logo']];
                 }
-                
+
                 foreach ($attachments as $att) {
-                    if ( isset($att['path']) && file_exists($att['path']) ) {
-                        if (!empty($att['cid'])) {
-                            // Embedded Image (Inline)
-                            $mime = $att['type'] ?? '';
-                            $mail->addEmbeddedImage($att['path'], $att['cid'], $att['name'] ?? '', 'base64', $mime);
-                        } else {
-                            // Standard Attachment
-                            $mail->addAttachment($att['path'], $att['name'] ?? '');
-                        }
+                    if (isset($att['path']) && file_exists($att['path'])) {
+                        $finalAttachments[] = $att;
                     }
                 }
             }
-            
-            $mail->Body = $htmlBody;
-            
-            // Usar altBody proporcionado o generar uno básico
-            $mail->AltBody = $altBody ?? strip_tags($htmlBody);
 
-            $mail->send();
-            
-            // NOTE: We do NOT delete attachments here anymore, because they might be reused 
-            // for multiple emails (e.g. company + representative).
-            // The caller is responsible for cleanup.
-            
-            return true;
-        } catch (Exception $e) {
-            error_log("Mailer Error: {$mail->ErrorInfo}");
+            // Intentar logo embebido local para `cid:viax_logo`
+            $logoPath = __DIR__ . '/../assets/images/logo.png';
+            if (file_exists($logoPath)) {
+                $finalAttachments[] = [
+                    'path' => $logoPath,
+                    'name' => 'logo.png',
+                    'cid' => 'viax_logo',
+                    'type' => 'image/png',
+                ];
+            } else {
+                $logoUrl = trim((string) env_value('EMAIL_LOGO_URL', ''));
+                if ($logoUrl === '') {
+                    $logoUrl = 'https://viaxcol.online/favicon.png';
+                }
+                $safeLogoUrl = htmlspecialchars($logoUrl, ENT_QUOTES, 'UTF-8');
+                $finalHtmlBody = str_replace('cid:viax_logo', $safeLogoUrl, $finalHtmlBody);
+            }
+
+            $provider = new SmtpMailProvider();
+            return $provider->send(
+                (string)$toEmail,
+                (string)$toName,
+                (string)$subject,
+                $finalHtmlBody,
+                $altBody ?? strip_tags($finalHtmlBody),
+                $finalAttachments
+            );
+        } catch (Throwable $e) {
+            error_log('Mailer Error: ' . $e->getMessage());
             return false;
         }
     }
@@ -1407,45 +1419,33 @@ class Mailer {
      */
     private static function wrapLayout($content) {
         $year = date('Y');
-        
-        // Cabecera con Logo
-        $headerContent = "
-        <table border='0' cellpadding='0' cellspacing='0' style='border-collapse: collapse; margin: 0 auto;'><tr><td style='padding: 0;'><img src='cid:viax_logo' alt='' width='36' height='36' style='width: 36px; height: 36px; vertical-align: middle; border: 0;'></td><td style='padding-left: 4px;'><span style='font-size: 26px; font-weight: bold; vertical-align: middle;'>Viax</span></td></tr></table>
-        ";
 
         return "
         <!DOCTYPE html>
         <html>
         <head>
             <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-            <style>
-                body { font-family: 'Roboto', 'Helvetica', 'Arial', sans-serif; background-color: #F5F5F5; margin: 0; padding: 0; }
-                .container { max-width: 600px; margin: 20px auto; background-color: #F5F5F5; } 
-                .card { background-color: #FFFFFF; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
-                .header { background: linear-gradient(135deg, #2196F3 0%, #1976D2 100%); padding: 25px 30px; }
-                .content { padding: 40px 30px; text-align: center; color: #333333; }
-                .greeting { font-size: 22px; font-weight: 600; margin-bottom: 16px; color: #212121; }
-                .message { font-size: 16px; line-height: 1.6; color: #5F6368; margin-bottom: 32px; margin-top: 0; }
-                .code-container { background-color: #F1F3F4; padding: 24px 32px; border-radius: 12px; display: inline-block; margin-bottom: 32px; letter-spacing: 2px; }
-                .code { font-size: 36px; font-weight: bold; color: #1967D2; margin: 0; font-family: monospace; }
-                .footer { padding: 24px; text-align: center; font-size: 12px; color: #9AA0A6; }
-                .note { font-size: 13px; color: #5F6368; margin-top: 0; }
-                table { font-size: 14px; }
-                table td { text-align: left; }
-            </style>
+            <meta http-equiv='Content-Type' content='text/html; charset=UTF-8'>
         </head>
-        <body>
-            <div class='container'>
-                <div class='card'>
-                    <div class='header'>
-                        $headerContent
-                    </div>
-                    <div class='content'>
+        <body style='margin:0; padding:18px; background:#e2e8f0; font-family:Segoe UI, -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif;'>
+            <div style='max-width:640px; margin:0 auto; color:#0f172a; background:#ffffff; border:1px solid #dbe8f6; border-radius:22px; overflow:hidden;'>
+                <div style='padding:28px 24px 22px 24px; text-align:center; background:#2196F3;'>
+                    <table role='presentation' cellpadding='0' cellspacing='0' border='0' align='center' style='margin:0 auto 14px auto;'>
+                        <tr>
+                            <td align='center' valign='middle' style='width:78px; height:78px; border-radius:20px; background:#ffffff; box-shadow:0 6px 18px rgba(33,150,243,0.25); border:1px solid #BBDEFB;'>
+                                <img src='cid:viax_logo' alt='Viax' style='display:block; width:58px; height:58px; margin:0 auto; object-fit:contain;' />
+                            </td>
+                        </tr>
+                    </table>
+                    <h1 style='font-size:28px; letter-spacing:0.2px; margin:0; color:#ffffff; font-weight:800;'>Viax</h1>
+                    <p style='margin:8px 0 0 0; color:rgba(255,255,255,0.95); font-size:14px;'>Movilidad inteligente, segura y confiable</p>
+                </div>
+                <div style='padding:24px; background:#f8fbff; border-top-left-radius:28px; border-top-right-radius:28px;'>
+                    <div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:18px; padding:22px; text-align:center;'>
                         $content
                     </div>
-                </div>
-                <div class='footer'>
-                    <p>&copy; $year Viax Technology S.A.S. | viaxcol.online | NIT 902040253-1</p>
+                    <p style='margin:18px 8px 0 8px; color:#475569; font-size:12px; text-align:center;'>Este es un correo automático del sistema Viax.</p>
+                    <p style='margin:10px 8px 0 8px; color:#94a3b8; font-size:12px; text-align:center;'>&copy; $year Viax Technology S.A.S. | viaxcol.online | NIT 902040253-1</p>
                 </div>
             </div>
         </body>

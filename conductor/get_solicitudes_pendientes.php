@@ -146,6 +146,16 @@ try {
         WHERE s.estado = 'pendiente'
         AND s.tipo_servicio = 'transporte'
         AND COALESCE(s.solicitado_en, s.fecha_creacion) >= NOW() - INTERVAL '15 minutes'
+        AND NOT EXISTS (
+            SELECT 1
+            FROM blocked_users bu
+            WHERE bu.active = true
+              AND (
+                  (bu.user_id = s.cliente_id AND bu.blocked_user_id = ?)
+                  OR
+                  (bu.user_id = ? AND bu.blocked_user_id = s.cliente_id)
+              )
+        )
         AND (6371 * acos(
             cos(radians(?)) * cos(radians(s.latitud_recogida)) *
             cos(radians(s.longitud_recogida) - radians(?)) +
@@ -178,6 +188,8 @@ try {
             $latitudActual,
             $conductorId,  // Para historial_confianza
             $conductorId,  // Para conductores_favoritos
+            $conductorId,  // Bloqueos (cliente -> conductor)
+            $conductorId,  // Bloqueos (conductor -> cliente)
             $latitudActual,
             $longitudActual,
             $latitudActual,
@@ -190,6 +202,8 @@ try {
             $latitudActual,
             $longitudActual,
             $latitudActual,
+            $conductorId,  // Bloqueos (cliente -> conductor)
+            $conductorId,  // Bloqueos (conductor -> cliente)
             $latitudActual,
             $longitudActual,
             $latitudActual,

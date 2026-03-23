@@ -12,6 +12,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 require_once '../config/database.php';
 require_once '../utils/NotificationHelper.php';
 require_once '../utils/Mailer.php';
+require_once '../utils/SensitiveDataCrypto.php';
 
 function notifyCompanyUsers(
     PDO $db,
@@ -111,6 +112,9 @@ try {
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
         $rows = array_map(function($row) {
             $row['comprobante_url'] = getR2ProxyUrl($row['comprobante_ruta']);
+            $numeroPlano = decryptSensitiveData($row['numero_cuenta_destino'] ?? null);
+            $row['numero_cuenta_destino_masked'] = maskSensitiveAccount($numeroPlano);
+            $row['numero_cuenta_destino'] = $row['numero_cuenta_destino_masked'];
             return $row;
         }, $rows);
 
@@ -254,6 +258,59 @@ try {
 
         $db->beginTransaction();
 
+        // Calcular deuda vigente del ciclo antes de registrar el pago.
+        $stmtAnchor = $db->prepare("SELECT MAX(confirmado_en) AS ultimo_pago_confirmado
+            FROM pagos_comision_reportes
+            WHERE conductor_id = :conductor_id
+              AND estado = 'pagado_confirmado'");
+        $stmtAnchor->execute([':conductor_id' => $conductorId]);
+        $anchorData = $stmtAnchor->fetch(PDO::FETCH_ASSOC) ?: [];
+        $anchorTs = $anchorData['ultimo_pago_confirmado'] ?? null;
+
+        $queryComision = "SELECT COALESCE(SUM(
+                CASE
+                    WHEN vrt.comision_plataforma_valor > 0 THEN vrt.comision_plataforma_valor
+                    WHEN vrt.comision_plataforma_porcentaje > 0 THEN
+                        COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(s.precio_final, 0), s.precio_estimado)
+                        * (vrt.comision_plataforma_porcentaje / 100)
+                    ELSE 0
+                END
+            ), 0) AS total_comision
+            FROM solicitudes_servicio s
+            INNER JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id
+            LEFT JOIN viaje_resumen_tracking vrt ON s.id = vrt.solicitud_id
+            WHERE ac.conductor_id = :conductor_id
+              AND s.estado IN ('completada', 'entregado')" . ($anchorTs ? "
+              AND COALESCE(s.completado_en, s.solicitado_en) > :anchor_ts" : "");
+
+        $stmtComision = $db->prepare($queryComision);
+        $paramsComision = [':conductor_id' => $conductorId];
+        if ($anchorTs) {
+            $paramsComision[':anchor_ts'] = $anchorTs;
+        }
+        $stmtComision->execute($paramsComision);
+        $totalComision = floatval($stmtComision->fetch(PDO::FETCH_ASSOC)['total_comision'] ?? 0);
+
+        $queryPagos = "SELECT COALESCE(SUM(monto), 0) AS total_pagado
+            FROM pagos_comision
+            WHERE conductor_id = :conductor_id" . ($anchorTs ? "
+              AND fecha_pago > :anchor_ts" : "");
+        $stmtPagos = $db->prepare($queryPagos);
+        $paramsPagos = [':conductor_id' => $conductorId];
+        if ($anchorTs) {
+            $paramsPagos[':anchor_ts'] = $anchorTs;
+        }
+        $stmtPagos->execute($paramsPagos);
+        $totalPagado = floatval($stmtPagos->fetch(PDO::FETCH_ASSOC)['total_pagado'] ?? 0);
+
+        $deudaVigente = max(0, $totalComision - $totalPagado);
+        if ($deudaVigente <= 0) {
+            throw new Exception('No hay deuda pendiente para confirmar en este ciclo');
+        }
+
+        $montoReportado = floatval($report['monto_reportado'] ?? 0);
+        $montoAplicado = min($montoReportado, $deudaVigente);
+
         $stmtPago = $db->prepare("INSERT INTO pagos_comision
             (conductor_id, monto, metodo_pago, admin_id, notas, fecha_pago)
             VALUES (:conductor_id, :monto, 'transferencia', :admin_id, :notas, NOW())
@@ -261,9 +318,14 @@ try {
 
         $stmtPago->execute([
             ':conductor_id' => $conductorId,
-            ':monto' => $report['monto_reportado'],
+            ':monto' => $montoAplicado,
             ':admin_id' => $actorUserId ?: null,
-            ':notas' => 'Pago confirmado desde comprobante #' . $reportId,
+            ':notas' => sprintf(
+                'Pago confirmado desde comprobante #%d (reportado: %.2f, aplicado: %.2f)',
+                $reportId,
+                $montoReportado,
+                $montoAplicado
+            ),
         ]);
 
         $pagoId = intval($stmtPago->fetchColumn());
@@ -279,8 +341,7 @@ try {
         if ($empresa) {
             $porcentajeAdmin = floatval($empresa['comision_admin_porcentaje'] ?? 0);
             if ($porcentajeAdmin > 0) {
-                $montoReportado = floatval($report['monto_reportado'] ?? 0);
-                $cargoAdmin = $montoReportado * ($porcentajeAdmin / 100);
+                $cargoAdmin = $montoAplicado * ($porcentajeAdmin / 100);
 
                 if ($cargoAdmin > 0) {
                     $saldoAnterior = floatval($empresa['saldo_pendiente'] ?? 0);

@@ -20,6 +20,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once '../config/database.php';
+require_once '../services/driver_service.php';
+require_once __DIR__ . '/driver_auth.php';
 
 try {
     // Obtener el ID del conductor
@@ -28,6 +30,14 @@ try {
     if (!$conductorId) {
         throw new Exception('ID del conductor requerido');
     }
+
+    // Validación de sesión en lectura de ofertas (modo compatible).
+    $sessionToken = driverSessionTokenFromRequest($_GET);
+    $session = validateDriverSession((int)$conductorId, $sessionToken, false);
+    if (!$session['ok']) {
+        throw new Exception($session['message']);
+    }
+    DriverGeoService::touchDriverHeartbeat((int)$conductorId, 20);
     
     $database = new Database();
     $db = $database->getConnection();

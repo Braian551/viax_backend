@@ -29,66 +29,101 @@ try {
     $database = new Database();
     $db = $database->getConnection();
     
-    // Consulta compleja para obtener conductores y calcular su deuda
-    // 1. Obtener conductores de la empresa
-    // 2. Sumar comision_calculada de viajes finalizados (viaje_resumen_tracking via asignaciones_conductor)
-    // 3. Sumar pagos realizados (pagos_comision)
-    
-    $query = "
-        SELECT 
-            u.id, 
+    // Obtener conductores de la empresa y calcular deuda por ciclo vigente.
+    // Ciclo vigente = transacciones posteriores al último pago confirmado.
+    $stmtConductores = $db->prepare("SELECT 
+            u.id,
             u.empresa_id,
-            u.nombre, 
-            u.apellido, 
-            u.email, 
+            u.nombre,
+            u.apellido,
+            u.email,
             u.telefono,
-            u.foto_perfil,
-            COALESCE(comisiones.total_comision, 0) as total_comision,
-            COALESCE(pagos.total_pagado, 0) as total_pagado
+            u.foto_perfil
         FROM usuarios u
-        -- Subconsulta para comisiones
-        LEFT JOIN (
-            SELECT 
-                ac.conductor_id,
-                SUM(
-                    CASE 
-                        WHEN vrt.comision_plataforma_valor > 0 THEN vrt.comision_plataforma_valor
-                        WHEN vrt.comision_plataforma_porcentaje > 0 THEN 
-                            COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(s.precio_final, 0), s.precio_estimado) 
-                            * (vrt.comision_plataforma_porcentaje / 100)
-                        ELSE COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(s.precio_final, 0), s.precio_estimado) * 0.10
-                    END
-                ) as total_comision
-            FROM solicitudes_servicio s
-            INNER JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id
-            LEFT JOIN viaje_resumen_tracking vrt ON s.id = vrt.solicitud_id
-            WHERE s.estado IN ('completada', 'entregado')
-            GROUP BY ac.conductor_id
-        ) comisiones ON comisiones.conductor_id = u.id
-        -- Subconsulta para pagos
-        LEFT JOIN (
-            SELECT conductor_id, SUM(monto) as total_pagado
-            FROM pagos_comision
-            GROUP BY conductor_id
-        ) pagos ON pagos.conductor_id = u.id
         WHERE u.empresa_id = :empresa_id
-        AND u.tipo_usuario = 'conductor'
-        ORDER BY (COALESCE(comisiones.total_comision, 0) - COALESCE(pagos.total_pagado, 0)) DESC
-    ";
-    
-    $stmt = $db->prepare($query);
-    $stmt->bindParam(':empresa_id', $empresaId);
-    $stmt->execute();
-    
-    $conductores = $stmt->fetchAll(PDO::FETCH_ASSOC);
+          AND u.tipo_usuario = 'conductor'");
+    $stmtConductores->bindParam(':empresa_id', $empresaId);
+    $stmtConductores->execute();
+    $conductores = $stmtConductores->fetchAll(PDO::FETCH_ASSOC);
+
+    $stmtAnchor = $db->prepare("SELECT MAX(confirmado_en) AS ultimo_pago_confirmado
+        FROM pagos_comision_reportes
+        WHERE conductor_id = :conductor_id
+          AND estado = 'pagado_confirmado'");
+
+    $stmtComisionSinAnchor = $db->prepare("SELECT COALESCE(SUM(
+            CASE
+                WHEN vrt.comision_plataforma_valor > 0 THEN vrt.comision_plataforma_valor
+                WHEN vrt.comision_plataforma_porcentaje > 0 THEN
+                    COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(s.precio_final, 0), s.precio_estimado)
+                    * (vrt.comision_plataforma_porcentaje / 100)
+                ELSE 0
+            END
+        ), 0) AS total_comision
+        FROM solicitudes_servicio s
+        INNER JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id
+        LEFT JOIN viaje_resumen_tracking vrt ON s.id = vrt.solicitud_id
+        WHERE ac.conductor_id = :conductor_id
+          AND s.estado IN ('completada', 'entregado')");
+
+    $stmtComisionConAnchor = $db->prepare("SELECT COALESCE(SUM(
+            CASE
+                WHEN vrt.comision_plataforma_valor > 0 THEN vrt.comision_plataforma_valor
+                WHEN vrt.comision_plataforma_porcentaje > 0 THEN
+                    COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(s.precio_final, 0), s.precio_estimado)
+                    * (vrt.comision_plataforma_porcentaje / 100)
+                ELSE 0
+            END
+        ), 0) AS total_comision
+        FROM solicitudes_servicio s
+        INNER JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id
+        LEFT JOIN viaje_resumen_tracking vrt ON s.id = vrt.solicitud_id
+        WHERE ac.conductor_id = :conductor_id
+          AND s.estado IN ('completada', 'entregado')
+          AND COALESCE(s.completado_en, s.solicitado_en) > :anchor_ts");
+
+    $stmtPagosSinAnchor = $db->prepare("SELECT COALESCE(SUM(monto), 0) AS total_pagado
+        FROM pagos_comision
+        WHERE conductor_id = :conductor_id");
+
+    $stmtPagosConAnchor = $db->prepare("SELECT COALESCE(SUM(monto), 0) AS total_pagado
+        FROM pagos_comision
+        WHERE conductor_id = :conductor_id
+          AND fecha_pago > :anchor_ts");
     
     // Calcular deuda real en PHP
     $deudores = [];
     $totalDeulaGlobal = 0;
     
     foreach ($conductores as $c) {
-        $totalComision = floatval($c['total_comision']);
-        $totalPagado = floatval($c['total_pagado']);
+        $conductorId = intval($c['id'] ?? 0);
+
+        $stmtAnchor->execute([':conductor_id' => $conductorId]);
+        $anchorData = $stmtAnchor->fetch(PDO::FETCH_ASSOC) ?: [];
+        $anchorTs = $anchorData['ultimo_pago_confirmado'] ?? null;
+
+        if ($anchorTs) {
+            $stmtComisionConAnchor->execute([
+                ':conductor_id' => $conductorId,
+                ':anchor_ts' => $anchorTs,
+            ]);
+            $totalComision = floatval($stmtComisionConAnchor->fetch(PDO::FETCH_ASSOC)['total_comision'] ?? 0);
+
+            $stmtPagosConAnchor->execute([
+                ':conductor_id' => $conductorId,
+                ':anchor_ts' => $anchorTs,
+            ]);
+            $totalPagado = floatval($stmtPagosConAnchor->fetch(PDO::FETCH_ASSOC)['total_pagado'] ?? 0);
+        } else {
+            $stmtComisionSinAnchor->execute([':conductor_id' => $conductorId]);
+            $totalComision = floatval($stmtComisionSinAnchor->fetch(PDO::FETCH_ASSOC)['total_comision'] ?? 0);
+
+            $stmtPagosSinAnchor->execute([':conductor_id' => $conductorId]);
+            $totalPagado = floatval($stmtPagosSinAnchor->fetch(PDO::FETCH_ASSOC)['total_pagado'] ?? 0);
+        }
+
+        $c['total_comision'] = round($totalComision, 2);
+        $c['total_pagado'] = round($totalPagado, 2);
         $deuda = $totalComision - $totalPagado;
         
         // Formatear para respuesta
@@ -102,12 +137,18 @@ try {
         $deudores[] = $c;
     }
     
+    usort($deudores, function($a, $b) {
+        $deudaA = floatval($a['deuda_actual'] ?? 0);
+        $deudaB = floatval($b['deuda_actual'] ?? 0);
+        return $deudaB <=> $deudaA;
+    });
+
     echo json_encode([
         'success' => true,
         'data' => $deudores,
         'resumen' => [
             'total_conductores' => count($deudores),
-            'deuda_total_empresa' => $totalDeulaGlobal
+            'deuda_total_empresa' => round($totalDeulaGlobal, 2)
         ]
     ]);
 

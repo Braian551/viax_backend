@@ -26,6 +26,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/_support_auth.php';
 
 try {
     $database = new Database();
@@ -34,64 +35,152 @@ try {
     $data = json_decode(file_get_contents("php://input"), true);
     
     $ticket_id = isset($data['ticket_id']) ? intval($data['ticket_id']) : 0;
-    $usuario_id = isset($data['usuario_id']) ? intval($data['usuario_id']) : 0;
+    $usuario_id = supportResolveActorId($data);
     $mensaje = isset($data['mensaje']) ? trim($data['mensaje']) : '';
     
     if ($ticket_id <= 0 || $usuario_id <= 0) {
-        http_response_code(400);
-        echo json_encode(['success' => false, 'error' => 'ticket_id y usuario_id son requeridos']);
-        exit();
+        supportJsonError('ticket_id y usuario_id/agente_id son requeridos', 400);
     }
     
     if (empty($mensaje)) {
-        http_response_code(400);
-        echo json_encode(['success' => false, 'error' => 'mensaje es requerido']);
-        exit();
+        supportJsonError('mensaje es requerido', 400);
     }
+
+    $actor = supportGetActor($conn, $usuario_id);
+    if (!$actor) {
+        supportJsonError('Actor no encontrado', 404);
+    }
+    $isAgent = (bool) $actor['es_agente_soporte'];
     
     // Verificar que el ticket pertenece al usuario y está abierto
-    $checkQuery = "SELECT id, estado FROM tickets_soporte WHERE id = :ticket_id AND usuario_id = :usuario_id";
+    $checkQuery = "SELECT id, numero_ticket, asunto, estado, usuario_id, agente_id, prioridad FROM tickets_soporte WHERE id = :ticket_id";
     $checkStmt = $conn->prepare($checkQuery);
     $checkStmt->bindValue(':ticket_id', $ticket_id, PDO::PARAM_INT);
-    $checkStmt->bindValue(':usuario_id', $usuario_id, PDO::PARAM_INT);
     $checkStmt->execute();
     $ticket = $checkStmt->fetch(PDO::FETCH_ASSOC);
     
     if (!$ticket) {
-        http_response_code(404);
-        echo json_encode(['success' => false, 'error' => 'Ticket no encontrado']);
-        exit();
+        supportJsonError('Ticket no encontrado', 404);
     }
-    
-    if ($ticket['estado'] === 'cerrado') {
-        http_response_code(400);
-        echo json_encode(['success' => false, 'error' => 'No puedes enviar mensajes a un ticket cerrado']);
-        exit();
+
+    $isOwner = ((int) $ticket['usuario_id'] === $usuario_id);
+    if (!$isOwner && !$isAgent) {
+        supportJsonError('No tienes permisos para responder este ticket', 403);
     }
     
     // Insertar mensaje
     $query = "
         INSERT INTO mensajes_ticket (ticket_id, remitente_id, es_agente, mensaje)
-        VALUES (:ticket_id, :remitente_id, FALSE, :mensaje)
+        VALUES (:ticket_id, :remitente_id, :es_agente, :mensaje)
         RETURNING id, created_at
     ";
     
     $stmt = $conn->prepare($query);
     $stmt->bindValue(':ticket_id', $ticket_id, PDO::PARAM_INT);
     $stmt->bindValue(':remitente_id', $usuario_id, PDO::PARAM_INT);
+    $stmt->bindValue(':es_agente', $isAgent, PDO::PARAM_BOOL);
     $stmt->bindValue(':mensaje', $mensaje);
     $stmt->execute();
     
     $result = $stmt->fetch(PDO::FETCH_ASSOC);
     
-    // Actualizar ticket si estaba esperando usuario
-    if ($ticket['estado'] === 'esperando_usuario') {
-        $updateQuery = "UPDATE tickets_soporte SET estado = 'en_progreso', updated_at = CURRENT_TIMESTAMP WHERE id = :ticket_id";
-        $conn->prepare($updateQuery)->execute([':ticket_id' => $ticket_id]);
+    $estadoAnterior = $ticket['estado'];
+    $estadoNuevo = $estadoAnterior;
+    if ($isAgent) {
+        if (in_array($estadoAnterior, ['abierto', 'en_progreso', 'resuelto', 'cerrado'], true)) {
+            $estadoNuevo = 'esperando_usuario';
+        }
     } else {
-        // Solo actualizar timestamp
-        $updateQuery = "UPDATE tickets_soporte SET updated_at = CURRENT_TIMESTAMP WHERE id = :ticket_id";
-        $conn->prepare($updateQuery)->execute([':ticket_id' => $ticket_id]);
+        if (in_array($estadoAnterior, ['esperando_usuario', 'resuelto', 'cerrado'], true)) {
+            $estadoNuevo = 'en_progreso';
+        }
+    }
+
+    $updates = ['updated_at = CURRENT_TIMESTAMP'];
+    if ($estadoNuevo !== $estadoAnterior) {
+        $updates[] = 'estado = :estado';
+    }
+    if ($isAgent && empty($ticket['agente_id'])) {
+        $updates[] = 'agente_id = :agente_id';
+    }
+    $updateQuery = 'UPDATE tickets_soporte SET ' . implode(', ', $updates) . ' WHERE id = :ticket_id';
+    $updateStmt = $conn->prepare($updateQuery);
+    $updateStmt->bindValue(':ticket_id', $ticket_id, PDO::PARAM_INT);
+    if ($estadoNuevo !== $estadoAnterior) {
+        $updateStmt->bindValue(':estado', $estadoNuevo);
+    }
+    if ($isAgent && empty($ticket['agente_id'])) {
+        $updateStmt->bindValue(':agente_id', $usuario_id, PDO::PARAM_INT);
+    }
+    $updateStmt->execute();
+
+    supportInsertTicketLog(
+        $conn,
+        $ticket_id,
+        $usuario_id,
+        $isAgent ? 'mensaje_agente' : 'mensaje_usuario',
+        [
+            'estado_anterior' => $estadoAnterior,
+            'estado_nuevo' => $estadoNuevo,
+            'prioridad_anterior' => $ticket['prioridad'],
+            'prioridad_nueva' => $ticket['prioridad'],
+            'metadata' => ['mensaje_id' => (int) $result['id']],
+        ]
+    );
+
+    $actorName = supportActorDisplayName($actor);
+    $preview = strlen($mensaje) > 120 ? substr($mensaje, 0, 117) . '...' : $mensaje;
+    if ($isAgent) {
+        supportNotifyUser(
+            (int) $ticket['usuario_id'],
+            'Respuesta en tu ticket de soporte',
+            $actorName . ' respondio ' . ($ticket['numero_ticket'] ?? ('#' . $ticket_id)) . ': ' . $preview,
+            (int) $ticket_id,
+            [
+                'module' => 'support',
+                'action' => 'agent_message',
+                'ticket_id' => (int) $ticket_id,
+                'numero_ticket' => $ticket['numero_ticket'] ?? null,
+                'from_agent_id' => $usuario_id,
+            ],
+            'chat_message'
+        );
+    } else {
+        $assignedAgentId = (int) ($ticket['agente_id'] ?? 0);
+        if ($assignedAgentId > 0) {
+            supportNotifyUser(
+                $assignedAgentId,
+                'Nuevo mensaje de usuario en soporte',
+                $actorName . ' escribio en ' . ($ticket['numero_ticket'] ?? ('#' . $ticket_id)) . ': ' . $preview,
+                (int) $ticket_id,
+                [
+                    'module' => 'support',
+                    'action' => 'user_message',
+                    'ticket_id' => (int) $ticket_id,
+                    'numero_ticket' => $ticket['numero_ticket'] ?? null,
+                    'from_user_id' => $usuario_id,
+                ],
+                'chat_message'
+            );
+        } else {
+            $agentsToNotify = supportAgentIds($conn, $usuario_id);
+            foreach ($agentsToNotify as $agentId) {
+                supportNotifyUser(
+                    $agentId,
+                    'Nuevo mensaje de usuario en soporte',
+                    $actorName . ' escribio en ' . ($ticket['numero_ticket'] ?? ('#' . $ticket_id)) . ': ' . $preview,
+                    (int) $ticket_id,
+                    [
+                        'module' => 'support',
+                        'action' => 'user_message',
+                        'ticket_id' => (int) $ticket_id,
+                        'numero_ticket' => $ticket['numero_ticket'] ?? null,
+                        'from_user_id' => $usuario_id,
+                    ],
+                    'chat_message'
+                );
+            }
+        }
     }
     
     echo json_encode([
@@ -100,7 +189,7 @@ try {
         'mensaje' => [
             'id' => $result['id'],
             'mensaje' => $mensaje,
-            'es_agente' => false,
+            'es_agente' => $isAgent,
             'created_at' => $result['created_at']
         ]
     ]);

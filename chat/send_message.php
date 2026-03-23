@@ -18,6 +18,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../utils/NotificationHelper.php';
+require_once __DIR__ . '/../utils/BlockHelper.php';
 
 try {
     // Obtener datos del request
@@ -82,6 +83,21 @@ try {
             'message' => 'Solicitud no encontrada o no está activa'
         ]);
         exit();
+    }
+
+    // Regla de bloqueo: si existe bloqueo, solo permitir chat durante viaje activo.
+    $blockState = BlockHelper::getBlockState($db, $remitenteId, $destinatarioId);
+    if ($blockState['either_blocked']) {
+        $hasActiveTrip = BlockHelper::hasActiveTrip($db, $remitenteId, $destinatarioId);
+        if (!$hasActiveTrip) {
+            http_response_code(403);
+            echo json_encode([
+                'success' => false,
+                'error_code' => 'CHAT_BLOCKED_BY_USER',
+                'message' => 'No puedes enviar mensajes a este usuario porque existe un bloqueo activo.'
+            ]);
+            exit();
+        }
     }
     
     // Insertar mensaje

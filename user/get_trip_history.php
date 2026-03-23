@@ -130,6 +130,7 @@ try {
             u.apellido as conductor_apellido,
             u.foto_perfil as conductor_foto,
             u.telefono as conductor_telefono,
+            u.email as conductor_email,
             COALESCE(dc.calificacion_promedio, 0) as calificacion_conductor,
             COALESCE(dc.vehiculo_placa, '') as conductor_placa,
             COALESCE(dc.vehiculo_marca, '') as conductor_marca,
@@ -228,6 +229,7 @@ try {
             'conductor_apellido' => $viaje['conductor_apellido'],
             'conductor_foto' => $viaje['conductor_foto'],
             'conductor_telefono' => $viaje['conductor_telefono'] ?? null,
+            'conductor_email' => $viaje['conductor_email'] ?? null,
             'calificacion_conductor' => $viaje['calificacion_conductor'] ? (float)$viaje['calificacion_conductor'] : null,
             // Vehículo
             'vehiculo' => [

@@ -12,6 +12,50 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     exit();
 }
 
+function hasColumn(PDO $db, string $table, string $column): bool
+{
+    $sql = "SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = :table
+              AND column_name = :column
+            LIMIT 1";
+    $stmt = $db->prepare($sql);
+    $stmt->execute([
+        ':table' => $table,
+        ':column' => $column,
+    ]);
+    return (bool) $stmt->fetchColumn();
+}
+
+function buildBogotaTodayUtcRange(): array
+{
+    $tzBogota = new DateTimeZone('America/Bogota');
+    $tzUtc = new DateTimeZone('UTC');
+
+    $nowBogota = new DateTimeImmutable('now', $tzBogota);
+    $startBogota = $nowBogota->setTime(0, 0, 0);
+    $endBogota = $startBogota->modify('+1 day');
+
+    return [
+        'today_bogota' => $startBogota->format('Y-m-d'),
+        'start_utc' => $startBogota->setTimezone($tzUtc)->format('Y-m-d H:i:s'),
+        'end_utc' => $endBogota->setTimezone($tzUtc)->format('Y-m-d H:i:s'),
+    ];
+}
+
+function canonicalVehicleTypeSqlExpr(string $column): string {
+    $clean = "LOWER(REPLACE(REPLACE(COALESCE($column, ''), '_', ''), ' ', ''))";
+    return "CASE $clean
+        WHEN 'auto' THEN 'carro'
+        WHEN 'automovil' THEN 'carro'
+        WHEN 'car' THEN 'carro'
+        WHEN 'motocarro' THEN 'mototaxi'
+        WHEN 'motocarga' THEN 'mototaxi'
+        ELSE $clean
+    END";
+}
+
 try {
     $database = new Database();
     $db = $database->getConnection();
@@ -23,33 +67,61 @@ try {
     }
 
     // Estadísticas del día actual
-    $hoy = date('Y-m-d');
+    $range = buildBogotaTodayUtcRange();
+    $completedStates = "'completada', 'completado', 'entregado', 'finalizada', 'finalizado'";
+    $activeAndCompletedStates = "'completada', 'completado', 'entregado', 'finalizada', 'finalizado', 'en_curso', 'aceptada', 'conductor_llego', 'recogido'";
+    $hasCompletedAt = hasColumn($db, 'solicitudes_servicio', 'completed_at');
+    $tripDateExpr = $hasCompletedAt
+        ? "COALESCE(s.completed_at, s.completado_en, s.solicitado_en, s.fecha_creacion)"
+        : "COALESCE(s.completado_en, s.solicitado_en, s.fecha_creacion)";
     
     // Contar viajes de hoy (usando asignaciones_conductor porque conductor_id en solicitudes puede estar vacío)
     $query_viajes = "SELECT COUNT(DISTINCT s.id) as viajes_hoy
                      FROM solicitudes_servicio s
                      JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id
                      WHERE ac.conductor_id = :conductor_id
-                     AND DATE(s.fecha_creacion) = :hoy
-                     AND s.estado IN ('completada', 'en_curso', 'aceptada', 'conductor_llego')";
+                     AND $tripDateExpr >= :day_start_utc
+                     AND $tripDateExpr < :day_end_utc
+                     AND LOWER(COALESCE(s.estado, '')) IN ($activeAndCompletedStates)";
     
     $stmt_viajes = $db->prepare($query_viajes);
     $stmt_viajes->bindParam(':conductor_id', $conductor_id, PDO::PARAM_INT);
-    $stmt_viajes->bindParam(':hoy', $hoy, PDO::PARAM_STR);
+    $stmt_viajes->bindParam(':day_start_utc', $range['start_utc'], PDO::PARAM_STR);
+    $stmt_viajes->bindParam(':day_end_utc', $range['end_utc'], PDO::PARAM_STR);
     $stmt_viajes->execute();
     $viajes_hoy = $stmt_viajes->fetch(PDO::FETCH_ASSOC)['viajes_hoy'];
 
-    // Calcular ganancias de hoy (usando precio_final o precio_estimado)
-    $query_ganancias = "SELECT COALESCE(SUM(COALESCE(s.precio_final, s.precio_estimado, 0)), 0) as ganancias_hoy
+    $precioBaseExpr = "COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(s.precio_final, 0), s.precio_estimado, 0)";
+    $trackingPctExpr = "NULLIF(vrt.comision_plataforma_porcentaje, 0)";
+    $comisionDesdeGananciaExpr = "CASE
+        WHEN ($trackingPctExpr) IS NULL OR ($trackingPctExpr) >= 100 THEN 0
+        ELSE COALESCE(vrt.ganancia_conductor, 0) * (($trackingPctExpr) / NULLIF(100 - ($trackingPctExpr), 0))
+    END";
+    $comisionExpr = "CASE
+        WHEN vrt.comision_plataforma_valor > 0 THEN vrt.comision_plataforma_valor
+        WHEN vrt.solicitud_id IS NOT NULL AND COALESCE(vrt.ganancia_conductor, 0) > 0 THEN $comisionDesdeGananciaExpr
+        WHEN vrt.solicitud_id IS NOT NULL AND ($trackingPctExpr) IS NOT NULL THEN ($precioBaseExpr) * (($trackingPctExpr) / 100)
+        ELSE 0
+    END";
+    $gananciaExpr = "CASE
+        WHEN COALESCE(vrt.ganancia_conductor, 0) > 0 THEN vrt.ganancia_conductor
+        ELSE ($precioBaseExpr) - ($comisionExpr)
+    END";
+
+    // Calcular ganancias netas de hoy (despues de comisión)
+    $query_ganancias = "SELECT COALESCE(SUM($gananciaExpr), 0) as ganancias_hoy
                         FROM solicitudes_servicio s
                         JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id
+                        LEFT JOIN viaje_resumen_tracking vrt ON s.id = vrt.solicitud_id
                         WHERE ac.conductor_id = :conductor_id
-                        AND DATE(s.fecha_creacion) = :hoy
-                        AND s.estado = 'completada'";
+                        AND $tripDateExpr >= :day_start_utc
+                        AND $tripDateExpr < :day_end_utc
+                        AND LOWER(COALESCE(s.estado, '')) IN ($completedStates)";
     
     $stmt_ganancias = $db->prepare($query_ganancias);
     $stmt_ganancias->bindParam(':conductor_id', $conductor_id, PDO::PARAM_INT);
-    $stmt_ganancias->bindParam(':hoy', $hoy, PDO::PARAM_STR);
+    $stmt_ganancias->bindParam(':day_start_utc', $range['start_utc'], PDO::PARAM_STR);
+    $stmt_ganancias->bindParam(':day_end_utc', $range['end_utc'], PDO::PARAM_STR);
     $stmt_ganancias->execute();
     $ganancias_hoy = $stmt_ganancias->fetch(PDO::FETCH_ASSOC)['ganancias_hoy'];
 
@@ -58,12 +130,14 @@ try {
                     FROM solicitudes_servicio s
                     JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id
                     WHERE ac.conductor_id = :conductor_id
-                    AND DATE(s.fecha_creacion) = :hoy
-                    AND s.estado = 'completada'";
+                    AND $tripDateExpr >= :day_start_utc
+                    AND $tripDateExpr < :day_end_utc
+                    AND LOWER(COALESCE(s.estado, '')) IN ($completedStates)";
     
     $stmt_horas = $db->prepare($query_horas);
     $stmt_horas->bindParam(':conductor_id', $conductor_id, PDO::PARAM_INT);
-    $stmt_horas->bindParam(':hoy', $hoy, PDO::PARAM_STR);
+    $stmt_horas->bindParam(':day_start_utc', $range['start_utc'], PDO::PARAM_STR);
+    $stmt_horas->bindParam(':day_end_utc', $range['end_utc'], PDO::PARAM_STR);
     $stmt_horas->execute();
     $minutos_hoy = $stmt_horas->fetch(PDO::FETCH_ASSOC)['minutos_hoy'];
     $horas_hoy = round($minutos_hoy / 60, 1);
@@ -91,7 +165,7 @@ try {
         $query_viajes_totales = "SELECT COUNT(*) as viajes_totales
                                   FROM solicitudes_servicio
                                   WHERE conductor_id = :conductor_id
-                                  AND estado = 'completada'";
+                                  AND LOWER(COALESCE(estado, '')) IN ($completedStates)";
         
         $stmt_viajes_totales = $db->prepare($query_viajes_totales);
         $stmt_viajes_totales->bindParam(':conductor_id', $conductor_id, PDO::PARAM_INT);

@@ -24,6 +24,7 @@ require_once '../config/database.php';
 require_once '../config/R2Service.php';
 require_once '../utils/NotificationHelper.php';
 require_once '../utils/Mailer.php';
+require_once '../utils/SensitiveDataCrypto.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     http_response_code(405);
@@ -77,7 +78,8 @@ try {
     $stmtAdminBank->execute();
     $adminBank = $stmtAdminBank->fetch(PDO::FETCH_ASSOC) ?: [];
 
-    $hasAdminBank = !empty($adminBank['banco_nombre']) && !empty($adminBank['numero_cuenta']);
+    $adminNumeroCuentaPlano = decryptSensitiveData($adminBank['numero_cuenta'] ?? null);
+    $hasAdminBank = !empty($adminBank['banco_nombre']) && !empty($adminNumeroCuentaPlano);
 
     // Validar archivo
     $allowedImageExt = ['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'jfif'];
@@ -162,7 +164,7 @@ try {
         ':monto' => $monto,
         ':comprobante_ruta' => $relativeUrl,
         ':banco_nombre' => $adminBank['banco_nombre'] ?? null,
-        ':numero_cuenta' => $adminBank['numero_cuenta'] ?? null,
+        ':numero_cuenta' => $adminNumeroCuentaPlano ? encryptSensitiveData($adminNumeroCuentaPlano) : null,
         ':tipo_cuenta' => $adminBank['tipo_cuenta'] ?? null,
         ':observaciones' => $observaciones ?: null,
     ]);

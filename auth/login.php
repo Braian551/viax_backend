@@ -16,7 +16,7 @@ try {
     $database = new Database();
     $db = $database->getConnection();
 
-    $query = "SELECT id, uuid, nombre, apellido, email, telefono, tipo_usuario, empresa_id, hash_contrasena FROM usuarios WHERE LOWER(email) = ? LIMIT 1";
+    $query = "SELECT id, uuid, nombre, apellido, email, telefono, tipo_usuario, empresa_id, hash_contrasena, status, deletion_scheduled_at FROM usuarios WHERE LOWER(email) = ? LIMIT 1";
     $stmt = $db->prepare($query);
     $stmt->execute([$email]);
     $user = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -92,6 +92,20 @@ try {
             ], 401, 'INVALID_CREDENTIALS');
         }
         sendJsonResponse(false, 'Contraseña incorrecta', [], 401, 'INVALID_CREDENTIALS');
+    }
+
+    $status = strtolower((string)($user['status'] ?? 'active'));
+    if ($status === 'deleted') {
+        sendJsonResponse(false, 'Esta cuenta fue eliminada de forma definitiva.', [], 403, 'ACCOUNT_DELETED');
+    }
+
+    // Si la cuenta quedó inactiva por eliminación programada, no permitir login directo.
+    // El cliente debe mostrar el flujo explícito de reactivación.
+    if (in_array($status, ['inactive', 'inactivo', 'pending_deletion'], true)) {
+        sendJsonResponse(false, 'Tu cuenta está programada para eliminación. Reactívala para continuar.', [
+            'pending_deletion' => true,
+            'deletion_scheduled_at' => $user['deletion_scheduled_at'] ?? null,
+        ], 403, 'ACCOUNT_PENDING_DELETION');
     }
 
     // No devolver hash

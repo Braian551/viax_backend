@@ -289,7 +289,7 @@ class EmpresaRepository {
                 
                 // Limpiar comillas
                 $tiposSeleccionados = array_map(function($t) { 
-                    return trim($t, '" '); 
+                    return trim((string)$t, '" '); 
                 }, $tiposSeleccionados);
                 $tiposSeleccionados = array_filter($tiposSeleccionados);
 
@@ -365,9 +365,11 @@ class EmpresaRepository {
 
         // Allowlist of updatable fields
         $allowedFields = [
+            'nombre',
             'nit', 'razon_social', 'direccion', 'municipio', 
             'departamento', 'telefono', 'telefono_secundario', 
-            'email', 'descripcion'
+            'email', 'descripcion', 'logo_url',
+            'representante_nombre', 'representante_telefono', 'representante_email'
         ];
 
         foreach ($allowedFields as $field) {
@@ -419,9 +421,13 @@ class EmpresaRepository {
             ];
         }
 
+        require_once __DIR__ . '/../../utils/SensitiveDataCrypto.php';
+
+        $numeroCuentaPlano = decryptSensitiveData($result['numero_cuenta'] ?? null);
+
         $hasTransferAccount = !empty($result['banco_nombre'])
             && !empty($result['tipo_cuenta'])
-            && !empty($result['numero_cuenta']);
+            && !empty($numeroCuentaPlano);
         
         return [
             'notificaciones_email' => $result['notificaciones_email'] === true || $result['notificaciones_email'] === 't',
@@ -430,7 +436,8 @@ class EmpresaRepository {
             'banco_codigo' => $result['banco_codigo'] ?? null,
             'banco_nombre' => $result['banco_nombre'] ?? null,
             'tipo_cuenta' => $result['tipo_cuenta'] ?? null,
-            'numero_cuenta' => $result['numero_cuenta'] ?? null,
+            'numero_cuenta' => $numeroCuentaPlano,
+            'numero_cuenta_masked' => maskSensitiveAccount($numeroCuentaPlano),
             'titular_cuenta' => $result['titular_cuenta'] ?? null,
             'documento_titular' => $result['documento_titular'] ?? null,
             'referencia_transferencia' => $result['referencia_transferencia'] ?? null,
@@ -441,6 +448,8 @@ class EmpresaRepository {
      * Update company configuration settings
      */
     public function updateCompanySettings($empresaId, $data) {
+        require_once __DIR__ . '/../../utils/SensitiveDataCrypto.php';
+
         // First ensure record exists
         $check = $this->db->prepare("SELECT id FROM empresas_configuracion WHERE empresa_id = ?");
         $check->execute([$empresaId]);
@@ -483,7 +492,8 @@ class EmpresaRepository {
 
         if (array_key_exists('numero_cuenta', $data)) {
             $fields[] = "numero_cuenta = ?";
-            $params[] = $data['numero_cuenta'] ?: null;
+            $plainNumeroCuenta = isset($data['numero_cuenta']) ? trim((string) $data['numero_cuenta']) : '';
+            $params[] = $plainNumeroCuenta !== '' ? encryptSensitiveData($plainNumeroCuenta) : null;
         }
 
         if (array_key_exists('titular_cuenta', $data)) {

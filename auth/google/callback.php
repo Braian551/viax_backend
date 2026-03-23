@@ -10,6 +10,7 @@
  */
 
 require_once '../../config/config.php';
+require_once '../../services/EmailService.php';
 
 // Cargar configuración de Google OAuth
 $googleConfig = require_once '../../config/google_oauth.php';
@@ -186,6 +187,16 @@ try {
         registerDevice($db, $userId, $input['device_uuid']);
     }
     
+    // Enviar bienvenida para nuevos usuarios Google (no bloquear login si falla)
+    if ($isNewUser) {
+        try {
+            $emailService = new EmailService($db);
+            $emailService->sendWelcomeEmail($email);
+        } catch (Throwable $welcomeError) {
+            error_log('Google callback welcome email error: ' . $welcomeError->getMessage());
+        }
+    }
+
     // Respuesta exitosa
     sendJsonResponse(true, $isNewUser ? 'Registro exitoso con Google' : 'Inicio de sesión exitoso con Google', [
         'user' => $user,

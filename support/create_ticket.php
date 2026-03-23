@@ -28,6 +28,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/_support_auth.php';
 
 try {
     $database = new Database();
@@ -41,24 +42,47 @@ try {
     $asunto = isset($data['asunto']) ? trim($data['asunto']) : '';
     $descripcion = isset($data['descripcion']) ? trim($data['descripcion']) : null;
     $viaje_id = isset($data['viaje_id']) ? intval($data['viaje_id']) : null;
+    $prioridad = isset($data['prioridad']) ? trim((string) $data['prioridad']) : 'normal';
     
     // Validaciones
     if ($usuario_id <= 0) {
-        http_response_code(400);
-        echo json_encode(['success' => false, 'error' => 'usuario_id es requerido']);
-        exit();
+        supportJsonError('usuario_id es requerido', 400);
     }
     
     if ($categoria_id <= 0) {
-        http_response_code(400);
-        echo json_encode(['success' => false, 'error' => 'categoria_id es requerido']);
-        exit();
+        supportJsonError('categoria_id es requerido', 400);
     }
     
     if (empty($asunto)) {
-        http_response_code(400);
-        echo json_encode(['success' => false, 'error' => 'asunto es requerido']);
-        exit();
+        supportJsonError('asunto es requerido', 400);
+    }
+
+    $allowedPriorities = ['baja', 'normal', 'alta', 'urgente'];
+    if (!in_array($prioridad, $allowedPriorities, true)) {
+        supportJsonError('prioridad no válida', 400);
+    }
+
+    $actor = supportGetActor($conn, $usuario_id);
+    if (!$actor) {
+        supportJsonError('Usuario no encontrado', 404);
+    }
+
+    // Control anti-spam: máximo 5 tickets abiertos y evitar duplicado exacto en 5 minutos.
+    $openStmt = $conn->prepare("SELECT COUNT(*) FROM tickets_soporte WHERE usuario_id = :usuario_id AND estado IN ('abierto','en_progreso','esperando_usuario')");
+    $openStmt->bindValue(':usuario_id', $usuario_id, PDO::PARAM_INT);
+    $openStmt->execute();
+    $openCount = (int) $openStmt->fetchColumn();
+    if ($openCount >= 5) {
+        supportJsonError('Ya tienes demasiados tickets abiertos. Espera respuesta o cierra uno antes de crear otro.', 429);
+    }
+
+    $dupStmt = $conn->prepare("\n        SELECT id\n        FROM tickets_soporte\n        WHERE usuario_id = :usuario_id\n          AND categoria_id = :categoria_id\n          AND LOWER(asunto) = LOWER(:asunto)\n          AND created_at > NOW() - INTERVAL '5 minutes'\n        LIMIT 1\n    ");
+    $dupStmt->bindValue(':usuario_id', $usuario_id, PDO::PARAM_INT);
+    $dupStmt->bindValue(':categoria_id', $categoria_id, PDO::PARAM_INT);
+    $dupStmt->bindValue(':asunto', $asunto);
+    $dupStmt->execute();
+    if ($dupStmt->fetch(PDO::FETCH_ASSOC)) {
+        supportJsonError('Ya existe un ticket reciente con este asunto. Evita enviar duplicados.', 409);
     }
     
     // Generar número de ticket temporal (se actualizará por trigger)
@@ -66,9 +90,9 @@ try {
     
     // Insertar ticket
     $query = "
-        INSERT INTO tickets_soporte (numero_ticket, usuario_id, categoria_id, asunto, descripcion, viaje_id)
-        VALUES (:numero_ticket, :usuario_id, :categoria_id, :asunto, :descripcion, :viaje_id)
-        RETURNING id, numero_ticket
+        INSERT INTO tickets_soporte (numero_ticket, usuario_id, categoria_id, asunto, descripcion, viaje_id, prioridad)
+        VALUES (:numero_ticket, :usuario_id, :categoria_id, :asunto, :descripcion, :viaje_id, :prioridad)
+        RETURNING id, numero_ticket, prioridad
     ";
     
     $stmt = $conn->prepare($query);
@@ -78,11 +102,46 @@ try {
     $stmt->bindValue(':asunto', $asunto);
     $stmt->bindValue(':descripcion', $descripcion);
     $stmt->bindValue(':viaje_id', $viaje_id, $viaje_id ? PDO::PARAM_INT : PDO::PARAM_NULL);
+    $stmt->bindValue(':prioridad', $prioridad);
     $stmt->execute();
     
     $result = $stmt->fetch(PDO::FETCH_ASSOC);
     $ticket_id = $result['id'];
     $numero_ticket = $result['numero_ticket'];
+
+    supportInsertTicketLog(
+        $conn,
+        (int) $ticket_id,
+        $usuario_id,
+        'ticket_creado',
+        [
+            'estado_nuevo' => 'abierto',
+            'prioridad_nueva' => $prioridad,
+            'metadata' => [
+                'categoria_id' => $categoria_id,
+                'viaje_id' => $viaje_id,
+            ],
+        ]
+    );
+
+    $creatorName = supportActorDisplayName($actor);
+    $agentsToNotify = supportAgentIds($conn, $usuario_id);
+    foreach ($agentsToNotify as $agentId) {
+        supportNotifyUser(
+            $agentId,
+            'Nuevo ticket de soporte',
+            $creatorName . ' abrio el ticket ' . $numero_ticket . ': ' . $asunto,
+            (int) $ticket_id,
+            [
+                'module' => 'support',
+                'action' => 'ticket_created',
+                'ticket_id' => (int) $ticket_id,
+                'numero_ticket' => $numero_ticket,
+                'prioridad' => $prioridad,
+                'usuario_id' => $usuario_id,
+            ]
+        );
+    }
     
     // Si hay descripción, crear el primer mensaje
     if (!empty($descripcion)) {
@@ -104,7 +163,8 @@ try {
             'id' => $ticket_id,
             'numero_ticket' => $numero_ticket,
             'asunto' => $asunto,
-            'estado' => 'abierto'
+            'estado' => 'abierto',
+            'prioridad' => $prioridad
         ]
     ]);
     

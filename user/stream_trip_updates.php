@@ -43,7 +43,7 @@ require_once __DIR__ . '/../config/app.php';
 
 function parseWaitSeconds($rawValue): int {
     $value = intval($rawValue ?? 25);
-    if ($value < 10) return 10;
+    if ($value < 1) return 1;
     if ($value > 60) return 60;
     return $value;
 }
@@ -110,9 +110,10 @@ try {
     }
 
     $deadline = microtime(true) + $waitSeconds;
-    $heartbeatEvery = 20;
+    $heartbeatEvery = 15;
     $nextHeartbeat = microtime(true) + $heartbeatEvery;
     $lastSignature = $sinceSignature;
+    $lastRealtimeEmitAt = 0.0;
 
     sendEvent('connected', [
         'success' => true,
@@ -136,6 +137,12 @@ try {
             ]));
 
             if ($signature !== $lastSignature) {
+                $now = microtime(true);
+                if (($now - $lastRealtimeEmitAt) < 1.0) {
+                    usleep(150000);
+                    continue;
+                }
+
                 $payload = [
                     'success' => true,
                     'trip_id' => $tripId,
@@ -156,16 +163,55 @@ try {
                 ];
 
                 sendEvent('trip_update', $payload);
+                sendEvent('driver_location', [
+                    'trip_id' => $tripId,
+                    'lat' => isset($state['lat']) ? floatval($state['lat']) : null,
+                    'lng' => isset($state['lng']) ? floatval($state['lng']) : null,
+                    'bearing' => isset($state['heading']) ? floatval($state['heading']) : 0,
+                    'speed' => isset($state['speed']) ? floatval($state['speed']) : 0,
+                    'timestamp' => $state['timestamp'] ?? gmdate('c'),
+                ]);
+
+                $status = isset($state['fase']) ? (string)$state['fase'] : '';
+                if ($status !== '') {
+                    sendEvent('trip_status', [
+                        'trip_id' => $tripId,
+                        'status' => $status,
+                    ]);
+
+                    if ($status === 'conductor_llego') {
+                        sendEvent('driver_arrived', [
+                            'trip_id' => $tripId,
+                            'timestamp' => $state['timestamp'] ?? gmdate('c'),
+                        ]);
+                    }
+
+                    if ($status === 'recogido' || $status === 'en_curso') {
+                        sendEvent('trip_started', [
+                            'trip_id' => $tripId,
+                            'timestamp' => $state['timestamp'] ?? gmdate('c'),
+                        ]);
+                    }
+                }
+
+                if (isset($metrics['distance_km']) && isset($state['speed'])) {
+                    $speed = max(0.1, floatval($state['speed']));
+                    $remainingKm = max(0.0, floatval($metrics['remaining_km'] ?? 0));
+                    $etaMinutes = $remainingKm > 0 ? intval(round(($remainingKm / $speed) * 60)) : null;
+                    sendEvent('eta_update', [
+                        'trip_id' => $tripId,
+                        'eta_minutes' => $etaMinutes,
+                        'speed_kmh' => $speed,
+                    ]);
+                }
+
                 $lastSignature = $signature;
+                $lastRealtimeEmitAt = $now;
             }
         }
 
         if (microtime(true) >= $nextHeartbeat) {
-            sendEvent('keepalive', [
-                'success' => true,
-                'trip_id' => $tripId,
-                'server_time' => gmdate('c'),
-            ]);
+            sendEvent('ping', []);
             $nextHeartbeat = microtime(true) + $heartbeatEvery;
         }
 

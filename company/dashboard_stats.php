@@ -100,16 +100,34 @@ try {
     $stmt->execute();
     $conductores_stats = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    // 3. Ganancias (comisiones RECIBIDAS/COBRADAS de conductores)
-    // Se calcula sumando los pagos registrados en pagos_comision
-    $ganancias_sql = "SELECT 
-                       COALESCE(SUM(pc.monto), 0) as ganancias_empresa,
-                       COUNT(pc.id) as viajes_pagados
-                      FROM pagos_comision pc
-                      JOIN usuarios u ON pc.conductor_id = u.id
+    // 3. Ganancias netas de empresa:
+    //    comisión de conductores del período - comisión administrativa de plataforma.
+    //    Se calcula desde viajes finalizados (snapshot tracking) para evitar mostrar 0 cuando
+    //    hay viajes comisionados pero aún no se han registrado pagos manuales.
+    $precioBaseExpr = "COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(ss.precio_final, 0), ss.precio_estimado, 0)";
+    $trackingPctExpr = "NULLIF(vrt.comision_plataforma_porcentaje, 0)";
+    $comisionDesdeGananciaExpr = "CASE
+        WHEN ($trackingPctExpr) IS NULL OR ($trackingPctExpr) >= 100 THEN 0
+        ELSE COALESCE(vrt.ganancia_conductor, 0) * (($trackingPctExpr) / NULLIF(100 - ($trackingPctExpr), 0))
+    END";
+    $comisionExpr = "CASE
+        WHEN vrt.comision_plataforma_valor > 0 THEN vrt.comision_plataforma_valor
+        WHEN vrt.solicitud_id IS NOT NULL AND COALESCE(vrt.ganancia_conductor, 0) > 0 THEN $comisionDesdeGananciaExpr
+        WHEN vrt.solicitud_id IS NOT NULL AND ($trackingPctExpr) IS NOT NULL THEN ($precioBaseExpr) * (($trackingPctExpr) / 100)
+        ELSE 0
+    END";
+
+    $ganancias_sql = "SELECT
+                       COALESCE(SUM($comisionExpr), 0) as comision_conductores_bruta,
+                       COUNT(DISTINCT ss.id) as viajes_comisionados
+                      FROM solicitudes_servicio ss
+                      JOIN asignaciones_conductor ac ON ss.id = ac.solicitud_id
+                      JOIN usuarios u ON ac.conductor_id = u.id
+                      LEFT JOIN viaje_resumen_tracking vrt ON ss.id = vrt.solicitud_id
                       WHERE u.empresa_id = :empresa_id
-                      AND DATE(pc.fecha_pago) >= :fecha_inicio
-                      AND DATE(pc.fecha_pago) <= :fecha_fin";
+                      AND ss.estado IN ('completada', 'entregado')
+                      AND DATE(COALESCE(ss.completado_en, ss.solicitado_en, ss.fecha_creacion)) >= :fecha_inicio
+                      AND DATE(COALESCE(ss.completado_en, ss.solicitado_en, ss.fecha_creacion)) <= :fecha_fin";
     
     $stmt = $db->prepare($ganancias_sql);
     $stmt->bindParam(':empresa_id', $empresa_id, PDO::PARAM_INT);
@@ -167,7 +185,9 @@ try {
     }
 
     // Formatear ganancias para mostrar
-    $ganancias_formateadas = floatval($ganancias_stats['ganancias_empresa'] ?? 0);
+    $comisionBrutaConductores = floatval($ganancias_stats['comision_conductores_bruta'] ?? 0);
+    $comisionAdminMonto = ($comisionBrutaConductores * $comision_empresa) / 100;
+    $ganancias_formateadas = max(0, $comisionBrutaConductores - $comisionAdminMonto);
     if ($ganancias_formateadas >= 1000000) {
         $ganancias_display = '$' . round($ganancias_formateadas / 1000000, 1) . 'M';
     } elseif ($ganancias_formateadas >= 1000) {
@@ -204,8 +224,10 @@ try {
             'ganancias' => [
                 'total' => round($ganancias_formateadas, 2),
                 'display' => $ganancias_display,
-                'ingresos_brutos' => round(floatval($ganancias_stats['ingresos_totales'] ?? 0), 2),
-                'viajes_pagados' => intval($ganancias_stats['viajes_pagados']),
+                'ingresos_brutos' => round($comisionBrutaConductores, 2),
+                'comision_admin' => round($comisionAdminMonto, 2),
+                'ganancia_neta' => round($ganancias_formateadas, 2),
+                'viajes_pagados' => intval($ganancias_stats['viajes_comisionados'] ?? 0),
             ],
             'solicitudes_pendientes' => intval($solicitudes_pendientes),
             'calificacion' => [

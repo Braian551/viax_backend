@@ -207,6 +207,28 @@ function handleUpdatePricing($db, $input, $empresaId) {
             $exists = $stmtCheck->fetch();
             
             if ($exists) {
+                // Evita pisar valores con 0 cuando el frontend envía actualización parcial.
+                $stmtCurrent = $db->prepare("SELECT * FROM configuracion_precios WHERE id = ? LIMIT 1");
+                $stmtCurrent->execute([$exists['id']]);
+                $current = $stmtCurrent->fetch(PDO::FETCH_ASSOC) ?: [];
+
+                $tarifaBase = array_key_exists('tarifa_base', $precio) ? $precio['tarifa_base'] : ($current['tarifa_base'] ?? 0);
+                $costoPorKm = array_key_exists('costo_por_km', $precio) ? $precio['costo_por_km'] : ($current['costo_por_km'] ?? 0);
+                $costoPorMinuto = array_key_exists('costo_por_minuto', $precio) ? $precio['costo_por_minuto'] : ($current['costo_por_minuto'] ?? 0);
+                $tarifaMinima = array_key_exists('tarifa_minima', $precio) ? $precio['tarifa_minima'] : ($current['tarifa_minima'] ?? 0);
+                $tarifaMaxima = array_key_exists('tarifa_maxima', $precio) ? $precio['tarifa_maxima'] : ($current['tarifa_maxima'] ?? null);
+                $recargoHoraPico = array_key_exists('recargo_hora_pico', $precio) ? $precio['recargo_hora_pico'] : ($current['recargo_hora_pico'] ?? 0);
+                $recargoNocturno = array_key_exists('recargo_nocturno', $precio) ? $precio['recargo_nocturno'] : ($current['recargo_nocturno'] ?? 0);
+                $recargoFestivo = array_key_exists('recargo_festivo', $precio) ? $precio['recargo_festivo'] : ($current['recargo_festivo'] ?? 0);
+                $descuentoDistanciaLarga = array_key_exists('descuento_distancia_larga', $precio) ? $precio['descuento_distancia_larga'] : ($current['descuento_distancia_larga'] ?? 0);
+                $umbralKmDescuento = array_key_exists('umbral_km_descuento', $precio) ? $precio['umbral_km_descuento'] : ($current['umbral_km_descuento'] ?? 15);
+                $comisionPlataforma = array_key_exists('comision_plataforma', $precio) ? $precio['comision_plataforma'] : ($current['comision_plataforma'] ?? 0);
+                $distanciaMinima = array_key_exists('distancia_minima', $precio) ? $precio['distancia_minima'] : ($current['distancia_minima'] ?? 1);
+                $distanciaMaxima = array_key_exists('distancia_maxima', $precio) ? $precio['distancia_maxima'] : ($current['distancia_maxima'] ?? 50);
+                $tiempoEsperaGratis = array_key_exists('tiempo_espera_gratis', $precio) ? $precio['tiempo_espera_gratis'] : ($current['tiempo_espera_gratis'] ?? 3);
+                $costoTiempoEspera = array_key_exists('costo_tiempo_espera', $precio) ? $precio['costo_tiempo_espera'] : ($current['costo_tiempo_espera'] ?? 0);
+                $activo = array_key_exists('activo', $precio) ? $precio['activo'] : ($current['activo'] ?? 1);
+
                 // Update completo y canonización de tipo_vehiculo.
                 $sql = "UPDATE configuracion_precios SET 
                         tipo_vehiculo = ?,
@@ -232,23 +254,23 @@ function handleUpdatePricing($db, $input, $empresaId) {
                 $stmt = $db->prepare($sql);
                 $stmt->execute([
                     $tipo,
-                    $precio['tarifa_base'] ?? 0,
-                    $precio['costo_por_km'] ?? 0,
-                    $precio['costo_por_minuto'] ?? 0,
-                    $precio['tarifa_minima'] ?? 0,
-                    $precio['tarifa_maxima'] ?? null,
-                    $precio['recargo_hora_pico'] ?? 0,
-                    $precio['recargo_nocturno'] ?? 0,
-                    $precio['recargo_festivo'] ?? 0,
-                    $precio['descuento_distancia_larga'] ?? 0,
-                    $precio['umbral_km_descuento'] ?? 15,
-                    $precio['comision_plataforma'] ?? 0,
-                    $precio['comision_metodo_pago'] ?? 0,
-                    $precio['distancia_minima'] ?? 1,
-                    $precio['distancia_maxima'] ?? 50,
-                    $precio['tiempo_espera_gratis'] ?? 3,
-                    $precio['costo_tiempo_espera'] ?? 0,
-                    $precio['activo'] ?? 1,
+                    $tarifaBase,
+                    $costoPorKm,
+                    $costoPorMinuto,
+                    $tarifaMinima,
+                    $tarifaMaxima,
+                    $recargoHoraPico,
+                    $recargoNocturno,
+                    $recargoFestivo,
+                    $descuentoDistanciaLarga,
+                    $umbralKmDescuento,
+                    $comisionPlataforma,
+                    0,
+                    $distanciaMinima,
+                    $distanciaMaxima,
+                    $tiempoEsperaGratis,
+                    $costoTiempoEspera,
+                    $activo,
                     $exists['id']
                 ]);
             } else {
@@ -274,7 +296,7 @@ function handleUpdatePricing($db, $input, $empresaId) {
                     $precio['descuento_distancia_larga'] ?? 0,
                     $precio['umbral_km_descuento'] ?? 15,
                     $precio['comision_plataforma'] ?? 0,
-                    $precio['comision_metodo_pago'] ?? 0,
+                    0,
                     $precio['distancia_minima'] ?? 1,
                     $precio['distancia_maxima'] ?? 50,
                     $precio['tiempo_espera_gratis'] ?? 3,
@@ -361,7 +383,7 @@ function buildFallbackPricingForActiveVehicle($mergedPricing, $activeType) {
     $base['descuento_distancia_larga'] = $base['descuento_distancia_larga'] ?? 0;
     $base['umbral_km_descuento'] = $base['umbral_km_descuento'] ?? 15;
     $base['comision_plataforma'] = $base['comision_plataforma'] ?? 0;
-    $base['comision_metodo_pago'] = $base['comision_metodo_pago'] ?? 0;
+    $base['comision_metodo_pago'] = 0;
     $base['distancia_minima'] = $base['distancia_minima'] ?? 1;
     $base['distancia_maxima'] = $base['distancia_maxima'] ?? 50;
     $base['tiempo_espera_gratis'] = $base['tiempo_espera_gratis'] ?? 3;

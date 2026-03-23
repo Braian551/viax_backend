@@ -14,6 +14,8 @@ header('Access-Control-Allow-Methods: GET, POST, PUT, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Accept');
 
 require_once '../config/database.php';
+require_once '../utils/NotificationHelper.php';
+require_once '../utils/Mailer.php';
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
@@ -142,7 +144,7 @@ function handlePost($db) {
     }
     
     // Verificar que el conductor existe y es tipo conductor
-    $checkConductorQuery = "SELECT id, tipo_usuario, empresa_id FROM usuarios WHERE id = :id";
+    $checkConductorQuery = "SELECT id, tipo_usuario, empresa_id, nombre, apellido, email FROM usuarios WHERE id = :id";
     $checkStmt = $db->prepare($checkConductorQuery);
     $checkStmt->bindParam(':id', $conductorId, PDO::PARAM_INT);
     $checkStmt->execute();
@@ -158,7 +160,7 @@ function handlePost($db) {
     }
     
     // Verificar que la empresa existe y está activa
-    $checkEmpresaQuery = "SELECT id, estado, nombre FROM empresas_transporte WHERE id = :id";
+    $checkEmpresaQuery = "SELECT id, estado, nombre, email, representante_email FROM empresas_transporte WHERE id = :id";
     $checkEmpresaStmt = $db->prepare($checkEmpresaQuery);
     $checkEmpresaStmt->bindParam(':id', $empresaId, PDO::PARAM_INT);
     $checkEmpresaStmt->execute();
@@ -199,6 +201,67 @@ function handlePost($db) {
     $insertStmt->execute();
     
     $solicitudId = $insertStmt->fetchColumn();
+
+    $conductorNombre = trim(($conductor['nombre'] ?? '') . ' ' . ($conductor['apellido'] ?? ''));
+    if ($conductorNombre === '') {
+        $conductorNombre = 'Conductor #' . $conductorId;
+    }
+
+    // Notificar a usuarios de la empresa destino (in-app + push nativo via NotificationHelper).
+    try {
+        $stmtEmpresaUsers = $db->prepare("SELECT id FROM usuarios WHERE empresa_id = :empresa_id AND tipo_usuario = 'empresa'");
+        $stmtEmpresaUsers->execute([':empresa_id' => $empresaId]);
+        $empresaUsers = $stmtEmpresaUsers->fetchAll(PDO::FETCH_COLUMN) ?: [];
+
+        foreach ($empresaUsers as $empresaUserId) {
+            NotificationHelper::crear(
+                intval($empresaUserId),
+                'company_driver_application_submitted',
+                'Nueva solicitud de conductor',
+                $conductorNombre . ' solicitó vincularse a tu empresa.',
+                'conductor_solicitud',
+                intval($solicitudId),
+                [
+                    'solicitud_id' => intval($solicitudId),
+                    'empresa_id' => $empresaId,
+                    'conductor_id' => $conductorId,
+                    'conductor_nombre' => $conductorNombre,
+                    'conductor_email' => $conductor['email'] ?? null,
+                ]
+            );
+        }
+    } catch (Throwable $notifyError) {
+        error_log('Error notificando empresa por solicitud de conductor: ' . $notifyError->getMessage());
+    }
+
+    // Enviar correo usando plantilla base del Mailer a contactos de la empresa.
+    try {
+        $emailPrincipal = trim((string)($empresa['email'] ?? ''));
+        $emailRepresentante = trim((string)($empresa['representante_email'] ?? ''));
+
+        $destinatarios = [];
+        if ($emailRepresentante !== '') {
+            $destinatarios[] = $emailRepresentante;
+        }
+        if ($emailPrincipal !== '' && strcasecmp($emailPrincipal, $emailRepresentante) !== 0) {
+            $destinatarios[] = $emailPrincipal;
+        }
+
+        $asunto = 'Nueva solicitud de conductor - ' . ($empresa['nombre'] ?? 'Empresa');
+        $mensaje = $conductorNombre . ' solicitó vincularse a tu empresa. ' .
+            'Ingresa al módulo de Documentos de Conductores para revisar y aprobar/rechazar la solicitud.';
+
+        foreach ($destinatarios as $emailDestino) {
+            Mailer::sendEmail(
+                $emailDestino,
+                $empresa['nombre'] ?? 'Empresa',
+                $asunto,
+                $mensaje
+            );
+        }
+    } catch (Throwable $mailError) {
+        error_log('Error enviando correo a empresa por solicitud de conductor: ' . $mailError->getMessage());
+    }
     
     echo json_encode([
         'success' => true,

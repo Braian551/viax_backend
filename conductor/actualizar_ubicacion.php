@@ -16,6 +16,7 @@ header('Access-Control-Allow-Headers: Content-Type, Accept');
 
 require_once __DIR__ . '/../config/app.php';
 require_once __DIR__ . '/../services/driver_service.php';
+require_once __DIR__ . '/driver_auth.php';
 
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
     http_response_code(200);
@@ -101,6 +102,13 @@ try {
     if ($conductorId <= 0) {
         throw new Exception('ID de conductor inválido');
     }
+
+    // Validación de sesión (modo compatible para no romper clientes legacy).
+    $sessionToken = driverSessionTokenFromRequest($input);
+    $session = validateDriverSession($conductorId, $sessionToken, false);
+    if (!$session['ok']) {
+        throw new Exception($session['message']);
+    }
     if ($latitud === null || $longitud === null) {
         throw new Exception('Latitud y longitud son requeridas');
     }
@@ -110,6 +118,7 @@ try {
 
     // Escritura rápida en cache (camino crítico realtime).
     writeLocationToRedis($conductorId, $latitud, $longitud, $velocidad);
+    DriverGeoService::touchDriverHeartbeat($conductorId, 20);
     DriverGeoService::setDriverState($conductorId, 'available');
 
     // Persistencia periódica en BD para descargar I/O.
@@ -141,6 +150,22 @@ try {
             $stmtInsert->bindParam(':latitud', $latitud);
             $stmtInsert->bindParam(':longitud', $longitud);
             $stmtInsert->execute();
+        }
+
+        try {
+            $gridId = DriverGeoService::gridIdForCoordinates($latitud, $longitud);
+            $cityId = DriverGeoService::getCityIdFromCoordinates($latitud, $longitud);
+            $stmtLive = $db->prepare("\n                INSERT INTO drivers_live_location (\n                    conductor_id, lat, lng, speed_kmh, grid_id, city_id, source, updated_at\n                ) VALUES (\n                    :conductor_id, :lat, :lng, :speed_kmh, :grid_id, :city_id, 'heartbeat', NOW()\n                )\n                ON CONFLICT (conductor_id) DO UPDATE SET\n                    lat = EXCLUDED.lat,\n                    lng = EXCLUDED.lng,\n                    speed_kmh = EXCLUDED.speed_kmh,\n                    grid_id = EXCLUDED.grid_id,\n                    city_id = EXCLUDED.city_id,\n                    source = EXCLUDED.source,\n                    updated_at = NOW()\n            ");
+            $stmtLive->execute([
+                ':conductor_id' => $conductorId,
+                ':lat' => $latitud,
+                ':lng' => $longitud,
+                ':speed_kmh' => $velocidad,
+                ':grid_id' => $gridId,
+                ':city_id' => $cityId,
+            ]);
+        } catch (Throwable $e) {
+            error_log('actualizar_ubicacion.php drivers_live_location warning: ' . $e->getMessage());
         }
 
         // Importante: este endpoint SOLO actualiza ubicación del conductor.

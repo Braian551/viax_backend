@@ -29,6 +29,8 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../services/driver_service.php';
+require_once __DIR__ . '/../../services/roads_snap_service.php';
+require_once __DIR__ . '/../../conductor/driver_auth.php';
 
 const TRACKING_STREAM_KEY = 'trip_tracking_stream';
 const TRACKING_GROUP = 'tracking_workers';
@@ -85,77 +87,91 @@ function decodeJsonSafe($raw): ?array {
     return is_array($decoded) ? $decoded : null;
 }
 
-function resolveGoogleMapsApiKey(): string {
-    $candidates = [
-        'GOOGLE_MAPS_API_KEY',
-        'GOOGLE_PLACES_API_KEY',
-        'GOOGLE_API_KEY',
+function normalizeTrackingVehicleType($tipoVehiculo): string {
+    $normalized = strtolower(trim((string)$tipoVehiculo));
+    $aliases = [
+        'moto_taxi' => 'mototaxi',
+        'moto taxi' => 'mototaxi',
+        'mototaxi' => 'mototaxi',
+        'motocarro' => 'mototaxi',
+        'moto_carga' => 'mototaxi',
+        'motorcycle' => 'moto',
+        'auto' => 'carro',
+        'automovil' => 'carro',
+        'car' => 'carro',
     ];
 
-    foreach ($candidates as $name) {
-        $value = trim((string) env_value($name, ''));
-        if ($value !== '') {
-            return $value;
-        }
+    if (isset($aliases[$normalized])) {
+        return $aliases[$normalized];
     }
 
-    return '';
+    return $normalized !== '' ? $normalized : 'moto';
 }
 
-function snapToRoadIfPossible($redis, float $lat, float $lng): array {
-    $key = 'gps_snap_cache:' . sha1(round($lat, 5) . ',' . round($lng, 5));
-    if ($redis) {
-        try {
-            $cached = $redis->get($key);
-            $decoded = decodeJsonSafe($cached);
-            if (is_array($decoded) && isset($decoded['lat'], $decoded['lng'])) {
-                return [floatval($decoded['lat']), floatval($decoded['lng']), 'cache'];
+function trackingPricingFallbackConfig(): array {
+    return [
+        'tarifa_base' => 0.0,
+        'costo_por_km' => 0.0,
+        'costo_por_minuto' => 0.0,
+        'tarifa_minima' => 0.0,
+        'tarifa_maxima' => null,
+        'umbral_km_descuento' => 15.0,
+        'descuento_distancia_larga' => 0.0,
+    ];
+}
+
+function fetchTrackingPricingConfig(PDO $db, ?int $empresaId, ?string $tipoVehiculoRaw): array {
+    $tipo = normalizeTrackingVehicleType($tipoVehiculoRaw ?? 'moto');
+    $tiposCandidatos = array_values(array_unique([$tipo, 'moto']));
+
+    foreach ($tiposCandidatos as $tipoCandidato) {
+        if (!empty($empresaId) && $empresaId > 0) {
+            $stmt = $db->prepare("\n                SELECT
+                    tarifa_base,
+                    costo_por_km,
+                    costo_por_minuto,
+                    tarifa_minima,
+                    tarifa_maxima,
+                    umbral_km_descuento,
+                    descuento_distancia_larga
+                FROM configuracion_precios
+                WHERE empresa_id = :empresa_id
+                  AND tipo_vehiculo = :tipo
+                  AND activo = 1
+                LIMIT 1
+            ");
+            $stmt->execute([
+                ':empresa_id' => (int)$empresaId,
+                ':tipo' => $tipoCandidato,
+            ]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (is_array($row) && !empty($row)) {
+                return $row;
             }
-        } catch (Throwable $e) {
-            // Fallback silencioso.
+        }
+
+        $stmt = $db->prepare("\n            SELECT
+                tarifa_base,
+                costo_por_km,
+                costo_por_minuto,
+                tarifa_minima,
+                tarifa_maxima,
+                umbral_km_descuento,
+                descuento_distancia_larga
+            FROM configuracion_precios
+            WHERE empresa_id IS NULL
+              AND tipo_vehiculo = :tipo
+              AND activo = 1
+            LIMIT 1
+        ");
+        $stmt->execute([':tipo' => $tipoCandidato]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (is_array($row) && !empty($row)) {
+            return $row;
         }
     }
 
-    $apiKey = resolveGoogleMapsApiKey();
-    if ($apiKey === '') {
-        return [$lat, $lng, 'raw_no_key'];
-    }
-
-    $url = 'https://roads.googleapis.com/v1/snapToRoads?path=' .
-        rawurlencode($lat . ',' . $lng) .
-        '&interpolate=false&key=' . rawurlencode($apiKey);
-
-    $ctx = stream_context_create([
-        'http' => [
-            'method' => 'GET',
-            'timeout' => 1.2,
-            'ignore_errors' => true,
-        ],
-    ]);
-
-    $raw = @file_get_contents($url, false, $ctx);
-    $decoded = decodeJsonSafe($raw);
-    $snapped = $decoded['snappedPoints'][0]['location'] ?? null;
-    if (!is_array($snapped) || !isset($snapped['latitude'], $snapped['longitude'])) {
-        return [$lat, $lng, 'raw_api_fail'];
-    }
-
-    $snapLat = floatval($snapped['latitude']);
-    $snapLng = floatval($snapped['longitude']);
-
-    if ($redis) {
-        try {
-            $redis->setex($key, 86400, json_encode([
-                'lat' => $snapLat,
-                'lng' => $snapLng,
-                'source' => 'google_roads',
-            ], JSON_UNESCAPED_UNICODE));
-        } catch (Throwable $e) {
-            // Cache secundaria.
-        }
-    }
-
-    return [$snapLat, $snapLng, 'roads_api'];
+    return trackingPricingFallbackConfig();
 }
 
 function readMetrics($redis, string $metricsKey): array {
@@ -214,6 +230,38 @@ function ensureTrackingConsumerGroup($redis): void {
     }
 }
 
+function upsertDriverLiveLocationSnapshot(int $conductorId, float $lat, float $lng, ?float $speedKmh, string $source = 'tracking'): void
+{
+    $throttleKey = 'driver_live_location:last_db:' . $conductorId;
+    $lastPersist = intval(Cache::get($throttleKey) ?? 0);
+    $now = time();
+    if ($lastPersist > 0 && ($now - $lastPersist) < 5) {
+        return;
+    }
+
+    try {
+        $gridId = DriverGeoService::gridIdForCoordinates($lat, $lng);
+        $cityId = DriverGeoService::getCityIdFromCoordinates($lat, $lng);
+
+        $database = new Database();
+        $db = $database->getConnection();
+        $stmt = $db->prepare("\n            INSERT INTO drivers_live_location (\n                conductor_id, lat, lng, speed_kmh, grid_id, city_id, source, updated_at\n            ) VALUES (\n                :conductor_id, :lat, :lng, :speed_kmh, :grid_id, :city_id, :source, NOW()\n            )\n            ON CONFLICT (conductor_id) DO UPDATE SET\n                lat = EXCLUDED.lat,\n                lng = EXCLUDED.lng,\n                speed_kmh = EXCLUDED.speed_kmh,\n                grid_id = EXCLUDED.grid_id,\n                city_id = EXCLUDED.city_id,\n                source = EXCLUDED.source,\n                updated_at = NOW()\n        ");
+        $stmt->execute([
+            ':conductor_id' => $conductorId,
+            ':lat' => $lat,
+            ':lng' => $lng,
+            ':speed_kmh' => $speedKmh,
+            ':grid_id' => $gridId,
+            ':city_id' => $cityId,
+            ':source' => $source,
+        ]);
+
+        Cache::set($throttleKey, (string)$now, 10);
+    } catch (Throwable $e) {
+        error_log('drivers_live_location upsert warning: ' . $e->getMessage());
+    }
+}
+
 try {
     $input = json_decode(file_get_contents('php://input'), true);
     if (!is_array($input)) {
@@ -233,6 +281,14 @@ try {
         throw new Exception('trip_id y conductor_id son requeridos');
     }
 
+    // Validación de sesión para bloquear tracking de conductores fantasma.
+    $sessionToken = driverSessionTokenFromRequest($input);
+    $session = validateDriverSession($conductorId, $sessionToken, false);
+    if (!$session['ok']) {
+        throw new Exception($session['message']);
+    }
+    DriverGeoService::touchDriverHeartbeat($conductorId, 20);
+
     if (!is_finite($lat) || !is_finite($lng) || $lat < -90 || $lat > 90 || $lng < -180 || $lng > 180) {
         throw new Exception('Coordenadas inválidas');
     }
@@ -242,9 +298,10 @@ try {
         $redis->incr('metrics:tracking_updates');
     }
 
-    [$lat, $lng, $snapSource] = snapToRoadIfPossible($redis, $lat, $lng);
+    [$lat, $lng, $snapSource] = RoadsSnapService::snapDriverPoint($redis, $tripId, $conductorId, $lat, $lng);
     DriverGeoService::upsertDriverLocation($conductorId, $lat, $lng, $speedKmhInput);
     DriverGeoService::setDriverState($conductorId, 'on_trip');
+    upsertDriverLiveLocationSnapshot($conductorId, $lat, $lng, $speedKmhInput, 'tracking');
 
     $now = time();
     $ttlSec = 7200;
@@ -279,16 +336,38 @@ try {
         }
     }
 
-    if ($plannedRouteKm <= 0) {
-        try {
-            $database = new Database();
-            $db = $database->getConnection();
-            $stmt = $db->prepare('SELECT distancia_estimada FROM solicitudes_servicio WHERE id = :id LIMIT 1');
-            $stmt->execute([':id' => $tripId]);
-            $plannedRouteKm = floatval($stmt->fetchColumn() ?: 0);
-        } catch (Throwable $e) {
-            $plannedRouteKm = 0.0;
+    $estimatedTimeMin = isset($existing['estimated_time_min']) ? intval($existing['estimated_time_min']) : 0;
+    $estimatedPrice = isset($existing['estimated_price']) ? floatval($existing['estimated_price']) : 0.0;
+    $empresaId = null;
+    $tipoVehiculo = 'moto';
+    $db = null;
+
+    try {
+        $database = new Database();
+        $db = $database->getConnection();
+        $stmt = $db->prepare('SELECT distancia_estimada, tiempo_estimado, precio_estimado, empresa_id, tipo_vehiculo FROM solicitudes_servicio WHERE id = :id LIMIT 1');
+        $stmt->execute([':id' => $tripId]);
+        $tripRow = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (is_array($tripRow)) {
+            if ($plannedRouteKm <= 0) {
+                $plannedRouteKm = floatval($tripRow['distancia_estimada'] ?? 0);
+            }
+            if ($estimatedTimeMin <= 0) {
+                $estimatedTimeMin = intval($tripRow['tiempo_estimado'] ?? 0);
+            }
+            if ($estimatedPrice <= 0) {
+                $estimatedPrice = floatval($tripRow['precio_estimado'] ?? 0);
+            }
+            if (isset($tripRow['empresa_id'])) {
+                $empresaId = intval($tripRow['empresa_id']);
+            }
+            if (!empty($tripRow['tipo_vehiculo'])) {
+                $tipoVehiculo = (string)$tripRow['tipo_vehiculo'];
+            }
         }
+    } catch (Throwable $e) {
+        $plannedRouteKm = max(0.0, $plannedRouteKm);
+        $db = null;
     }
 
     $deltaSec = 0;
@@ -370,6 +449,80 @@ try {
     $avgSpeed = $elapsedSec > 0 ? round(($distanceTotalKm * 3600) / $elapsedSec, 2) : 0.0;
     $isoTs = gmdate('c', $timestampSec);
 
+    // Progreso del viaje (solo para suavizar ajuste de tarifa mínima en vivo).
+    $distanceRatio = $plannedRouteKm > 0.0 ? ($distanceTotalKm / max(0.1, $plannedRouteKm)) : 0.0;
+    $timeRatio = $estimatedTimeMin > 0 ? ($elapsedSec / max(60.0, $estimatedTimeMin * 60.0)) : 0.0;
+    $progress = max($distanceRatio, $timeRatio);
+    $progress = min(1.0, max(0.0, $progress));
+
+    $currentPrice = 0.0;
+    if ($db instanceof PDO) {
+        try {
+            $pricingConfig = fetchTrackingPricingConfig(
+                $db,
+                $empresaId !== null ? intval($empresaId) : null,
+                $tipoVehiculo
+            );
+
+            $tarifaBase = max(0.0, floatval($pricingConfig['tarifa_base'] ?? 0));
+            $costoPorKm = max(0.0, floatval($pricingConfig['costo_por_km'] ?? 0));
+            $costoPorMinuto = max(0.0, floatval($pricingConfig['costo_por_minuto'] ?? 0));
+            $tarifaMinima = max(0.0, floatval($pricingConfig['tarifa_minima'] ?? 0));
+            $tarifaMaxima = isset($pricingConfig['tarifa_maxima']) ? floatval($pricingConfig['tarifa_maxima']) : 0.0;
+            $umbralDescuentoKm = max(0.0, floatval($pricingConfig['umbral_km_descuento'] ?? 0));
+            $descuentoDistanciaLargaPct = max(0.0, floatval($pricingConfig['descuento_distancia_larga'] ?? 0));
+
+            $precioDistancia = $distanceTotalKm * $costoPorKm;
+            $precioTiempo = ($elapsedSec / 60.0) * $costoPorMinuto;
+            $subtotal = $tarifaBase + $precioDistancia + $precioTiempo;
+
+            if ($umbralDescuentoKm > 0.0 && $distanceTotalKm >= $umbralDescuentoKm && $descuentoDistanciaLargaPct > 0.0) {
+                $subtotal -= ($subtotal * ($descuentoDistanciaLargaPct / 100.0));
+            }
+
+            $runningPrice = max(0.0, $subtotal);
+
+            // Tarifa mínima progresiva: evita salto brusco al final y conserva sensación de taxímetro.
+            if ($tarifaMinima > 0.0 && $runningPrice < $tarifaMinima) {
+                $minFloor = $tarifaBase + (($tarifaMinima - $tarifaBase) * $progress);
+                $runningPrice = max($runningPrice, $minFloor);
+            }
+
+            if ($tarifaMaxima > 0.0) {
+                $runningPrice = min($runningPrice, $tarifaMaxima);
+            }
+
+            $currentPrice = round($runningPrice, 2);
+        } catch (Throwable $e) {
+            // Fallback legacy si falla lectura de configuración.
+            if ($estimatedPrice > 0.0) {
+                $currentPrice = round($estimatedPrice * $progress, 2);
+            }
+        }
+    } elseif ($estimatedPrice > 0.0) {
+        $currentPrice = round($estimatedPrice * $progress, 2);
+    }
+
+    if ($db instanceof PDO) {
+        try {
+            $stmtPersist = $db->prepare("\n                UPDATE solicitudes_servicio
+                SET
+                    precio_en_tracking = :precio_en_tracking,
+                    distancia_recorrida = :distancia_recorrida,
+                    tiempo_transcurrido = :tiempo_transcurrido
+                WHERE id = :trip_id
+            ");
+            $stmtPersist->execute([
+                ':precio_en_tracking' => $currentPrice,
+                ':distancia_recorrida' => $distanceTotalKm,
+                ':tiempo_transcurrido' => $elapsedSec,
+                ':trip_id' => $tripId,
+            ]);
+        } catch (Throwable $e) {
+            // No bloquear tracking en vivo por error de persistencia secundaria.
+        }
+    }
+
     $statePayload = [
         'lat' => $lat,
         'lng' => $lng,
@@ -382,12 +535,14 @@ try {
         'distance_km' => $distanceTotalKm,
         'elapsed_time_sec' => $elapsedSec,
         'avg_speed_kmh' => $avgSpeed,
-        'price' => 0,
+        'price' => $currentPrice,
         'last_timestamp' => $isoTs,
         'last_ts' => $timestampSec,
         'last_lat' => $lat,
         'last_lng' => $lng,
         'planned_route_km' => round(max(0.0, $plannedRouteKm), 4),
+        'estimated_time_min' => max(0, $estimatedTimeMin),
+        'estimated_price' => max(0.0, $estimatedPrice),
     ];
 
     if ($redis) {
@@ -403,7 +558,7 @@ try {
             'longitud' => $lng,
             'distancia_km' => $distanceTotalKm,
             'tiempo_seg' => $elapsedSec,
-            'precio_parcial' => 0,
+            'precio_parcial' => $currentPrice,
             'fase_viaje' => 'hacia_destino',
             'timestamp' => $timestampSec,
         ], JSON_UNESCAPED_UNICODE), $ttlSec);
@@ -414,6 +569,13 @@ try {
             'speed' => $speedKmhInput,
             'timestamp' => $timestampSec,
         ], JSON_UNESCAPED_UNICODE), 30);
+        $redis->setex('drivers:location:' . $conductorId, 30, json_encode([
+            'lat' => $lat,
+            'lng' => $lng,
+            'bearing' => $heading,
+            'speed' => $speedKmhInput,
+            'timestamp' => $timestampSec,
+        ], JSON_UNESCAPED_UNICODE));
         Cache::sAdd('active_drivers', (string) $conductorId);
 
         // Publicación compacta para SSE/passenger.
@@ -423,7 +585,7 @@ try {
                 'ubicacion' => ['latitud' => $lat, 'longitud' => $lng],
                 'distancia_km' => $distanceTotalKm,
                 'tiempo_segundos' => $elapsedSec,
-                'precio_actual' => 0,
+                'precio_actual' => $currentPrice,
                 'velocidad_kmh' => $speedKmhInput,
                 'heading_deg' => $heading,
                 'fase' => 'hacia_destino',
@@ -461,6 +623,7 @@ try {
             'distance_km' => $distanceTotalKm,
             'elapsed_time_sec' => $elapsedSec,
             'avg_speed_kmh' => $avgSpeed,
+            'precio_parcial' => $currentPrice,
             'published' => $redis ? true : false,
             'queued' => $redis ? true : false,
             'stream' => TRACKING_STREAM_KEY,

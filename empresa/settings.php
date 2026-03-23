@@ -32,11 +32,6 @@ try {
     $rawInput = file_get_contents("php://input");
     $input = json_decode($rawInput, true);
     
-    // Debug Logging
-    $logFile = __DIR__ . '/settings_debug.log';
-    $logEntry = date('Y-m-d H:i:s') . " - Method: $method - Input: $rawInput\n";
-    file_put_contents($logFile, $logEntry, FILE_APPEND);
-
     // Fallback for $_REQUEST/$_POST
     if (empty($input)) {
         $input = $_REQUEST;
@@ -71,9 +66,7 @@ try {
     echo $controller->handleRequest($input);
 
 } catch (Throwable $e) {
-    if (isset($logFile)) {
-        file_put_contents($logFile, "FATAL ERROR: " . $e->getMessage() . "\n" . $e->getTraceAsString() . "\n", FILE_APPEND);
-    }
+    error_log('[empresa/settings] Error: ' . $e->getMessage());
     http_response_code(500);
     echo json_encode([
         "success" => false,

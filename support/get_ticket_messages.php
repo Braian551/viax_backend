@@ -19,32 +19,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/_support_auth.php';
 
 try {
     $database = new Database();
     $conn = $database->getConnection();
     
     $ticket_id = isset($_GET['ticket_id']) ? intval($_GET['ticket_id']) : 0;
-    $usuario_id = isset($_GET['usuario_id']) ? intval($_GET['usuario_id']) : 0;
-    
-    if ($ticket_id <= 0 || $usuario_id <= 0) {
-        http_response_code(400);
-        echo json_encode(['success' => false, 'error' => 'ticket_id y usuario_id son requeridos']);
-        exit();
+    $actor_id = supportResolveActorId($_GET);
+
+    if ($ticket_id <= 0 || $actor_id <= 0) {
+        supportJsonError('ticket_id y usuario_id/agente_id son requeridos', 400);
     }
-    
-    // Verificar que el ticket pertenece al usuario
-    $checkQuery = "SELECT id, numero_ticket, asunto, estado, prioridad, created_at FROM tickets_soporte WHERE id = :ticket_id AND usuario_id = :usuario_id";
+
+    $actor = supportGetActor($conn, $actor_id);
+    if (!$actor) {
+        supportJsonError('Actor no encontrado', 404);
+    }
+
+    // Verificar que el actor tenga permiso sobre el ticket
+    $checkQuery = "\n        SELECT id, numero_ticket, asunto, estado, prioridad, created_at, usuario_id, agente_id\n        FROM tickets_soporte\n        WHERE id = :ticket_id\n    ";
     $checkStmt = $conn->prepare($checkQuery);
     $checkStmt->bindValue(':ticket_id', $ticket_id, PDO::PARAM_INT);
-    $checkStmt->bindValue(':usuario_id', $usuario_id, PDO::PARAM_INT);
     $checkStmt->execute();
     $ticket = $checkStmt->fetch(PDO::FETCH_ASSOC);
-    
+
     if (!$ticket) {
-        http_response_code(404);
-        echo json_encode(['success' => false, 'error' => 'Ticket no encontrado']);
-        exit();
+        supportJsonError('Ticket no encontrado', 404);
+    }
+
+    $isOwner = ((int) $ticket['usuario_id'] === $actor_id);
+    $isAgent = (bool) $actor['es_agente_soporte'];
+    if (!$isOwner && !$isAgent) {
+        supportJsonError('No tienes permisos para ver este ticket', 403);
     }
     
     // Obtener mensajes
@@ -54,8 +61,11 @@ try {
             m.mensaje,
             m.es_agente,
             m.adjuntos,
+            m.leido,
             m.created_at,
-            u.nombre as remitente_nombre
+            u.nombre as remitente_nombre,
+            u.apellido as remitente_apellido,
+            u.tipo_usuario as remitente_tipo
         FROM mensajes_ticket m
         LEFT JOIN usuarios u ON m.remitente_id = u.id
         WHERE m.ticket_id = :ticket_id
@@ -71,20 +81,30 @@ try {
     // Formatear adjuntos
     foreach ($mensajes as &$msg) {
         $msg['es_agente'] = (bool) $msg['es_agente'];
+        $msg['leido'] = (bool) $msg['leido'];
         $msg['adjuntos'] = json_decode($msg['adjuntos'], true) ?? [];
     }
     
-    // Marcar mensajes de agente como leídos
+    // Marcar como leidos los mensajes del otro lado de la conversacion.
+    $markFromAgent = !$isAgent;
     $markReadQuery = "
         UPDATE mensajes_ticket 
         SET leido = TRUE, leido_en = CURRENT_TIMESTAMP 
-        WHERE ticket_id = :ticket_id AND es_agente = TRUE AND leido = FALSE
+        WHERE ticket_id = :ticket_id AND es_agente = :from_agent AND leido = FALSE
     ";
-    $conn->prepare($markReadQuery)->execute([':ticket_id' => $ticket_id]);
+    $markStmt = $conn->prepare($markReadQuery);
+    $markStmt->bindValue(':ticket_id', $ticket_id, PDO::PARAM_INT);
+    $markStmt->bindValue(':from_agent', $markFromAgent, PDO::PARAM_BOOL);
+    $markStmt->execute();
     
     echo json_encode([
         'success' => true,
         'ticket' => $ticket,
+        'actor' => [
+            'id' => (int) $actor['id'],
+            'tipo_usuario' => $actor['tipo_usuario'],
+            'es_agente_soporte' => $isAgent,
+        ],
         'mensajes' => $mensajes
     ]);
     

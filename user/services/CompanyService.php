@@ -1,5 +1,8 @@
 <?php
+require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
+require_once __DIR__ . '/../../services/driver_service.php';
+require_once __DIR__ . '/../../services/traffic_pricing.php';
 
 class CompanyService {
     private $db;
@@ -57,7 +60,22 @@ class CompanyService {
      * Obtiene empresas, vehículos disponibles y tarifas para un municipio
      */
     public function getCompaniesByMunicipality($municipio, $latitud, $longitud, $distanciaKm, $duracionMinutos, $radioKm = 10, $search = '') {
+        error_log('[CompanySearch] municipality_detected=' . $municipio);
         $empresas = $this->findOperatingCompanies($municipio, $search);
+
+        // Fallback por proximidad de conductores con radios escalonados.
+        if (empty($empresas)) {
+            $empresas = $this->findNearbyCompaniesByDriverRadius(
+                (float)$latitud,
+                (float)$longitud,
+                [5, 15, 30, 60],
+                $search
+            );
+
+            if (!empty($empresas)) {
+                error_log('[CompanySearch] companies_found=' . count($empresas));
+            }
+        }
         
         if (empty($empresas)) {
             return [
@@ -81,8 +99,150 @@ class CompanyService {
             $conductoresData, 
             $tarifasData, 
             $distanciaKm, 
-            $duracionMinutos
+            $duracionMinutos,
+            $latitud,
+            $longitud
         );
+    }
+
+    private function findNearbyCompaniesByDriverRadius($latitud, $longitud, $radiusStepsKm = [5, 15, 30, 60], $search = '') {
+        $searchQuery = "";
+        if (!empty($search)) {
+            $searchQuery = " AND (e.nombre ILIKE :search OR e.id::text ILIKE :search) ";
+        }
+
+        foreach ($radiusStepsKm as $radiusKm) {
+            error_log('[CompanySearch] fallback_radius=' . $radiusKm . 'km');
+
+            $query = "
+                SELECT
+                    e.id,
+                    e.nombre,
+                    e.logo_url,
+                    e.verificada,
+                    ec.municipio,
+                    COALESCE(ecf.zona_operacion, ARRAY[]::TEXT[]) as zona_operacion,
+                    (
+                        SELECT COALESCE(AVG(cal.calificacion), 0)
+                        FROM calificaciones cal
+                        JOIN usuarios u2 ON cal.usuario_calificado_id = u2.id
+                        WHERE u2.empresa_id = e.id
+                    ) as calificacion_promedio,
+                    MIN(
+                        ST_DistanceSphere(
+                            POINT(dc.longitud_actual, dc.latitud_actual),
+                            POINT(:lng, :lat)
+                        )
+                    ) AS distancia_m
+                FROM empresas_transporte e
+                LEFT JOIN empresas_contacto ec ON e.id = ec.empresa_id
+                LEFT JOIN empresas_configuracion ecf ON e.id = ecf.empresa_id
+                INNER JOIN usuarios u ON u.empresa_id = e.id
+                INNER JOIN detalles_conductor dc ON dc.usuario_id = u.id
+                WHERE e.estado = 'activo'
+                  AND e.verificada = true
+                  AND u.tipo_usuario = 'conductor'
+                  AND u.es_activo = 1
+                  AND dc.disponible = 1
+                  AND dc.estado_verificacion = 'aprobado'
+                  AND dc.latitud_actual IS NOT NULL
+                  AND dc.longitud_actual IS NOT NULL
+                  $searchQuery
+                GROUP BY e.id, e.nombre, e.logo_url, e.verificada, ec.municipio, ecf.zona_operacion
+                HAVING MIN(
+                    ST_DistanceSphere(
+                        POINT(dc.longitud_actual, dc.latitud_actual),
+                        POINT(:lng, :lat)
+                    )
+                ) <= :radius_m
+                ORDER BY distancia_m ASC
+                LIMIT 20
+            ";
+
+            $stmt = $this->conn->prepare($query);
+            $radiusMeters = (float)$radiusKm * 1000.0;
+            $stmt->bindParam(':lat', $latitud);
+            $stmt->bindParam(':lng', $longitud);
+            $stmt->bindParam(':radius_m', $radiusMeters);
+
+            if (!empty($search)) {
+                $searchTerm = "%$search%";
+                $stmt->bindParam(':search', $searchTerm);
+            }
+
+            try {
+                $stmt->execute();
+                $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                if (!empty($rows)) {
+                    return $rows;
+                }
+            } catch (Throwable $e) {
+                error_log('CompanyService proximity fallback error: ' . $e->getMessage());
+
+                $queryFallback = "
+                    SELECT
+                        e.id,
+                        e.nombre,
+                        e.logo_url,
+                        e.verificada,
+                        ec.municipio,
+                        COALESCE(ecf.zona_operacion, ARRAY[]::TEXT[]) as zona_operacion,
+                        (
+                            SELECT COALESCE(AVG(cal.calificacion), 0)
+                            FROM calificaciones cal
+                            JOIN usuarios u2 ON cal.usuario_calificado_id = u2.id
+                            WHERE u2.empresa_id = e.id
+                        ) as calificacion_promedio,
+                        MIN(
+                            6371000 * acos(
+                                cos(radians(:lat)) * cos(radians(dc.latitud_actual)) *
+                                cos(radians(dc.longitud_actual) - radians(:lng)) +
+                                sin(radians(:lat)) * sin(radians(dc.latitud_actual))
+                            )
+                        ) AS distancia_m
+                    FROM empresas_transporte e
+                    LEFT JOIN empresas_contacto ec ON e.id = ec.empresa_id
+                    LEFT JOIN empresas_configuracion ecf ON e.id = ecf.empresa_id
+                    INNER JOIN usuarios u ON u.empresa_id = e.id
+                    INNER JOIN detalles_conductor dc ON dc.usuario_id = u.id
+                    WHERE e.estado = 'activo'
+                      AND e.verificada = true
+                      AND u.tipo_usuario = 'conductor'
+                      AND u.es_activo = 1
+                      AND dc.disponible = 1
+                      AND dc.estado_verificacion = 'aprobado'
+                      AND dc.latitud_actual IS NOT NULL
+                      AND dc.longitud_actual IS NOT NULL
+                      $searchQuery
+                    GROUP BY e.id, e.nombre, e.logo_url, e.verificada, ec.municipio, ecf.zona_operacion
+                    HAVING MIN(
+                        6371000 * acos(
+                            cos(radians(:lat)) * cos(radians(dc.latitud_actual)) *
+                            cos(radians(dc.longitud_actual) - radians(:lng)) +
+                            sin(radians(:lat)) * sin(radians(dc.latitud_actual))
+                        )
+                    ) <= :radius_m
+                    ORDER BY distancia_m ASC
+                    LIMIT 20
+                ";
+                $fallbackStmt = $this->conn->prepare($queryFallback);
+                $radiusMeters = (float)$radiusKm * 1000.0;
+                $fallbackStmt->bindParam(':lat', $latitud);
+                $fallbackStmt->bindParam(':lng', $longitud);
+                $fallbackStmt->bindParam(':radius_m', $radiusMeters);
+                if (!empty($search)) {
+                    $searchTerm = "%$search%";
+                    $fallbackStmt->bindParam(':search', $searchTerm);
+                }
+                $fallbackStmt->execute();
+                $fallbackRows = $fallbackStmt->fetchAll(PDO::FETCH_ASSOC);
+                if (!empty($fallbackRows)) {
+                    return $fallbackRows;
+                }
+            }
+        }
+
+        return [];
     }
 
     private function findOperatingCompanies($municipio, $search = '') {
@@ -161,41 +321,8 @@ class CompanyService {
 
         error_log("CompanyService: Empresas encontradas con match exacto: " . count($empresas));
 
-        // Si no hay match exacto, buscar empresas que cubran "toda la región" o tengan cobertura amplia
-        if (empty($empresas)) {
-            error_log("CompanyService: No hay match exacto, buscando empresas con cobertura regional...");
-            
-            $queryRegional = "
-                SELECT DISTINCT e.id, e.nombre, e.logo_url, e.verificada, ec.municipio,
-                       COALESCE(ecf.zona_operacion, ARRAY[]::TEXT[]) as zona_operacion,
-                       (
-                           SELECT COALESCE(AVG(cal.calificacion), 0)
-                           FROM calificaciones cal
-                           JOIN usuarios u ON cal.usuario_calificado_id = u.id
-                           WHERE u.empresa_id = e.id
-                       ) as calificacion_promedio
-                FROM empresas_transporte e
-                LEFT JOIN empresas_contacto ec ON e.id = ec.empresa_id
-                LEFT JOIN empresas_configuracion ecf ON e.id = ecf.empresa_id
-                WHERE e.estado = 'activo' 
-                AND e.verificada = true
-                AND (
-                    -- Empresas con zona de operación que incluya 'todos' o 'antioquia' o 'regional'
-                    EXISTS (
-                        SELECT 1 FROM unnest(ecf.zona_operacion) AS zona 
-                        WHERE LOWER(zona) IN ('todos', 'all', 'antioquia', 'regional', 'toda la region')
-                    )
-                    -- O empresas en el mismo departamento (Antioquia)
-                    OR LOWER(ec.departamento) = 'antioquia'
-                )
-                LIMIT 10
-            ";
-            $stmt = $this->conn->prepare($queryRegional);
-            $stmt->execute();
-            $empresas = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            
-            error_log("CompanyService: Empresas encontradas con cobertura regional: " . count($empresas));
-        }
+        // Política de negocio: no devolver empresas de cobertura regional si no
+        // hay match por municipio/zona. Evita mostrar empresas muy lejanas.
 
         // Solo usar fallback si está en modo desarrollo y no hay ninguna empresa
         if (empty($empresas) && $this->isDevMode()) {
@@ -418,12 +545,17 @@ class CompanyService {
         return ['index' => $index, 'global' => $global];
     }
 
-    private function buildResponse($municipio, $empresas, $tiposPorEmpresa, $conductoresIndex, $tarifasData, $distanciaKm, $duracionMinutos) {
+    private function buildResponse($municipio, $empresas, $tiposPorEmpresa, $conductoresIndex, $tarifasData, $distanciaKm, $duracionMinutos, $latitud, $longitud) {
         $vehiculosDisponibles = [];
         $empresasEnriquecidas = [];
         $empresaRecomendadaId = null;
         $mejorDistancia = PHP_FLOAT_MAX;
         $horaActual = date('H:i:s');
+        $pickupEtaMin = null;
+
+        $gridId = DriverGeoService::gridIdForCoordinates((float)$latitud, (float)$longitud);
+        $surge = $this->resolveSurgeData($gridId);
+        $surgeMultiplier = $surge['multiplier'];
 
         $tarifasIndex = $tarifasData['index'];
         $tarifasGlobales = $tarifasData['global'];
@@ -452,7 +584,7 @@ class CompanyService {
                 if (!$tarifa) continue; // Skip if no pricing found
 
                 // Calculate price
-                $precio = $this->calculatePrice($tarifa, $distanciaKm, $duracionMinutos, $horaActual);
+                $precio = $this->calculatePrice($tarifa, $distanciaKm, $duracionMinutos, $horaActual, $surgeMultiplier);
                 
                 // Track driver stats (if drivers exist)
                 $hasConductor = $conductorData !== null;
@@ -479,6 +611,8 @@ class CompanyService {
                     'logo_url' => $this->convertLogoUrl($empresa['logo_url']),
                     'conductores' => $numConductores,
                     'distancia_conductor_km' => $distanciaConductor !== null ? round($distanciaConductor, 2) : null,
+                    'driver_distance' => $distanciaConductor !== null ? round($distanciaConductor, 2) : null,
+                    'pickup_eta_minutes' => $distanciaConductor !== null ? $this->estimatePickupEtaMinutes($distanciaConductor) : null,
                     'tarifa_total' => $precio['total'],
                     'tarifa_base' => $precio['tarifa_base'],
                     'costo_distancia' => $precio['costo_distancia'],
@@ -486,6 +620,8 @@ class CompanyService {
                     'recargo_precio' => $precio['recargo_precio'],
                     'periodo' => $precio['periodo'],
                     'recargo_porcentaje' => $precio['recargo_porcentaje'],
+                    'surge_multiplier' => $precio['surge_multiplier'],
+                    'company_fare' => $precio['company_fare'],
                     'calificacion' => isset($empresa['calificacion_promedio']) ? floatval($empresa['calificacion_promedio']) : 0.0
                 ];
             }
@@ -506,6 +642,10 @@ class CompanyService {
                 $mejorDistancia = $distanciaMinimaEmpresa;
                 $empresaRecomendadaId = $empresaId;
             }
+        }
+
+        if ($mejorDistancia < PHP_FLOAT_MAX) {
+            $pickupEtaMin = $this->estimatePickupEtaMinutes($mejorDistancia);
         }
 
         // Sort companies inside each vehicle type by distance (nearest first, nulls last)
@@ -539,12 +679,15 @@ class CompanyService {
             'total_empresas' => count($empresasEnriquecidas),
             'total_tipos_vehiculo' => count($vehiculosDisponibles),
             'total_conductores_cerca' => $totalConductoresCerca,
+            'surge_multiplier' => $surgeMultiplier,
+            'pickup_eta_minutes' => $pickupEtaMin,
+            'driver_distance' => $mejorDistancia < PHP_FLOAT_MAX ? round($mejorDistancia, 2) : null,
             'vehiculos_disponibles' => $vehiculosDisponibles,
             'empresas' => $empresasEnriquecidas
         ];
     }
 
-    private function calculatePrice($tarifa, $distanciaKm, $duracionMinutos, $horaActual) {
+    private function calculatePrice($tarifa, $distanciaKm, $duracionMinutos, $horaActual, $surgeMultiplier = 1.0) {
         $tarifaBase = floatval($tarifa['tarifa_base']);
         $precioDistancia = $distanciaKm * floatval($tarifa['costo_por_km']);
         $precioTiempo = $duracionMinutos * floatval($tarifa['costo_por_minuto']);
@@ -554,25 +697,53 @@ class CompanyService {
         $periodo = 'normal';
         $recargoPorcentaje = 0.0;
         
-        // Logic for peak/night hours could be extracted further, keeping it simple here
-        $h_pico_ini_m = $tarifa['hora_pico_inicio_manana'] ?? '07:00:00';
-        $h_pico_fin_m = $tarifa['hora_pico_fin_manana'] ?? '09:00:00';
-        $h_pico_ini_t = $tarifa['hora_pico_inicio_tarde'] ?? '17:00:00';
-        $h_pico_fin_t = $tarifa['hora_pico_fin_tarde'] ?? '19:00:00';
-        $h_noc_ini = $tarifa['hora_nocturna_inicio'] ?? '22:00:00';
-        $h_noc_fin = $tarifa['hora_nocturna_fin'] ?? '06:00:00';
-        
-        if (($horaActual >= $h_pico_ini_m && $horaActual <= $h_pico_fin_m) || 
-            ($horaActual >= $h_pico_ini_t && $horaActual <= $h_pico_fin_t)) {
-            $periodo = 'hora_pico';
-            $recargoPorcentaje = floatval($tarifa['recargo_hora_pico']);
-        } elseif ($horaActual >= $h_noc_ini || $horaActual <= $h_noc_fin) {
-            $periodo = 'nocturno';
-            $recargoPorcentaje = floatval($tarifa['recargo_nocturno']);
+        $h_pico_ini_m = $this->normalizeTimeWindowValue($tarifa['hora_pico_inicio_manana'] ?? null, '07:00:00');
+        $h_pico_fin_m = $this->normalizeTimeWindowValue($tarifa['hora_pico_fin_manana'] ?? null, '09:00:00');
+        $h_pico_ini_t = $this->normalizeTimeWindowValue($tarifa['hora_pico_inicio_tarde'] ?? null, '17:00:00');
+        $h_pico_fin_t = $this->normalizeTimeWindowValue($tarifa['hora_pico_fin_tarde'] ?? null, '19:00:00');
+        $h_noc_ini = $this->normalizeTimeWindowValue($tarifa['hora_nocturna_inicio'] ?? null, '21:00:00');
+        $h_noc_fin = $this->normalizeTimeWindowValue($tarifa['hora_nocturna_fin'] ?? null, '06:00:00');
+
+        $fechaColombia = function_exists('trafficNowInColombia')
+            ? trafficNowInColombia()
+            : new DateTime('now', new DateTimeZone('America/Bogota'));
+        $horaColombia = $this->resolveColombiaHour($horaActual, $fechaColombia);
+
+        $esPico = $this->isTimeWithinWindow($horaColombia, $h_pico_ini_m, $h_pico_fin_m)
+            || $this->isTimeWithinWindow($horaColombia, $h_pico_ini_t, $h_pico_fin_t);
+        $esNocturno = $this->isTimeWithinWindow($horaColombia, $h_noc_ini, $h_noc_fin);
+
+        $holidayMeta = [];
+        $esFestivoLegal = function_exists('trafficIsHolidayColombia')
+            ? trafficIsHolidayColombia($fechaColombia, $holidayMeta)
+            : false;
+        $esDominical = intval($fechaColombia->format('N')) === 7;
+        $aplicarDominicalComoFestivo = function_exists('trafficShouldApplySundayAsHoliday')
+            ? trafficShouldApplySundayAsHoliday()
+            : false;
+        $esFestivo = $esFestivoLegal || ($aplicarDominicalComoFestivo && $esDominical);
+
+        $periodosActivos = [];
+        if ($esNocturno) {
+            $recargoPorcentaje += floatval($tarifa['recargo_nocturno'] ?? 0);
+            $periodosActivos[] = 'nocturno';
+        }
+        if ($esPico) {
+            $recargoPorcentaje += floatval($tarifa['recargo_hora_pico'] ?? 0);
+            $periodosActivos[] = 'hora_pico';
+        }
+        if ($esFestivo) {
+            $recargoPorcentaje += floatval($tarifa['recargo_festivo'] ?? 0);
+            $periodosActivos[] = $esFestivoLegal ? 'festivo' : 'dominical';
+        }
+
+        if (!empty($periodosActivos)) {
+            $periodo = implode('+', $periodosActivos);
         }
         
         $recargoPrecio = $subtotal * ($recargoPorcentaje / 100);
-        $total = $subtotal + $recargoPrecio;
+        $companyFare = $subtotal + $recargoPrecio;
+        $total = $companyFare * max(1.0, (float)$surgeMultiplier);
         $tarifaMinima = floatval($tarifa['tarifa_minima']);
         
         if ($total < $tarifaMinima) $total = $tarifaMinima;
@@ -584,9 +755,86 @@ class CompanyService {
             'subtotal' => round($subtotal, 2),
             'recargo_porcentaje' => round($recargoPorcentaje, 2),
             'recargo_precio' => round($recargoPrecio, 0),
+            'company_fare' => round($companyFare, 0),
+            'surge_multiplier' => round((float)$surgeMultiplier, 2),
             'total' => round($total, 0),
             'periodo' => $periodo
         ];
+    }
+
+    private function resolveColombiaHour($horaActual, DateTime $fechaColombia): string {
+        $horaNormalizada = $this->normalizeTimeWindowValue($horaActual, $fechaColombia->format('H:i:s'));
+        [$h, $m, $s] = array_map('intval', explode(':', $horaNormalizada));
+        $fechaColombia->setTime($h, $m, $s);
+        return $fechaColombia->format('H:i:s');
+    }
+
+    private function normalizeTimeWindowValue($value, string $fallback): string {
+        $raw = trim((string)($value ?? ''));
+        if ($raw === '') {
+            return $fallback;
+        }
+
+        if (!preg_match('/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/', $raw, $matches)) {
+            return $fallback;
+        }
+
+        $hour = intval($matches[1]);
+        $minute = intval($matches[2]);
+        $second = isset($matches[3]) ? intval($matches[3]) : 0;
+
+        if ($hour < 0 || $hour > 23 || $minute < 0 || $minute > 59 || $second < 0 || $second > 59) {
+            return $fallback;
+        }
+
+        return sprintf('%02d:%02d:%02d', $hour, $minute, $second);
+    }
+
+    private function isTimeWithinWindow(string $horaActual, string $inicio, string $fin): bool {
+        $horaSec = function_exists('trafficTimeToSeconds')
+            ? trafficTimeToSeconds($horaActual)
+            : $this->timeToSecondsLocal($horaActual);
+        $inicioSec = function_exists('trafficTimeToSeconds')
+            ? trafficTimeToSeconds($inicio)
+            : $this->timeToSecondsLocal($inicio);
+        $finSec = function_exists('trafficTimeToSeconds')
+            ? trafficTimeToSeconds($fin)
+            : $this->timeToSecondsLocal($fin);
+
+        if ($inicioSec <= $finSec) {
+            return $horaSec >= $inicioSec && $horaSec <= $finSec;
+        }
+
+        return $horaSec >= $inicioSec || $horaSec <= $finSec;
+    }
+
+    private function timeToSecondsLocal(string $time): int {
+        [$h, $m, $s] = array_map('intval', explode(':', $this->normalizeTimeWindowValue($time, '00:00:00')));
+        return ($h * 3600) + ($m * 60) + $s;
+    }
+
+    private function resolveSurgeData(string $gridId): array {
+        $redis = Cache::redis();
+        if (!$redis) {
+            return ['multiplier' => 1.0];
+        }
+
+        $raw = $redis->get('surge:grid:' . $gridId);
+        $data = is_string($raw) ? json_decode($raw, true) : null;
+        if (!is_array($data)) {
+            return ['multiplier' => 1.0];
+        }
+
+        $multiplier = isset($data['multiplier']) ? (float)$data['multiplier'] : 1.0;
+        return ['multiplier' => max(1.0, $multiplier)];
+    }
+
+    private function estimatePickupEtaMinutes(float $distanceKm): int {
+        $hour = intval(date('G'));
+        $trafficFactor = (($hour >= 6 && $hour <= 9) || ($hour >= 16 && $hour <= 20)) ? 1.25 : 1.0;
+        $speedKmh = 24.0;
+        $etaMin = ($distanceKm / $speedKmh) * 60.0 * $trafficFactor;
+        return max(1, intval(ceil($etaMin)));
     }
 
     private function getVehicleTypeName($tipo) {

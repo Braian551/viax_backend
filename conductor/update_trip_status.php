@@ -25,58 +25,57 @@ require_once '../core/Cache.php';
 require_once __DIR__ . '/tracking/tracking_schema_helpers.php';
 require_once '../services/trip_state_machine.php';
 require_once '../services/driver_service.php';
+require_once __DIR__ . '/driver_auth.php';
 
-/**
- * Valida transición de estado permitida sin romper estados históricos.
- */
-function isValidStateTransition(string $estadoActual, string $nuevoEstado): bool
+function canonicalToStorageState(string $canonicalState): string
 {
-    $estadoActual = trim(strtolower($estadoActual));
-    $nuevoEstado = trim(strtolower($nuevoEstado));
+    return match ($canonicalState) {
+        TripStateMachine::REQUESTED => 'pendiente',
+        TripStateMachine::DRIVER_ASSIGNED => 'aceptada',
+        TripStateMachine::DRIVER_ARRIVED => 'conductor_llego',
+        TripStateMachine::TRIP_STARTED => 'recogido',
+        TripStateMachine::TRIP_IN_PROGRESS => 'en_curso',
+        TripStateMachine::TRIP_COMPLETED => 'completada',
+        TripStateMachine::TRIP_CANCELLED => 'cancelada',
+        default => 'pendiente',
+    };
+}
 
-    $map = [
-        'pendiente' => ['conductor_llego', 'recogido', 'en_curso', 'cancelada', 'completada'],
-        'aceptada' => ['conductor_llego', 'recogido', 'en_curso', 'cancelada', 'completada'],
-        'asignado' => ['conductor_llego', 'recogido', 'en_curso', 'cancelada', 'completada'],
-        'conductor_llego' => ['recogido', 'en_curso', 'cancelada', 'completada'],
-        'recogido' => ['en_curso', 'cancelada', 'completada'],
-        'en_curso' => ['completada', 'cancelada'],
-        'completada' => [],
-        'cancelada' => [],
+function normalizePricingVehicleType(string $tipoVehiculo): string
+{
+    $normalized = strtolower(trim($tipoVehiculo));
+    $aliases = [
+        'moto_taxi' => 'mototaxi',
+        'moto taxi' => 'mototaxi',
+        'motocarro' => 'mototaxi',
+        'moto_carga' => 'mototaxi',
+        'motorcycle' => 'moto',
+        'carro' => 'auto',
+        'automovil' => 'auto',
+        'car' => 'auto',
     ];
 
-    if (!isset($map[$estadoActual])) {
-        // Compatibilidad con datos legacy: si estado no reconocido, permitir.
-        return true;
+    return $aliases[$normalized] ?? ($normalized !== '' ? $normalized : 'moto');
+}
+
+function pricingVehicleTypeCandidates(string $tipoVehiculo): array
+{
+    $base = normalizePricingVehicleType($tipoVehiculo);
+    $candidates = [$base];
+
+    if ($base === 'mototaxi') {
+        $candidates[] = 'moto';
+    } elseif ($base === 'auto') {
+        $candidates[] = 'carro';
+    } elseif ($base === 'carro') {
+        $candidates[] = 'auto';
     }
 
-    return in_array($nuevoEstado, $map[$estadoActual], true);
-}
+    if (!in_array('moto', $candidates, true)) {
+        $candidates[] = 'moto';
+    }
 
-function canonicalTripState(string $estado): string
-{
-    $normalized = strtolower(trim($estado));
-    return match ($normalized) {
-        'pendiente' => TripStateMachine::REQUESTED,
-        'aceptada', 'asignado' => TripStateMachine::DRIVER_ASSIGNED,
-        'conductor_llego' => TripStateMachine::DRIVER_ARRIVED,
-        'recogido', 'en_curso' => TripStateMachine::TRIP_STARTED,
-        'completada', 'completado', 'entregado' => TripStateMachine::TRIP_COMPLETED,
-        'cancelada', 'cancelado', 'rechazada', 'rechazado', 'rejected' => TripStateMachine::TRIP_CANCELLED,
-        default => TripStateMachine::REQUESTED,
-    };
-}
-
-function canonicalTargetState(string $estado): string
-{
-    $normalized = strtolower(trim($estado));
-    return match ($normalized) {
-        'conductor_llego' => TripStateMachine::DRIVER_ARRIVED,
-        'recogido', 'en_curso' => TripStateMachine::TRIP_STARTED,
-        'completada' => TripStateMachine::TRIP_COMPLETED,
-        'cancelada' => TripStateMachine::TRIP_CANCELLED,
-        default => TripStateMachine::REQUESTED,
-    };
+    return array_values(array_unique($candidates));
 }
 
 try {
@@ -89,12 +88,17 @@ try {
     if (!$solicitud_id || !$conductor_id || !$nuevo_estado) {
         throw new Exception('solicitud_id, conductor_id y nuevo_estado son requeridos');
     }
-    
-    // Validar estados permitidos
-    $estados_validos = ['conductor_llego', 'recogido', 'en_curso', 'completada', 'cancelada'];
-    if (!in_array($nuevo_estado, $estados_validos)) {
-        throw new Exception('Estado no válido');
+
+    // Validar sesión para reducir riesgo de conductores fantasma.
+    $sessionToken = driverSessionTokenFromRequest($input);
+    $session = validateDriverSession((int)$conductor_id, $sessionToken, false);
+    if (!$session['ok']) {
+        throw new Exception($session['message']);
     }
+    DriverGeoService::touchDriverHeartbeat((int)$conductor_id, 20);
+    
+    $nuevoEstadoCanonical = TripStateMachine::normalizeState((string)$nuevo_estado);
+    $nuevoEstadoPersistencia = canonicalToStorageState($nuevoEstadoCanonical);
     
     // Clave de idempotencia para evitar operaciones duplicadas
     $idempotencyKey = $_SERVER['HTTP_X_IDEMPOTENCY_KEY'] 
@@ -158,14 +162,9 @@ try {
         throw new Exception('No tienes permiso para actualizar esta solicitud');
     }
 
-    if (!isValidStateTransition((string) $solicitud['estado'], $nuevo_estado)) {
-        throw new Exception('Transición de estado inválida');
-    }
-
-    $canonicalFrom = canonicalTripState((string)$solicitud['estado']);
-    $canonicalTo = canonicalTargetState((string)$nuevo_estado);
-    if ($canonicalFrom !== $canonicalTo) {
-        TripStateMachine::assertTransition($canonicalFrom, $canonicalTo);
+    $estadoActualCanonical = TripStateMachine::normalizeState((string)$solicitud['estado']);
+    if ($estadoActualCanonical !== $nuevoEstadoCanonical) {
+        TripStateMachine::validateTransition($estadoActualCanonical, $nuevoEstadoCanonical);
     }
 
     $hasMetricsLocked = trackingColumnExists($db, 'solicitudes_servicio', 'metrics_locked');
@@ -198,19 +197,19 @@ try {
     // Construir QUERY dinámico
     $update_fields = ["estado = :estado"];
     $params = [
-        ':estado' => $nuevo_estado,
+        ':estado' => $nuevoEstadoPersistencia,
         ':solicitud_id' => $solicitud_id
     ];
 
     // Actualizar timestamps y estados
-    if ($nuevo_estado === 'conductor_llego') {
+    if ($nuevoEstadoCanonical === TripStateMachine::DRIVER_ARRIVED) {
         $update_fields[] = "conductor_llego_en = NOW()";
         
         // Actualizar asignación
         $stmtAsig = $db->prepare("UPDATE asignaciones_conductor SET estado = 'llegado' WHERE solicitud_id = ? AND conductor_id = ?");
         $stmtAsig->execute([$solicitud_id, $conductor_id]);
         
-    } elseif ($nuevo_estado === 'recogido' || $nuevo_estado === 'en_curso') {
+    } elseif ($nuevoEstadoCanonical === TripStateMachine::TRIP_STARTED || $nuevoEstadoCanonical === TripStateMachine::TRIP_IN_PROGRESS) {
         $update_fields[] = "recogido_en = NOW()";
         
         // Actualizar asignación a 'en_curso'
@@ -303,7 +302,7 @@ try {
             }
         }
         
-    } elseif ($nuevo_estado === 'completada') {
+    } elseif ($nuevoEstadoCanonical === TripStateMachine::TRIP_COMPLETED) {
         $update_fields[] = "completado_en = NOW()";
         $update_fields[] = "entregado_en = NOW()";
 
@@ -343,7 +342,7 @@ try {
         }
 
         error_log('[TripFinalize] Final metrics stored for trip_id=' . intval($solicitud_id));
-    } elseif ($nuevo_estado === 'cancelada') {
+    } elseif ($nuevoEstadoCanonical === TripStateMachine::TRIP_CANCELLED) {
         $update_fields[] = "cancelado_en = NOW()";
         if ($motivo_cancelacion) {
             $update_fields[] = "motivo_cancelacion = :motivo";
@@ -360,11 +359,11 @@ try {
 
     // --- GUARDAR DATOS FINALES DEL VIAJE ---
     // Siempre guardar distancia y tiempo si vienen en la petición
-    if ($distancia_recorrida !== null && $distancia_recorrida > 0 && $nuevo_estado !== 'completada') {
+    if ($distancia_recorrida !== null && $distancia_recorrida > 0 && $nuevoEstadoCanonical !== TripStateMachine::TRIP_COMPLETED) {
         $update_fields[] = "distancia_recorrida = :distancia";
         $params[':distancia'] = $distancia_recorrida;
     }
-    if ($tiempo_transcurrido !== null && $tiempo_transcurrido > 0 && $nuevo_estado !== 'completada') {
+    if ($tiempo_transcurrido !== null && $tiempo_transcurrido > 0 && $nuevoEstadoCanonical !== TripStateMachine::TRIP_COMPLETED) {
         $update_fields[] = "tiempo_transcurrido = :tiempo";
         $params[':tiempo'] = $tiempo_transcurrido;
     }
@@ -375,7 +374,7 @@ try {
 
 
     // Si se completó el viaje, actualizar disponibilidad, asignación y asegurar inmutabilidad de la comisión
-    if ($nuevo_estado === 'completada') {
+    if ($nuevoEstadoCanonical === TripStateMachine::TRIP_COMPLETED) {
         $stmt = $db->prepare("
             UPDATE detalles_conductor 
             SET disponible = 1,
@@ -400,23 +399,56 @@ try {
             
             // Obtener configuración de precios vigente
             $empresaId = $solicitud['empresa_id'] ?? null;
-            $tipoVehiculo = $solicitud['tipo_vehiculo'] ?? 'moto';
-            
-            $queryConfig = "SELECT comision_plataforma, comision_metodo_pago, id as config_id 
-                           FROM configuracion_precios 
-                           WHERE tipo_vehiculo = :tipo AND activo = 1";
-                           
-            if ($empresaId) {
-                $queryConfig .= " AND empresa_id = :empresa_id";
-                $stmtConfig = $db->prepare($queryConfig);
-                $stmtConfig->execute([':tipo' => $tipoVehiculo, ':empresa_id' => $empresaId]);
-            } else {
-                $queryConfig .= " AND empresa_id IS NULL";
-                $stmtConfig = $db->prepare($queryConfig);
-                $stmtConfig->execute([':tipo' => $tipoVehiculo]);
+            if (empty($empresaId)) {
+                $stmtEmpresaFallback = $db->prepare("SELECT empresa_id FROM usuarios WHERE id = :conductor_id LIMIT 1");
+                $stmtEmpresaFallback->execute([':conductor_id' => $conductor_id]);
+                $empresaIdConductor = $stmtEmpresaFallback->fetchColumn();
+                if (!empty($empresaIdConductor)) {
+                    $empresaId = intval($empresaIdConductor);
+                }
             }
-            
-            $config = $stmtConfig->fetch(PDO::FETCH_ASSOC);
+            $tipoVehiculo = $solicitud['tipo_vehiculo'] ?? 'moto';
+            $tiposCandidatos = pricingVehicleTypeCandidates((string)$tipoVehiculo);
+
+            $config = null;
+            if (!empty($empresaId)) {
+                foreach ($tiposCandidatos as $tipoCandidato) {
+                    $stmtConfig = $db->prepare(
+                        "SELECT comision_plataforma, comision_metodo_pago, id as config_id
+                         FROM configuracion_precios
+                         WHERE tipo_vehiculo = :tipo
+                           AND empresa_id = :empresa_id
+                           AND activo = 1
+                         LIMIT 1"
+                    );
+                    $stmtConfig->execute([
+                        ':tipo' => $tipoCandidato,
+                        ':empresa_id' => $empresaId,
+                    ]);
+                    $config = $stmtConfig->fetch(PDO::FETCH_ASSOC);
+                    if ($config) {
+                        break;
+                    }
+                }
+            }
+
+            if (!$config) {
+                foreach ($tiposCandidatos as $tipoCandidato) {
+                    $stmtConfig = $db->prepare(
+                        "SELECT comision_plataforma, comision_metodo_pago, id as config_id
+                         FROM configuracion_precios
+                         WHERE tipo_vehiculo = :tipo
+                           AND empresa_id IS NULL
+                           AND activo = 1
+                         LIMIT 1"
+                    );
+                    $stmtConfig->execute([':tipo' => $tipoCandidato]);
+                    $config = $stmtConfig->fetch(PDO::FETCH_ASSOC);
+                    if ($config) {
+                        break;
+                    }
+                }
+            }
             
             // Valores por defecto si no hay config (fallback)
             $porcentajeComision = 15.0; // Default
@@ -482,7 +514,7 @@ try {
     }
     
     // Si se canceló, liberar al conductor
-    if ($nuevo_estado === 'cancelada') {
+    if ($nuevoEstadoCanonical === TripStateMachine::TRIP_CANCELLED) {
         $stmt = $db->prepare("UPDATE detalles_conductor SET disponible = 1 WHERE usuario_id = ?");
         $stmt->execute([$conductor_id]);
         
@@ -502,14 +534,29 @@ try {
     $db->commit();
 
     // Invalidar cache temporal de solicitud al cerrar ciclo.
-    if ($nuevo_estado === 'completada' || $nuevo_estado === 'cancelada') {
+    if ($nuevoEstadoCanonical === TripStateMachine::TRIP_COMPLETED || $nuevoEstadoCanonical === TripStateMachine::TRIP_CANCELLED) {
         Cache::set('ride_request:' . (int) $solicitud_id, '{}', 1);
     }
 
     try {
         $redis = Cache::redis();
         if ($redis) {
-            if ($nuevo_estado === 'completada') {
+            if ($nuevoEstadoCanonical === TripStateMachine::TRIP_COMPLETED || $nuevoEstadoCanonical === TripStateMachine::TRIP_CANCELLED) {
+                $redis->del('trip:active:' . (int)$solicitud_id);
+                $redis->setex('trip:finished:' . (int)$solicitud_id, 86400, json_encode([
+                    'status' => $nuevoEstadoCanonical,
+                    'finished_at' => gmdate('c'),
+                    'conductor_id' => (int)$conductor_id,
+                ], JSON_UNESCAPED_UNICODE));
+            } else {
+                $redis->setex('trip:active:' . (int)$solicitud_id, 7200, json_encode([
+                    'status' => $nuevoEstadoCanonical,
+                    'updated_at' => gmdate('c'),
+                    'conductor_id' => (int)$conductor_id,
+                ], JSON_UNESCAPED_UNICODE));
+            }
+
+            if ($nuevoEstadoCanonical === TripStateMachine::TRIP_COMPLETED) {
                 $redis->incr('metrics:rides_completed');
 
                 $actualSec = $tiempo_transcurrido !== null ? (int)$tiempo_transcurrido : 0;
@@ -525,7 +572,7 @@ try {
         }
     } catch (Throwable $e) {}
 
-    if ($nuevo_estado === 'completada' || $nuevo_estado === 'cancelada') {
+    if ($nuevoEstadoCanonical === TripStateMachine::TRIP_COMPLETED || $nuevoEstadoCanonical === TripStateMachine::TRIP_CANCELLED) {
         DriverGeoService::setDriverState((int)$conductor_id, 'available');
         Cache::set('driver:' . (int)$conductor_id . ':last_trip_end', (string)time(), 86400);
 
@@ -544,14 +591,14 @@ try {
         $clienteId = isset($solicitud['cliente_id']) ? (int)$solicitud['cliente_id'] : 0;
 
         if ($clienteId > 0) {
-            if ($nuevo_estado === 'conductor_llego') {
+            if ($nuevoEstadoCanonical === TripStateMachine::DRIVER_ARRIVED) {
                 NotificationHelper::conductorLlego($clienteId, (int)$solicitud_id, 'Tu conductor');
-            } elseif ($nuevo_estado === 'recogido' || $nuevo_estado === 'en_curso') {
+            } elseif ($nuevoEstadoCanonical === TripStateMachine::TRIP_STARTED || $nuevoEstadoCanonical === TripStateMachine::TRIP_IN_PROGRESS) {
                 NotificationHelper::conductorEsperando($clienteId, (int)$solicitud_id, 'Tu conductor');
-            } elseif ($nuevo_estado === 'completada') {
+            } elseif ($nuevoEstadoCanonical === TripStateMachine::TRIP_COMPLETED) {
                 $valorFinal = $precio_final ?? (float)($solicitud['precio_estimado'] ?? 0);
                 NotificationHelper::viajeCompletado($clienteId, (int)$solicitud_id, (float)$valorFinal);
-            } elseif ($nuevo_estado === 'cancelada') {
+            } elseif ($nuevoEstadoCanonical === TripStateMachine::TRIP_CANCELLED) {
                 NotificationHelper::viajeCancelado(
                     $clienteId,
                     (int)$solicitud_id,
@@ -566,7 +613,8 @@ try {
     echo json_encode([
         'success' => true,
         'message' => 'Estado actualizado correctamente',
-        'nuevo_estado' => $nuevo_estado
+        'nuevo_estado' => $nuevoEstadoPersistencia,
+        'nuevo_estado_canonico' => $nuevoEstadoCanonical
     ]);
 
     $concurrencyService->releaseLock('solicitud', (int) $solicitud_id);

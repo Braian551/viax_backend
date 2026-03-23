@@ -35,17 +35,19 @@ require_once __DIR__ . '/../../services/traffic_zone_resolver.php';
 require_once __DIR__ . '/../../services/traffic_cache.php';
 require_once __DIR__ . '/../../services/traffic_pricing.php';
 require_once __DIR__ . '/../../services/traffic_service.php';
+require_once __DIR__ . '/../../services/EmailService.php';
 
 function normalizarTipoVehiculoTracking($tipoVehiculo) {
     $normalized = strtolower(trim((string)$tipoVehiculo));
     $aliases = [
-        'mototaxi' => 'moto',
-        'motocarro' => 'moto',
-        'moto_carga' => 'moto',
+        'moto_taxi' => 'mototaxi',
+        'moto taxi' => 'mototaxi',
+        'motocarro' => 'mototaxi',
+        'moto_carga' => 'mototaxi',
         'motorcycle' => 'moto',
-        'auto' => 'carro',
-        'automovil' => 'carro',
-        'car' => 'carro',
+        'carro' => 'auto',
+        'automovil' => 'auto',
+        'car' => 'auto',
     ];
 
     if (isset($aliases[$normalized])) {
@@ -53,6 +55,25 @@ function normalizarTipoVehiculoTracking($tipoVehiculo) {
     }
 
     return $normalized !== '' ? $normalized : 'moto';
+}
+
+function candidatosTipoVehiculoTracking($tipoVehiculo): array {
+    $base = normalizarTipoVehiculoTracking($tipoVehiculo);
+    $candidatos = [$base];
+
+    if ($base === 'mototaxi') {
+        $candidatos[] = 'moto';
+    } elseif ($base === 'auto') {
+        $candidatos[] = 'carro';
+    } elseif ($base === 'carro') {
+        $candidatos[] = 'auto';
+    }
+
+    if (!in_array('moto', $candidatos, true)) {
+        $candidatos[] = 'moto';
+    }
+
+    return array_values(array_unique($candidatos));
 }
 
 function configPreciosFallbackFinalize() {
@@ -70,7 +91,7 @@ function configPreciosFallbackFinalize() {
         'hora_pico_inicio_tarde' => '17:00:00',
         'hora_pico_fin_tarde' => '19:00:00',
         'recargo_nocturno' => 0,
-        'hora_nocturna_inicio' => '22:00:00',
+        'hora_nocturna_inicio' => '21:00:00',
         'hora_nocturna_fin' => '06:00:00',
         'recargo_festivo' => 0,
         'umbral_km_descuento' => 15,
@@ -79,6 +100,27 @@ function configPreciosFallbackFinalize() {
         'costo_tiempo_espera' => 0,
         '__fallback' => true,
     ];
+}
+
+function normalizeTimeValueFinalize($value, string $fallback): string {
+    $raw = trim((string) ($value ?? ''));
+    if ($raw === '') {
+        return $fallback;
+    }
+
+    if (!preg_match('/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/', $raw, $matches)) {
+        return $fallback;
+    }
+
+    $hour = intval($matches[1]);
+    $minute = intval($matches[2]);
+    $second = isset($matches[3]) ? intval($matches[3]) : 0;
+
+    if ($hour < 0 || $hour > 23 || $minute < 0 || $minute > 59 || $second < 0 || $second > 59) {
+        return $fallback;
+    }
+
+    return sprintf('%02d:%02d:%02d', $hour, $minute, $second);
 }
 
 function positiveFloatOrNull($value): ?float {
@@ -116,6 +158,99 @@ function maxIntOrZero(array $values): int {
 function formatDateTimeCoAmPm(DateTimeInterface $dateTime): string {
     $ampm = strtolower($dateTime->format('a')) === 'am' ? 'a. m.' : 'p. m.';
     return $dateTime->format('d/m/Y h:i') . ' ' . $ampm;
+}
+
+function parseDateTimeToBogota(string $rawDate): DateTimeImmutable {
+    $tzBogota = new DateTimeZone('America/Bogota');
+    $clean = trim($rawDate);
+
+    if ($clean === '') {
+        return new DateTimeImmutable('now', $tzBogota);
+    }
+
+    // Regla global: timestamps sin zona explícita se interpretan en UTC y se convierten a Colombia.
+    if (preg_match('/(Z|[+-]\d{2}:\d{2})$/i', $clean) === 1) {
+        $date = new DateTimeImmutable($clean);
+    } else {
+        $date = new DateTimeImmutable($clean, new DateTimeZone('UTC'));
+    }
+
+    return $date->setTimezone($tzBogota);
+}
+
+function sendTripCompletionSummaryEmail(PDO $db, int $solicitudId, float $precioFinal, float $distanciaKm, int $tiempoSeg): void {
+    try {
+        $shouldSend = true;
+        $redis = Cache::redis();
+        if ($redis) {
+            $lockKey = 'trip:' . $solicitudId . ':email:summary_sent';
+            $created = $redis->setnx($lockKey, (string)time());
+            if ($created) {
+                $redis->expire($lockKey, 86400);
+            } else {
+                $shouldSend = false;
+            }
+        }
+
+        if (!$shouldSend) {
+            return;
+        }
+
+        $stmt = $db->prepare(" 
+            SELECT
+                s.id,
+                COALESCE(NULLIF(TRIM(s.direccion_recogida), ''), 'Punto de recogida') AS origen,
+                COALESCE(NULLIF(TRIM(s.direccion_destino), ''), 'Destino') AS destino,
+                COALESCE(s.metodo_pago, 'Efectivo') AS metodo_pago,
+                COALESCE(s.completed_at, s.completado_en, NOW()) AS fecha_fin,
+                COALESCE(s.distance_final, s.distancia_recorrida, :distancia_fallback) AS distancia_final,
+                COALESCE(s.duration_final, s.tiempo_transcurrido, :tiempo_fallback) AS tiempo_final_seg,
+                COALESCE(s.price_final, s.precio_final, :precio_fallback) AS precio_final,
+                u.email,
+                COALESCE(u.nombre, '') AS nombre,
+                COALESCE(u.apellido, '') AS apellido
+            FROM solicitudes_servicio s
+            INNER JOIN usuarios u ON u.id = s.cliente_id
+            WHERE s.id = :solicitud_id
+            LIMIT 1
+        ");
+        $stmt->execute([
+            ':solicitud_id' => $solicitudId,
+            ':distancia_fallback' => $distanciaKm,
+            ':tiempo_fallback' => $tiempoSeg,
+            ':precio_fallback' => $precioFinal,
+        ]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$row) {
+            return;
+        }
+
+        $email = trim((string)($row['email'] ?? ''));
+        if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            return;
+        }
+
+        $nombreCliente = trim(($row['nombre'] ?? '') . ' ' . ($row['apellido'] ?? ''));
+
+        $finViaje = parseDateTimeToBogota((string)$row['fecha_fin']);
+        $fechaCorreo = formatDateTimeCoAmPm($finViaje);
+
+        $summary = [
+            'trip_id' => (int)$row['id'],
+            'origen' => (string)$row['origen'],
+            'destino' => (string)$row['destino'],
+            'fecha' => $fechaCorreo,
+            'distancia_km' => (float)$row['distancia_final'],
+            'duracion_min' => (int)ceil(max(0, (int)$row['tiempo_final_seg']) / 60),
+            'metodo_pago' => (string)$row['metodo_pago'],
+            'total_cop' => (float)$row['precio_final'],
+        ];
+
+        $emailService = new EmailService($db);
+        $emailService->sendTripCompletedSummaryEmail($email, $nombreCliente, $summary);
+    } catch (Throwable $emailError) {
+        error_log('[finalize] email summary warning: ' . $emailError->getMessage());
+    }
 }
 
 function resolveCanonicalFinalMetrics(array $viaje, ?array $ultimoTracking, ?array $redisMetrics, ?float $bodyDistanciaKm, ?int $bodyTiempoSeg): array {
@@ -426,8 +561,7 @@ function buildLockedSummaryResponse(PDO $db, int $solicitudId, int $conductorId)
 }
 
 function obtenerConfigPreciosTrackingFinalize(PDO $db, $empresaId, $tipoVehiculoRaw) {
-    $tipoNormalizado = normalizarTipoVehiculoTracking($tipoVehiculoRaw);
-    $tiposCandidatos = array_values(array_unique([$tipoNormalizado, 'moto']));
+    $tiposCandidatos = candidatosTipoVehiculoTracking($tipoVehiculoRaw);
 
     foreach ($tiposCandidatos as $tipo) {
         if ($empresaId) {
@@ -705,7 +839,19 @@ try {
     // =====================================================
     // OBTENER CONFIGURACIÓN DE PRECIOS COMPLETA
     // =====================================================
-    $empresa_id = $viaje['empresa_id'];
+    $empresa_id = !empty($viaje['empresa_id']) ? intval($viaje['empresa_id']) : null;
+
+    // Fallback crítico: algunos viajes llegan sin empresa_id en la solicitud,
+    // pero el conductor sí pertenece a una empresa con comisión configurada.
+    if (empty($empresa_id) && $conductor_id > 0) {
+        $stmtEmpresaConductor = $db->prepare("SELECT empresa_id FROM usuarios WHERE id = :conductor_id LIMIT 1");
+        $stmtEmpresaConductor->execute([':conductor_id' => $conductor_id]);
+        $empresaIdConductor = $stmtEmpresaConductor->fetchColumn();
+        if (!empty($empresaIdConductor)) {
+            $empresa_id = intval($empresaIdConductor);
+            error_log('[tracking_finalize] Usando empresa_id del conductor para solicitud ' . $solicitud_id . ': ' . $empresa_id);
+        }
+    }
     $config = null;
     $config_precios_id = null;
     $comision_admin_porcentaje = 0; // Comisión que el admin cobra a la empresa
@@ -720,14 +866,19 @@ try {
         }
     }
     
+    $tipoVehiculoSeleccionado = $input['tipo_vehiculo']
+        ?? $input['vehicle_type']
+        ?? $input['selected_vehicle_type']
+        ?? ($viaje['tipo_vehiculo'] ?? 'moto');
+
     $config = obtenerConfigPreciosTrackingFinalize(
         $db,
         $empresa_id,
-        $viaje['tipo_vehiculo'] ?? 'moto'
+        $tipoVehiculoSeleccionado
     );
 
     if (!empty($config['__fallback'])) {
-        error_log('[tracking_finalize] Sin configuración de precios para solicitud ' . $solicitud_id . ', tipo=' . ($viaje['tipo_vehiculo'] ?? 'N/A') . '. Se aplicó fallback seguro.');
+        error_log('[tracking_finalize] Sin configuración de precios para solicitud ' . $solicitud_id . ', tipo=' . $tipoVehiculoSeleccionado . '. Se aplicó fallback seguro.');
     }
     
     $config_precios_id = isset($config['id']) ? intval($config['id']) : null;
@@ -763,8 +914,8 @@ try {
         ?? $ultimo_tracking['actualizado_en']
         ?? null;
     $fecha_colombia = trafficToColombiaDateTime($fechaReferenciaRaw, trafficNowInColombia());
-    $h_noc_ini = (string) ($config['hora_nocturna_inicio'] ?? '22:00:00');
-    $h_noc_fin = (string) ($config['hora_nocturna_fin'] ?? '06:00:00');
+    $h_noc_ini = normalizeTimeValueFinalize($config['hora_nocturna_inicio'] ?? null, '21:00:00');
+    $h_noc_fin = normalizeTimeValueFinalize($config['hora_nocturna_fin'] ?? null, '06:00:00');
 
     $holidayMeta = [];
     $es_festivo_legal = trafficIsHolidayColombia($fecha_colombia, $holidayMeta);
@@ -788,10 +939,10 @@ try {
     // aplicamos la franja configurada de hora pico para no perder el recargo.
     $fuenteTrafico = strtolower(trim(strval($trafico['source'] ?? 'unknown')));
     $horaActualBogota = $fecha_colombia->format('H:i:s');
-    $hPicoIniM = (string) ($config['hora_pico_inicio_manana'] ?? '07:00:00');
-    $hPicoFinM = (string) ($config['hora_pico_fin_manana'] ?? '09:00:00');
-    $hPicoIniT = (string) ($config['hora_pico_inicio_tarde'] ?? '17:00:00');
-    $hPicoFinT = (string) ($config['hora_pico_fin_tarde'] ?? '19:00:00');
+    $hPicoIniM = normalizeTimeValueFinalize($config['hora_pico_inicio_manana'] ?? null, '07:00:00');
+    $hPicoFinM = normalizeTimeValueFinalize($config['hora_pico_fin_manana'] ?? null, '09:00:00');
+    $hPicoIniT = normalizeTimeValueFinalize($config['hora_pico_inicio_tarde'] ?? null, '17:00:00');
+    $hPicoFinT = normalizeTimeValueFinalize($config['hora_pico_fin_tarde'] ?? null, '19:00:00');
     $recargoHoraPicoConfig = floatval($config['recargo_hora_pico'] ?? 0);
 
     $horaSec = trafficTimeToSeconds($horaActualBogota);
@@ -1270,6 +1421,14 @@ try {
     } catch (Throwable $cacheError) {
         error_log('finalize.php cache warning: ' . $cacheError->getMessage());
     }
+
+    sendTripCompletionSummaryEmail(
+        $db,
+        intval($solicitud_id),
+        floatval($precio_final),
+        floatval($distancia_real),
+        intval($tiempo_real_seg)
+    );
     
     // =====================================================
     // RESPUESTA CON DESGLOSE COMPLETO

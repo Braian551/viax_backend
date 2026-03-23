@@ -238,26 +238,41 @@ function getEarningsStats($pdo, $empresaId, $periodo) {
     $stmt->execute(['empresa_id' => $empresaId]);
     $result = $stmt->fetch(PDO::FETCH_ASSOC);
     
-    // 2. Ganancia Real (Comisiones Cobradas) - Base: Pagos registrados
-    $pagoFilter = "";
-    switch ($periodo) {
-        case '7d': $pagoFilter = "AND pc.fecha_pago >= NOW() - INTERVAL '7 days'"; break;
-        case '30d': $pagoFilter = "AND pc.fecha_pago >= NOW() - INTERVAL '30 days'"; break;
-        case '90d': $pagoFilter = "AND pc.fecha_pago >= NOW() - INTERVAL '90 days'"; break;
-        case '1y': $pagoFilter = "AND pc.fecha_pago >= NOW() - INTERVAL '1 year'"; break;
-    }
-    
-    $sqlRealized = "SELECT COALESCE(SUM(pc.monto), 0) as ganancia_real
-                    FROM pagos_comision pc
-                    INNER JOIN usuarios u ON pc.conductor_id = u.id
-                    WHERE u.empresa_id = :empresa_id
-                    $pagoFilter";
-                    
-    $stmtRealized = $pdo->prepare($sqlRealized);
-    $stmtRealized->execute(['empresa_id' => $empresaId]);
-    $realized = $stmtRealized->fetchColumn();
-    
-    // Estimación de comisiones (teórica, basada en GMV)
+    // 2. Comisión de conductores del período desde viajes finalizados (snapshot tracking).
+    $precioBaseExpr = "COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(s.precio_final, 0), s.precio_estimado, 0)";
+    $trackingPctExpr = "NULLIF(vrt.comision_plataforma_porcentaje, 0)";
+    $comisionDesdeGananciaExpr = "CASE
+        WHEN ($trackingPctExpr) IS NULL OR ($trackingPctExpr) >= 100 THEN 0
+        ELSE COALESCE(vrt.ganancia_conductor, 0) * (($trackingPctExpr) / NULLIF(100 - ($trackingPctExpr), 0))
+    END";
+    $comisionExpr = "CASE
+        WHEN vrt.comision_plataforma_valor > 0 THEN vrt.comision_plataforma_valor
+        WHEN vrt.solicitud_id IS NOT NULL AND COALESCE(vrt.ganancia_conductor, 0) > 0 THEN $comisionDesdeGananciaExpr
+        WHEN vrt.solicitud_id IS NOT NULL AND ($trackingPctExpr) IS NOT NULL THEN ($precioBaseExpr) * (($trackingPctExpr) / 100)
+        ELSE 0
+    END";
+
+    $sqlComisionBruta = "SELECT COALESCE(SUM($comisionExpr), 0) as comision_bruta
+                         FROM solicitudes_servicio s
+                         INNER JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id
+                         INNER JOIN usuarios u ON ac.conductor_id = u.id
+                         LEFT JOIN viaje_resumen_tracking vrt ON s.id = vrt.solicitud_id
+                         WHERE u.empresa_id = :empresa_id
+                         AND s.estado IN ('completada', 'entregado')
+                         $dateFilter";
+
+    $stmtComision = $pdo->prepare($sqlComisionBruta);
+    $stmtComision->execute(['empresa_id' => $empresaId]);
+    $comisionBruta = floatval($stmtComision->fetchColumn());
+
+    $stmtAdminPct = $pdo->prepare("SELECT COALESCE(comision_admin_porcentaje, 0) FROM empresas_transporte WHERE id = :empresa_id LIMIT 1");
+    $stmtAdminPct->execute(['empresa_id' => $empresaId]);
+    $comisionAdminPct = floatval($stmtAdminPct->fetchColumn());
+
+    $comisionAdminMonto = ($comisionBruta * $comisionAdminPct) / 100;
+    $gananciaNeta = max(0, $comisionBruta - $comisionAdminMonto);
+
+    // Estimación de comisiones (teórica, basada en GMV) para referencia comparativa.
     $comisionTeorica = calcularComisionEmpresa($pdo, $empresaId, $result['ingresos_totales']);
     
     return [
@@ -265,8 +280,10 @@ function getEarningsStats($pdo, $empresaId, $periodo) {
         'ingreso_promedio' => round($result['ingreso_promedio'], 2),
         'ingreso_maximo' => round($result['ingreso_maximo'], 2),
         'ingreso_minimo' => round($result['ingreso_minimo'], 2),
-        'comision_empresa' => round($realized, 2), // Usamos REALIZADA para mostrar en métricas
-        'ganancia_neta' => round($realized, 2),    // REALIZADA
+        'comision_empresa' => round($comisionBruta, 2),
+        'comision_admin' => round($comisionAdminMonto, 2),
+        'comision_admin_porcentaje' => round($comisionAdminPct, 2),
+        'ganancia_neta' => round($gananciaNeta, 2),
         'comision_teorica' => round($comisionTeorica, 2) // Para referencia interna si se necesita
     ];
 }

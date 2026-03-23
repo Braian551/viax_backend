@@ -117,6 +117,12 @@ class PushNotificationService
         if (in_array($tipo, [
             'payment_received',
             'payment_pending',
+            'debt_payment_submitted',
+            'debt_payment_approved',
+            'debt_payment_rejected',
+            'debt_payment_confirmed',
+            'debt_payment_reminder',
+            'debt_payment_mandatory',
             'empresa_payment_submitted',
             'empresa_payment_approved',
             'empresa_payment_rejected',
@@ -124,6 +130,10 @@ class PushNotificationService
             'invoice_generated',
         ], true)) {
             return 'pagos';
+        }
+
+        if ($tipo === 'company_driver_application_submitted') {
+            return 'sistema';
         }
 
         if ($tipo === 'promo') {

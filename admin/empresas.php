@@ -538,17 +538,17 @@ function rejectEmpresa($db, $input) {
         return; 
     }
 
-    // 3. Enviar correo
-    // Intentar buscar email representante si el genérico no es específico
-    $toEmail = $empresa['representante_email'] ?: $empresa['email'];
-    $toName = $empresa['representante_nombre'];
-    
-    // Mapear nombre para el template de email (que espera nombre_empresa)
+    // 3. Enviar correo a todos los destinatarios válidos de la empresa
     $empresa['nombre_empresa'] = $empresa['nombre'];
+    $toName = $empresa['representante_nombre'] ?: $empresa['nombre'];
     
     try {
         require_once __DIR__ . '/../utils/Mailer.php';
-        Mailer::sendCompanyRejectedEmail($toEmail, $toName, $empresa, $reason);
+        $recipients = getEmpresaNotificationRecipients($db, $empresaId, $empresa);
+
+        foreach ($recipients as $toEmail) {
+            Mailer::sendCompanyRejectedEmail($toEmail, $toName, $empresa, $reason);
+        }
     } catch (Exception $e) {
         error_log("Error enviando email de rechazo: " . $e->getMessage());
         // Continuamos con la eliminación aunque falle el email (o podríamos detenerlo)
@@ -598,13 +598,16 @@ function deleteEmpresa($db, $input) {
     
     // Enviar correo de notificación antes de eliminar (Requisito UI/UX)
     // Se realiza antes de borrar para tener acceso a los datos (logo, nombre, etc.)
-    $toEmail = $empresa['representante_email'] ?: $empresa['email'];
-    $toName = $empresa['representante_nombre'];
+    $toName = $empresa['representante_nombre'] ?: $empresa['nombre'];
     $empresa['nombre_empresa'] = $empresa['nombre']; // Fix for email template variable
     
     try {
         require_once __DIR__ . '/../utils/Mailer.php';
-        Mailer::sendCompanyDeletedEmail($toEmail, $toName, $empresa);
+        $recipients = getEmpresaNotificationRecipients($db, $empresaId, $empresa);
+
+        foreach ($recipients as $toEmail) {
+            Mailer::sendCompanyDeletedEmail($toEmail, $toName, $empresa);
+        }
     } catch (Exception $e) {
         error_log("Error enviando email de eliminación: " . $e->getMessage());
         // Continuamos con la eliminación aunque falle el email
@@ -735,11 +738,14 @@ function toggleEmpresaStatus($db, $input) {
             
             if ($empresaData) {
                 $empresaData['nombre_empresa'] = $empresaData['nombre'];
-                $toEmail = $empresaData['representante_email'] ?: $empresaData['email'];
-                $toName = $empresaData['representante_nombre'];
-                
+                $toName = $empresaData['representante_nombre'] ?: $empresaData['nombre'];
+
                 require_once __DIR__ . '/../utils/Mailer.php';
-                Mailer::sendCompanyStatusChangeEmail($toEmail, $toName, $empresaData, $nuevoEstado);
+                $recipients = getEmpresaNotificationRecipients($db, $empresaId, $empresaData);
+
+                foreach ($recipients as $toEmail) {
+                    Mailer::sendCompanyStatusChangeEmail($toEmail, $toName, $empresaData, $nuevoEstado);
+                }
             }
         } catch (Exception $e) {
             error_log("Error enviando email toggle status: " . $e->getMessage());
@@ -856,38 +862,14 @@ function approveEmpresa($db, $input) {
  */
 function sendApprovalEmail($email, $nombreEmpresa, $representante) {
     try {
-        $subject = "✅ ¡Tu empresa ha sido aprobada! - {$nombreEmpresa}";
-        $body = "
-        <div style='font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;'>
-            <div style='background: linear-gradient(135deg, #4CAF50 0%, #388E3C 100%); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;'>
-                <h1 style='color: white; margin: 0;'>✅ ¡Felicidades!</h1>
-                <p style='color: white; margin: 10px 0 0 0;'>Tu empresa ha sido aprobada</p>
-            </div>
-            <div style='padding: 30px; background: #f9f9f9; border-radius: 0 0 10px 10px;'>
-                <p style='font-size: 16px;'>Hola <strong>{$representante}</strong>,</p>
-                <p>Nos complace informarte que <strong>{$nombreEmpresa}</strong> ha sido aprobada y verificada en Viax.</p>
-                <div style='background: #e8f5e9; border: 1px solid #4CAF50; padding: 20px; border-radius: 8px; margin: 20px 0; text-align: center;'>
-                    <p style='margin: 0; color: #2e7d32; font-size: 18px;'><strong>¡Tu cuenta ya está activa!</strong></p>
-                </div>
-                <p>Ahora puedes:</p>
-                <ul style='line-height: 1.8;'>
-                    <li>✅ Iniciar sesión en la aplicación</li>
-                    <li>✅ Agregar y gestionar tus conductores</li>
-                    <li>✅ Ver estadísticas y reportes</li>
-                    <li>✅ Administrar tu flota de vehículos</li>
-                </ul>
-                <hr style='border: none; border-top: 1px solid #ddd; margin: 20px 0;'>
-                <p style='color: #666; font-size: 12px; text-align: center;'>
-                    ¿Tienes preguntas? Contáctanos en viaxcol.online<br>
-                    © 2026 Viax Technology S.A.S. - NIT 902040253-1
-                </p>
-            </div>
-        </div>";
+        $mailData = [
+            'nombre_empresa' => $nombreEmpresa,
+            'email' => $email,
+            'telefono' => '',
+            'representante_nombre' => $representante,
+        ];
 
-        $altBody = "Hola {$representante},\n\n¡Felicidades! Tu empresa {$nombreEmpresa} ha sido aprobada en Viax.\n\nYa puedes iniciar sesión y comenzar a gestionar tu flota.\n\nSaludos,\nEquipo Viax";
-
-        $emailService = new EmailService();
-        $emailService->sendCustomEmail($email, $representante, $subject, $body, $altBody);
+        Mailer::sendCompanyApprovedEmail($email, $representante, $mailData);
         error_log("Email de aprobación enviado a: {$email}");
         
     } catch (\Exception $e) {
@@ -900,33 +882,12 @@ function sendApprovalEmail($email, $nombreEmpresa, $representante) {
  */
 function sendRejectionEmail($email, $nombreEmpresa, $representante, $motivo) {
     try {
-        $subject = "Información sobre tu solicitud - {$nombreEmpresa}";
-        $body = "
-        <div style='font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;'>
-            <div style='background: linear-gradient(135deg, #757575 0%, #616161 100%); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;'>
-                <h1 style='color: white; margin: 0;'>Actualización de tu Solicitud</h1>
-            </div>
-            <div style='padding: 30px; background: #f9f9f9; border-radius: 0 0 10px 10px;'>
-                <p style='font-size: 16px;'>Hola <strong>{$representante}</strong>,</p>
-                <p>Lamentamos informarte que después de revisar tu solicitud para <strong>{$nombreEmpresa}</strong>, no hemos podido aprobarla en este momento.</p>
-                <div style='background: #fff3e0; border: 1px solid #ff9800; padding: 15px; border-radius: 8px; margin: 20px 0;'>
-                    <p style='margin: 0; color: #e65100;'><strong>Motivo:</strong></p>
-                    <p style='margin: 10px 0 0 0; color: #333;'>{$motivo}</p>
-                </div>
-                <p>Si crees que esto es un error o deseas proporcionar información adicional, no dudes en contactarnos.</p>
-                <p>También puedes intentar registrarte nuevamente corrigiendo los aspectos mencionados.</p>
-                <hr style='border: none; border-top: 1px solid #ddd; margin: 20px 0;'>
-                <p style='color: #666; font-size: 12px; text-align: center;'>
-                    Contáctanos en viaxcol.online<br>
-                    © 2026 Viax Technology S.A.S. - NIT 902040253-1
-                </p>
-            </div>
-        </div>";
+        $mailData = [
+            'nombre_empresa' => $nombreEmpresa,
+            'representante_nombre' => $representante,
+        ];
 
-        $altBody = "Hola {$representante},\n\nLamentamos informarte que tu solicitud para {$nombreEmpresa} no ha sido aprobada.\n\nMotivo: {$motivo}\n\nPuedes contactarnos para más información.\n\nSaludos,\nEquipo Viax";
-
-        $emailService = new EmailService();
-        $emailService->sendCustomEmail($email, $representante, $subject, $body, $altBody);
+        Mailer::sendCompanyRejectedEmail($email, $representante, $mailData, $motivo);
         error_log("Email de rechazo enviado a: {$email}");
         
     } catch (\Exception $e) {
@@ -1270,4 +1231,35 @@ function syncZonaOperacionConMunicipio($db, $empresaId) {
         error_log("Error sincronizando zona de operación: " . $e->getMessage());
         return false;
     }
+}
+
+function getEmpresaNotificationRecipients($db, $empresaId, $empresaRow = []) {
+    $emails = [];
+
+    $candidates = [
+        $empresaRow['email'] ?? null,
+        $empresaRow['representante_email'] ?? null,
+    ];
+
+    foreach ($candidates as $email) {
+        if (is_string($email)) {
+            $normalized = strtolower(trim($email));
+            if ($normalized !== '' && filter_var($normalized, FILTER_VALIDATE_EMAIL)) {
+                $emails[$normalized] = true;
+            }
+        }
+    }
+
+    $stmt = $db->prepare("SELECT email FROM usuarios WHERE empresa_id = ? AND tipo_usuario = 'empresa'");
+    $stmt->execute([$empresaId]);
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+    foreach ($rows as $row) {
+        $email = strtolower(trim((string)($row['email'] ?? '')));
+        if ($email !== '' && filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            $emails[$email] = true;
+        }
+    }
+
+    return array_keys($emails);
 }

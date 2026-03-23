@@ -5,6 +5,8 @@ header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Accept');
 
 require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../services/driver_service.php';
+require_once __DIR__ . '/driver_auth.php';
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
@@ -30,6 +32,13 @@ try {
 
     if ($conductor_id <= 0) {
         throw new Exception('ID de conductor inválido');
+    }
+
+    // Validar sesión del conductor en modo compatible (no rompe clientes actuales).
+    $sessionToken = driverSessionTokenFromRequest($input);
+    $session = validateDriverSession($conductor_id, $sessionToken, false);
+    if (!$session['ok']) {
+        throw new Exception($session['message']);
     }
 
     // Verificar si existe registro en detalles_conductor
@@ -70,6 +79,15 @@ try {
         }
         
         $stmt->execute();
+
+        // Mantener índices Redis sincronizados con la disponibilidad.
+        if ($disponible === 1) {
+            DriverGeoService::setDriverState($conductor_id, 'available');
+            DriverGeoService::touchDriverHeartbeat($conductor_id, 20);
+        } else {
+            DriverGeoService::setDriverState($conductor_id, 'offline');
+            DriverGeoService::removeDriverFromRealtimeIndexes($conductor_id);
+        }
     } else {
         // No existe registro en detalles_conductor - el conductor debe completar su perfil primero
         throw new Exception('El conductor debe completar su perfil antes de poder cambiar su disponibilidad. Registre su licencia, vehículo y documentos requeridos.');

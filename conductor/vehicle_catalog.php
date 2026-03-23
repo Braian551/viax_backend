@@ -23,6 +23,15 @@ $brand = isset($_GET['brand']) ? normalizeText((string)$_GET['brand']) : '';
 $year = isset($_GET['year']) ? intval($_GET['year']) : 0;
 $query = isset($_GET['q']) ? normalizeText((string)$_GET['q']) : '';
 
+if ($action === 'colors') {
+    echo json_encode([
+        'success' => true,
+        'message' => 'Colores obtenidos',
+        'data' => getVehicleColorsCatalog(),
+    ], JSON_UNESCAPED_UNICODE);
+    exit();
+}
+
 if (!isset($catalog[$vehicleType])) {
     http_response_code(400);
     echo json_encode([
@@ -75,6 +84,27 @@ function getBrands(array $catalog, string $vehicleType): array
 {
     $localBrands = $catalog[$vehicleType]['brands'] ?? [];
     return uniqueSorted($localBrands);
+}
+
+function getVehicleColorsCatalog(): array
+{
+    return [
+        ['id' => 'BLANCO', 'name' => 'Blanco', 'nombre' => 'Blanco', 'hex_code' => '#FFFFFF'],
+        ['id' => 'NEGRO', 'name' => 'Negro', 'nombre' => 'Negro', 'hex_code' => '#000000'],
+        ['id' => 'GRIS', 'name' => 'Gris', 'nombre' => 'Gris', 'hex_code' => '#9E9E9E'],
+        ['id' => 'PLATEADO', 'name' => 'Plateado', 'nombre' => 'Plateado', 'hex_code' => '#C0C0C0'],
+        ['id' => 'ROJO', 'name' => 'Rojo', 'nombre' => 'Rojo', 'hex_code' => '#E53935'],
+        ['id' => 'AZUL', 'name' => 'Azul', 'nombre' => 'Azul', 'hex_code' => '#1E88E5'],
+        ['id' => 'VERDE', 'name' => 'Verde', 'nombre' => 'Verde', 'hex_code' => '#43A047'],
+        ['id' => 'AMARILLO', 'name' => 'Amarillo', 'nombre' => 'Amarillo', 'hex_code' => '#FDD835'],
+        ['id' => 'NARANJA', 'name' => 'Naranja', 'nombre' => 'Naranja', 'hex_code' => '#FB8C00'],
+        ['id' => 'MARRON', 'name' => 'Marrón', 'nombre' => 'Marrón', 'hex_code' => '#6D4C41'],
+        ['id' => 'BEIGE', 'name' => 'Beige', 'nombre' => 'Beige', 'hex_code' => '#D7CCC8'],
+        ['id' => 'DORADO', 'name' => 'Dorado', 'nombre' => 'Dorado', 'hex_code' => '#D4AF37'],
+        ['id' => 'VINOTINTO', 'name' => 'Vinotinto', 'nombre' => 'Vinotinto', 'hex_code' => '#7B1E3A'],
+        ['id' => 'MORADO', 'name' => 'Morado', 'nombre' => 'Morado', 'hex_code' => '#8E24AA'],
+        ['id' => 'MULTICOLOR', 'name' => 'Multicolor', 'nombre' => 'Multicolor', 'hex_code' => '#9E9E9E'],
+    ];
 }
 
 function getModels(array $catalog, string $vehicleType, string $brand, int $year, string $query = ''): array

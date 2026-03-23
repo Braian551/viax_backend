@@ -9,6 +9,7 @@
  * Si DOMPDF no está disponible, genera un HTML guardado en R2.
  */
 
+require_once __DIR__ . '/../config/bootstrap.php';
 require_once __DIR__ . '/../config/R2Service.php';
 require_once __DIR__ . '/../vendor/autoload.php';
 
@@ -63,9 +64,10 @@ function generateInvoicePdf(PDO $db, int $facturaId): ?array {
 
         // Subir a R2 con versión para evitar servir archivos cacheados antiguos.
         $versionSuffix = (new DateTimeImmutable('now', new DateTimeZone('America/Bogota')))->format('YmdHis');
+        $coNow = (new DateTimeImmutable('now', new DateTimeZone('America/Bogota')));
         $filename = sprintf(
             'invoices/%s/%s_%s.%s',
-            date('Y/m'),
+            $coNow->format('Y/m'),
             $factura['numero_factura'],
             $versionSuffix,
             $extension
@@ -148,8 +150,19 @@ function formatDateTimeCo(?string $value): string {
     }
 
     try {
-        // Los timestamps del sistema vienen sin zona explícita; tratarlos como hora Colombia.
-        $dt = new DateTimeImmutable($value, new DateTimeZone('America/Bogota'));
+        $clean = trim((string)$value);
+        if ($clean === '') {
+            return '-';
+        }
+
+        // Regla global: timestamps sin zona explícita se interpretan en UTC y se convierten a Colombia.
+        if (preg_match('/(Z|[+-]\d{2}:\d{2})$/i', $clean) === 1) {
+            $dt = new DateTimeImmutable($clean);
+        } else {
+            $dt = new DateTimeImmutable($clean, new DateTimeZone('UTC'));
+        }
+
+        $dt = $dt->setTimezone(new DateTimeZone('America/Bogota'));
         $ampm = strtolower($dt->format('a')) === 'am' ? 'a. m.' : 'p. m.';
         return $dt->format('d/m/Y h:i') . ' ' . $ampm;
     } catch (Throwable $e) {
@@ -161,6 +174,8 @@ function formatDateTimeCo(?string $value): string {
  * Construye el HTML profesional de la factura.
  */
 function buildInvoiceHtml(array $factura): string {
+        $platformLegalName = 'VIAX TECHONOLOGY S.A.S';
+
     $safe = static function ($value, $fallback = '-') {
         $txt = trim((string)($value ?? ''));
         if ($txt === '') {
@@ -182,10 +197,20 @@ function buildInvoiceHtml(array $factura): string {
 
     $subtotalRaw = floatval($factura['subtotal'] ?? 0);
     $totalRaw = floatval($factura['total'] ?? 0);
-    $subtotal = number_format($subtotalRaw, 0, ',', '.');
-    $total = number_format($totalRaw, 0, ',', '.');
     $comisionPct = floatval($factura['porcentaje_comision'] ?? 0);
     $comisionRaw = floatval($factura['valor_comision'] ?? 0);
+
+    // Compatibilidad: facturas antiguas podían guardar valor_comision = 0.
+    // Si existe porcentaje y total, usar total como comisión para mostrar correctamente.
+    if ($comisionRaw <= 0 && $comisionPct > 0 && $totalRaw > 0) {
+        $comisionRaw = $totalRaw;
+        if ($subtotalRaw <= 0) {
+            $subtotalRaw = round($totalRaw / ($comisionPct / 100), 2);
+        }
+    }
+
+    $subtotal = number_format($subtotalRaw, 0, ',', '.');
+    $total = number_format($totalRaw, 0, ',', '.');
     $comisionVal = number_format($comisionRaw, 0, ',', '.');
 
     $concepto = htmlspecialchars($factura['concepto'] ?? '', ENT_QUOTES, 'UTF-8');
@@ -313,7 +338,7 @@ function buildInvoiceHtml(array $factura): string {
                     <div class="detail">Tipo: {$emisorTipo}</div>
                     <div class="detail">Documento: {$emisorDocumento}</div>
                     <div class="detail">Correo: {$emisorEmail}</div>
-                    <div class="detail">Operador: Plataforma Viax S.A.S.</div>
+                    <div class="detail">Operador: {$platformLegalName}</div>
                 </td>
                 <td class="party" style="text-align: right;">
                     <h3>Receptor</h3>
@@ -354,7 +379,7 @@ HTML;
             <div class="totals">
                 <div class="totals-box">
                     <div class="total-row">
-                        <span>Subtotal:</span>
+                        <span>Base del periodo:</span>
                         <span>$ {$subtotal} {$moneda}</span>
                     </div>
 HTML;
@@ -396,7 +421,7 @@ HTML;
         </div>
 
         <div class="footer">
-            <div>Factura electronica de cobro generada por la plataforma Viax para soporte contable y tributario en Colombia.</div>
+            <div>Factura electronica de cobro generada por {$platformLegalName} para soporte contable y tributario en Colombia.</div>
             <div class="legal">
                 Documento electronico valido. Las facturas son registros permanentes y no pueden ser eliminadas.
                 Conserve este documento para sus registros contables y de cumplimiento tributario.

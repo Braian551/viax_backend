@@ -189,8 +189,14 @@ function handleUpdateUser($db, $input) {
         // Campos actualizables
         $allowedFields = ['nombre', 'apellido', 'telefono', 'tipo_usuario', 'es_activo', 'es_verificado', 'empresa_id'];
         
+        $allowedRoles = ['cliente', 'conductor', 'administrador', 'empresa', 'soporte_tecnico'];
+
         foreach ($allowedFields as $field) {
             if (array_key_exists($field, $input)) {
+                if ($field === 'tipo_usuario' && !in_array($input[$field], $allowedRoles, true)) {
+                    sendJsonResponse(false, 'Rol de usuario no permitido');
+                    return;
+                }
                 $updates[] = "$field = ?";
                 $params[] = $input[$field];
                 error_log("handleUpdateUser - Campo a actualizar: $field = " . json_encode($input[$field]));
@@ -282,6 +288,11 @@ function handleCreateUser($db, $input) {
     
     if ($stmtCheck->fetch()) {
         sendJsonResponse(false, 'El email ya está registrado');
+    }
+
+    $allowedRoles = ['cliente', 'conductor', 'administrador', 'empresa', 'soporte_tecnico'];
+    if (!in_array($input['tipo_usuario'], $allowedRoles, true)) {
+        sendJsonResponse(false, 'Rol de usuario no permitido');
     }
 
     $uuid = 'user_' . uniqid('', true);

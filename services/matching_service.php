@@ -9,6 +9,10 @@ require_once __DIR__ . '/eta_service.php';
 
 class RideMatchingService
 {
+    private const MATCH_DISTANCE_WEIGHT = 0.5;
+    private const MATCH_RATING_WEIGHT = 0.3;
+    private const MATCH_CANCEL_RATE_WEIGHT = 0.2;
+    private const MATCH_ETA_WEIGHT = 0.2;
     private const DISTANCE_WEIGHT = 0.35;
     private const RATING_WEIGHT = 0.25;
     private const ACCEPTANCE_WEIGHT = 0.25;
@@ -217,13 +221,22 @@ class RideMatchingService
                 ($cancelRate * self::CANCELLATION_PENALTY_WEIGHT)
             );
 
-            // score = distance_weight + rating_weight + acceptance_weight + cancellation_penalty + idle_weight + eta_signal
-            $score =
+            // Score legacy (se mantiene para observabilidad interna).
+            $legacyScore =
                 ($distanceScore * self::DISTANCE_WEIGHT) +
                 $staticScore +
                 ($idleScore * self::IDLE_WEIGHT) -
                 $loadPenalty +
                 ($etaScore * 0.10);
+
+            // Score deterministico principal para matching:
+            // menor distancia + mayor rating + menor cancelacion.
+            $etaMinutes = max(0.0, ((float)$etaSec) / 60.0);
+            $score =
+                ($distance * self::MATCH_DISTANCE_WEIGHT) -
+                ($rating * self::MATCH_RATING_WEIGHT) +
+                ($cancelRate * self::MATCH_CANCEL_RATE_WEIGHT) +
+                ($etaMinutes * self::MATCH_ETA_WEIGHT);
             $ranked[] = [
                 'driver_id' => $id,
                 'id' => $id,
@@ -233,10 +246,13 @@ class RideMatchingService
                 'rating' => $rating,
                 'acceptance_rate' => $acceptance,
                 'cancel_rate' => $cancelRate,
+                'eta_minutes' => (int)ceil($etaMinutes),
                 'idle_seconds' => $idleSeconds,
                 'load_penalty' => round($loadPenalty, 4),
-                'score' => $score,
-                'offer_timeout_sec' => 10,
+                'score' => round($score, 6),
+                'ranking_score' => round($score, 6),
+                'legacy_score' => round($legacyScore, 6),
+                'offer_timeout_sec' => 25,
                 'nombre' => $metaById[$id]['nombre'],
                 'apellido' => $metaById[$id]['apellido'],
                 'telefono' => $metaById[$id]['telefono'],
@@ -247,7 +263,19 @@ class RideMatchingService
             ];
         }
 
-        usort($ranked, static fn($a, $b) => $b['score'] <=> $a['score']);
+        usort($ranked, static function ($a, $b): int {
+            $scoreCmp = ($a['ranking_score'] ?? $a['score'] ?? 0) <=> ($b['ranking_score'] ?? $b['score'] ?? 0);
+            if ($scoreCmp !== 0) {
+                return $scoreCmp;
+            }
+
+            $etaCmp = ((int)($a['eta_seconds'] ?? 0)) <=> ((int)($b['eta_seconds'] ?? 0));
+            if ($etaCmp !== 0) {
+                return $etaCmp;
+            }
+
+            return ((int)($a['driver_id'] ?? 0)) <=> ((int)($b['driver_id'] ?? 0));
+        });
         return array_slice($ranked, 0, $limit);
     }
 

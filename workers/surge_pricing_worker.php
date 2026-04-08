@@ -60,8 +60,11 @@ function demandCount10m($redis, string $gridId): int
 {
     $zoneKey = 'zone:' . $gridId;
     $total = 0;
+    $nowBogota = function_exists('now_colombia')
+        ? now_colombia()
+        : new DateTime('now', new DateTimeZone('America/Bogota'));
     for ($i = 0; $i < 10; $i++) {
-        $ts = gmdate('YmdHi', time() - ($i * 60));
+        $ts = (clone $nowBogota)->modify('-' . $i . ' minutes')->format('YmdHi');
         $bucketKey = 'dispatch:hotspots:bucket:' . $ts;
         $total += (int)$redis->hGet($bucketKey, $zoneKey);
     }
@@ -126,7 +129,9 @@ function runSurgeWorker(): void
                     'available_drivers' => $available,
                     'ratio' => round($ratio, 3),
                     'multiplier' => $multiplier,
-                    'ts' => gmdate('c'),
+                    'ts' => function_exists('now_colombia')
+                        ? now_colombia()->format('c')
+                        : (new DateTime('now', new DateTimeZone('America/Bogota')))->format('c'),
                 ];
 
                 $redis->setex(SURGE_KEY_PREFIX . $gridId, SURGE_TTL_SEC, json_encode($payload, JSON_UNESCAPED_UNICODE));

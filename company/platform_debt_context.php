@@ -9,7 +9,12 @@
  */
 
 header('Content-Type: application/json; charset=UTF-8');
-header('Access-Control-Allow-Origin: *');
+$viaxOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$viaxAllowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
+if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $viaxOrigin);
+    header('Vary: Origin');
+}
 header('Access-Control-Allow-Methods: GET, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Accept');
 
@@ -42,15 +47,9 @@ try {
         throw new Exception('Empresa no encontrada');
     }
 
+    // La deuda con administración es acumulativa y persistida en saldo_pendiente.
+    // No debe recalcularse dinámicamente con pagos de conductores.
     $deudaActual = floatval($empresa['saldo_pendiente'] ?? 0);
-
-    // Deuda dinámica de la empresa basada en deuda actual de sus conductores.
-    $stmtDynamicDebt = $db->prepare("\n        SELECT COALESCE(SUM(GREATEST(COALESCE(comisiones.total_comision, 0) - COALESCE(pagos.total_pagado, 0), 0)), 0) AS deuda_dinamica\n        FROM usuarios u\n        LEFT JOIN (\n            SELECT\n                ac.conductor_id,\n                SUM(\n                    CASE\n                        WHEN vrt.comision_plataforma_valor > 0 THEN vrt.comision_plataforma_valor\n                        WHEN vrt.comision_plataforma_porcentaje > 0 THEN\n                            COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(s.precio_final, 0), s.precio_estimado)\n                            * (vrt.comision_plataforma_porcentaje / 100)\n                        ELSE 0\n                    END\n                ) AS total_comision\n            FROM solicitudes_servicio s\n            INNER JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id\n            LEFT JOIN viaje_resumen_tracking vrt ON s.id = vrt.solicitud_id\n            WHERE s.estado IN ('completada', 'entregado')\n            GROUP BY ac.conductor_id\n        ) comisiones ON comisiones.conductor_id = u.id\n        LEFT JOIN (\n            SELECT conductor_id, SUM(monto) AS total_pagado\n            FROM pagos_comision\n            GROUP BY conductor_id\n        ) pagos ON pagos.conductor_id = u.id\n        WHERE u.empresa_id = :empresa_id\n          AND u.tipo_usuario = 'conductor'\n    ");
-    $stmtDynamicDebt->execute([':empresa_id' => $empresaId]);
-    $deudaDinamica = floatval($stmtDynamicDebt->fetchColumn() ?: 0);
-    if ($deudaDinamica > $deudaActual) {
-        $deudaActual = $deudaDinamica;
-    }
     if (abs($deudaActual) < $debtEpsilon) {
         $deudaActual = 0.0;
     }

@@ -1,6 +1,11 @@
 <?php
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
+$viaxOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$viaxAllowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
+if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $viaxOrigin);
+    header('Vary: Origin');
+}
 header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Accept');
 
@@ -60,6 +65,28 @@ function getR2ProxyUrl(string $key): string {
     $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
     $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
     return "$protocol://$host/r2_proxy.php?key=" . urlencode($key);
+}
+
+function sendConductorPaymentEmail(array $conductor, string $subject, string $message): bool
+{
+    $email = trim((string)($conductor['email'] ?? ''));
+    if ($email === '') {
+        error_log('[debt_payment_reports] Correo de conductor vacío. No se envía email.');
+        return false;
+    }
+
+    $nombre = trim((string)($conductor['nombre'] ?? '') . ' ' . (string)($conductor['apellido'] ?? ''));
+
+    try {
+        $sent = Mailer::sendEmail($email, $nombre, $subject, $message);
+        if (!$sent) {
+            error_log('[debt_payment_reports] Mailer::sendEmail devolvió false. email=' . $email . ' subject=' . $subject);
+        }
+        return (bool)$sent;
+    } catch (Throwable $e) {
+        error_log('[debt_payment_reports] Error enviando email a conductor: ' . $e->getMessage());
+        return false;
+    }
 }
 
 try {
@@ -173,14 +200,11 @@ try {
             ['reporte_id' => $reportId]
         );
 
-        if (!empty($conductor['email'])) {
-            Mailer::sendEmail(
-                $conductor['email'],
-                trim(($conductor['nombre'] ?? '') . ' ' . ($conductor['apellido'] ?? '')),
-                'Comprobante de deuda aprobado',
-                'Tu comprobante de pago de comisión fue aprobado por la empresa. Queda pendiente la confirmación final del pago.'
-            );
-        }
+        $emailSent = sendConductorPaymentEmail(
+            $conductor,
+            'Comprobante de deuda aprobado',
+            'Tu comprobante de pago de comisión fue aprobado por la empresa. Queda pendiente la confirmación final del pago.'
+        );
 
         notifyCompanyUsers(
             $db,
@@ -193,7 +217,11 @@ try {
             ['accion' => 'approve', 'reporte_id' => $reportId, 'conductor_id' => $conductorId]
         );
 
-        echo json_encode(['success' => true, 'message' => 'Comprobante aprobado']);
+        echo json_encode([
+            'success' => true,
+            'message' => 'Comprobante aprobado',
+            'data' => ['email_enviado' => $emailSent],
+        ]);
         exit();
     }
 
@@ -227,14 +255,11 @@ try {
             ['reporte_id' => $reportId, 'motivo' => $motivo]
         );
 
-        if (!empty($conductor['email'])) {
-            Mailer::sendEmail(
-                $conductor['email'],
-                trim(($conductor['nombre'] ?? '') . ' ' . ($conductor['apellido'] ?? '')),
-                'Comprobante de deuda rechazado',
-                'Tu comprobante de pago fue rechazado. Motivo: ' . $motivo
-            );
-        }
+        $emailSent = sendConductorPaymentEmail(
+            $conductor,
+            'Comprobante de deuda rechazado',
+            'Tu comprobante de pago fue rechazado. Motivo: ' . $motivo
+        );
 
         notifyCompanyUsers(
             $db,
@@ -247,7 +272,11 @@ try {
             ['accion' => 'reject', 'reporte_id' => $reportId, 'conductor_id' => $conductorId]
         );
 
-        echo json_encode(['success' => true, 'message' => 'Comprobante rechazado']);
+        echo json_encode([
+            'success' => true,
+            'message' => 'Comprobante rechazado',
+            'data' => ['email_enviado' => $emailSent],
+        ]);
         exit();
     }
 
@@ -330,51 +359,43 @@ try {
 
         $pagoId = intval($stmtPago->fetchColumn());
 
-        $stmtEmpresa = $db->prepare("SELECT id, nombre, comision_admin_porcentaje, saldo_pendiente
-                                     FROM empresas_transporte
-                                     WHERE id = :id
-                                     LIMIT 1
-                                     FOR UPDATE");
-        $stmtEmpresa->execute([':id' => $empresaId]);
-        $empresa = $stmtEmpresa->fetch(PDO::FETCH_ASSOC);
+        // Regla de negocio: la deuda de la empresa con plataforma se incrementa
+        // cuando la empresa confirma el pago reportado por el conductor.
+        $stmtEmpresaCfg = $db->prepare("SELECT comision_admin_porcentaje, saldo_pendiente
+            FROM empresas_transporte
+            WHERE id = :empresa_id
+            LIMIT 1
+            FOR UPDATE");
+        $stmtEmpresaCfg->execute([':empresa_id' => $empresaId]);
+        $empresaCfg = $stmtEmpresaCfg->fetch(PDO::FETCH_ASSOC) ?: [];
 
-        if ($empresa) {
-            $porcentajeAdmin = floatval($empresa['comision_admin_porcentaje'] ?? 0);
-            if ($porcentajeAdmin > 0) {
-                $cargoAdmin = $montoAplicado * ($porcentajeAdmin / 100);
+        $comisionAdminPct = floatval($empresaCfg['comision_admin_porcentaje'] ?? 0);
+        $saldoAnterior = floatval($empresaCfg['saldo_pendiente'] ?? 0);
+        $cargoAdmin = $comisionAdminPct > 0 ? round($montoAplicado * ($comisionAdminPct / 100), 2) : 0.0;
 
-                if ($cargoAdmin > 0) {
-                    $saldoAnterior = floatval($empresa['saldo_pendiente'] ?? 0);
-                    $saldoNuevo = $saldoAnterior + $cargoAdmin;
+        if ($cargoAdmin > 0) {
+            $saldoNuevo = $saldoAnterior + $cargoAdmin;
 
-                    $stmtUpdateSaldo = $db->prepare("UPDATE empresas_transporte
-                                                     SET saldo_pendiente = :saldo_nuevo,
-                                                         actualizado_en = NOW()
-                                                     WHERE id = :id");
-                    $stmtUpdateSaldo->execute([
-                        ':saldo_nuevo' => $saldoNuevo,
-                        ':id' => $empresaId,
-                    ]);
+            $stmtSaldo = $db->prepare("UPDATE empresas_transporte
+                SET saldo_pendiente = :saldo_nuevo,
+                    actualizado_en = NOW()
+                WHERE id = :empresa_id");
+            $stmtSaldo->execute([
+                ':saldo_nuevo' => $saldoNuevo,
+                ':empresa_id' => $empresaId,
+            ]);
 
-                    $descripcionCargo = sprintf(
-                        'Comisión sobre recaudo conductor #%d (%.2f%%) - comprobante #%d',
-                        $conductorId,
-                        $porcentajeAdmin,
-                        $reportId
-                    );
-
-                    $stmtCargo = $db->prepare("INSERT INTO pagos_empresas
-                        (empresa_id, monto, tipo, descripcion, saldo_anterior, saldo_nuevo, creado_en)
-                        VALUES (:empresa_id, :monto, 'cargo', :descripcion, :saldo_anterior, :saldo_nuevo, NOW())");
-                    $stmtCargo->execute([
-                        ':empresa_id' => $empresaId,
-                        ':monto' => $cargoAdmin,
-                        ':descripcion' => $descripcionCargo,
-                        ':saldo_anterior' => $saldoAnterior,
-                        ':saldo_nuevo' => $saldoNuevo,
-                    ]);
-                }
-            }
+            $stmtCargo = $db->prepare("INSERT INTO pagos_empresas
+                (empresa_id, monto, tipo, descripcion, saldo_anterior, saldo_nuevo, creado_en)
+                VALUES
+                (:empresa_id, :monto, 'cargo', :descripcion, :saldo_anterior, :saldo_nuevo, NOW())");
+            $stmtCargo->execute([
+                ':empresa_id' => $empresaId,
+                ':monto' => $cargoAdmin,
+                ':descripcion' => sprintf('Cargo admin %.2f%% por pago confirmado de conductor #%d (reporte #%d)', $comisionAdminPct, $conductorId, $reportId),
+                ':saldo_anterior' => $saldoAnterior,
+                ':saldo_nuevo' => $saldoNuevo,
+            ]);
         }
 
         $stmtUpdate = $db->prepare("UPDATE pagos_comision_reportes
@@ -403,14 +424,11 @@ try {
             ['reporte_id' => $reportId, 'pago_id' => $pagoId]
         );
 
-        if (!empty($conductor['email'])) {
-            Mailer::sendEmail(
-                $conductor['email'],
-                trim(($conductor['nombre'] ?? '') . ' ' . ($conductor['apellido'] ?? '')),
-                'Pago de deuda confirmado',
-                'Tu pago de deuda de comisión fue confirmado por la empresa. Gracias por mantener tu cuenta al día.'
-            );
-        }
+        $emailSent = sendConductorPaymentEmail(
+            $conductor,
+            'Pago de deuda confirmado',
+            'Tu pago de deuda de comisión fue confirmado por la empresa. Gracias por mantener tu cuenta al día.'
+        );
 
         notifyCompanyUsers(
             $db,
@@ -426,7 +444,10 @@ try {
         echo json_encode([
             'success' => true,
             'message' => 'Pago confirmado correctamente',
-            'data' => ['pago_id' => $pagoId],
+            'data' => [
+                'pago_id' => $pagoId,
+                'email_enviado' => $emailSent,
+            ],
         ]);
         exit();
     }

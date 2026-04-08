@@ -8,7 +8,12 @@
  * - Reintentos seguros desde cliente
  */
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
+$viaxOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$viaxAllowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
+if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $viaxOrigin);
+    header('Vary: Origin');
+}
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, X-Idempotency-Key');
 
@@ -23,6 +28,7 @@ require_once '../utils/NotificationHelper.php';
 require_once '../config/redis.php';
 require_once '../core/Cache.php';
 require_once '../services/driver_service.php';
+require_once __DIR__ . '/../services/RealtimeEventPublisher.php';
 require_once __DIR__ . '/driver_auth.php';
 
 /** Guarda asignación temporal en cache para acelerar consultas de estado. */
@@ -38,6 +44,51 @@ function cacheTripAssignment(int $solicitudId, int $conductorId): void
     } catch (Throwable $e) {
         error_log('accept_trip_request.php cache warning: ' . $e->getMessage());
     }
+}
+
+function acquireTripLockForDriver($redis, int $solicitudId, int $conductorId): bool
+{
+    $lockKey = 'trip_lock:' . $solicitudId;
+    try {
+        $existing = $redis->get($lockKey);
+        if (is_string($existing) && (int)$existing === $conductorId) {
+            $redis->expire($lockKey, 120);
+            return true;
+        }
+
+        $ok = $redis->set($lockKey, (string)$conductorId, ['NX', 'EX' => 120]);
+        if ($ok === true || strtoupper((string)$ok) === 'OK') {
+            return true;
+        }
+    } catch (Throwable $e) {
+        $ok = $redis->setnx($lockKey, (string)$conductorId);
+        if ($ok) {
+            $redis->expire($lockKey, 120);
+            return true;
+        }
+    }
+
+    $owner = $redis->get($lockKey);
+    return is_string($owner) && (int)$owner === $conductorId;
+}
+
+function publishAcceptedToRedis($redis, int $solicitudId, int $conductorId): void
+{
+    $redis->incr('metrics:driver_acceptance_rate');
+    $redis->setex('ride:' . $solicitudId . ':accepted_driver', 120, (string)$conductorId);
+    $redis->setex('ride:' . $solicitudId . ':current_driver', 180, (string)$conductorId);
+    $redis->setex('ride:' . $solicitudId . ':driver:' . $conductorId . ':status', 180, 'accepted');
+    $redis->del('driver:' . $conductorId . ':offer_lock');
+    $redis->del('driver_offer_lock:' . $conductorId);
+    $redis->publish('trip:responses:' . $solicitudId, (string)$conductorId);
+    $redis->lPush('trip:responses_queue:' . $solicitudId, json_encode([
+        'driver_id' => $conductorId,
+        'status' => 'accepted',
+        'accepted_at' => gmdate('c'),
+    ], JSON_UNESCAPED_UNICODE));
+    $redis->expire('trip:responses_queue:' . $solicitudId, 120);
+    $redis->incr('metrics:dispatch_accepts');
+    DriverGeoService::updateDriverStats($conductorId, 1.0, null, 0);
 }
 
 try {
@@ -69,14 +120,12 @@ try {
     $result = $concurrencyService->acceptTripConcurrent($solicitudId, $conductorId, $idempotencyKey);
     
     if ($result['success']) {
-        $tripLockAcquired = false;
+        $tripLockAcquired = true;
+        $redis = null;
         try {
             $redis = Cache::redis();
             if ($redis) {
-                $tripLockAcquired = (bool)$redis->setnx('trip_lock:' . $solicitudId, (string)$conductorId);
-                if ($tripLockAcquired) {
-                    $redis->expire('trip_lock:' . $solicitudId, 120);
-                }
+                $tripLockAcquired = acquireTripLockForDriver($redis, $solicitudId, $conductorId);
             }
         } catch (Throwable $e) {}
 
@@ -87,20 +136,8 @@ try {
         cacheTripAssignment($solicitudId, $conductorId);
         DriverGeoService::setDriverState($conductorId, 'on_trip');
         try {
-            $redis = Cache::redis();
             if ($redis) {
-                $redis->incr('metrics:driver_acceptance_rate');
-                $redis->setex('ride:' . $solicitudId . ':accepted_driver', 120, (string)$conductorId);
-                $redis->del('driver:' . $conductorId . ':offer_lock');
-                $redis->del('driver_offer_lock:' . $conductorId);
-                $redis->publish('trip:responses:' . $solicitudId, (string)$conductorId);
-                $redis->lPush('trip:responses_queue:' . $solicitudId, json_encode([
-                    'driver_id' => $conductorId,
-                    'accepted_at' => gmdate('c'),
-                ], JSON_UNESCAPED_UNICODE));
-                $redis->expire('trip:responses_queue:' . $solicitudId, 120);
-                $redis->incr('metrics:dispatch_accepts');
-                DriverGeoService::updateDriverStats($conductorId, 1.0, null, 0);
+                publishAcceptedToRedis($redis, $solicitudId, $conductorId);
             }
         } catch (Throwable $e) {}
 
@@ -216,8 +253,12 @@ try {
             SET estado = 'aceptada',
                 aceptado_en = NOW()
             WHERE id = ?
+              AND estado = 'pendiente'
         ");
         $stmt->execute([$solicitudId]);
+        if ($stmt->rowCount() === 0) {
+            throw new Exception('La solicitud ya fue aceptada por otro conductor');
+        }
         
         // Crear asignación
         $stmt = $db->prepare("
@@ -244,22 +285,11 @@ try {
             try {
                 $redis = Cache::redis();
                 if ($redis) {
-                    $tripLockAcquired = (bool)$redis->setnx('trip_lock:' . $solicitudId, (string)$conductorId);
+                    $tripLockAcquired = acquireTripLockForDriver($redis, $solicitudId, $conductorId);
                     if (!$tripLockAcquired) {
                         throw new Exception('La solicitud ya fue asignada por otro conductor');
                     }
-                    $redis->expire('trip_lock:' . $solicitudId, 120);
-
-                    $redis->setex('ride:' . $solicitudId . ':accepted_driver', 120, (string)$conductorId);
-                    $redis->del('driver:' . $conductorId . ':offer_lock');
-                    $redis->del('driver_offer_lock:' . $conductorId);
-                    $redis->publish('trip:responses:' . $solicitudId, (string)$conductorId);
-                    $redis->lPush('trip:responses_queue:' . $solicitudId, json_encode([
-                        'driver_id' => $conductorId,
-                        'accepted_at' => gmdate('c'),
-                    ], JSON_UNESCAPED_UNICODE));
-                    $redis->expire('trip:responses_queue:' . $solicitudId, 120);
-                    $redis->incr('metrics:dispatch_accepts');
+                    publishAcceptedToRedis($redis, $solicitudId, $conductorId);
                 }
             } catch (Throwable $e) {}
 
@@ -278,6 +308,19 @@ try {
                 error_log('accept_trip_request.php legacy notification error: ' . $notificationError->getMessage());
             }
         
+        // Publicar al gateway WebSocket
+        try {
+            $nombreCond = trim(($conductor['nombre'] ?? '') . ' ' . ($conductor['apellido'] ?? ''));
+            RealtimeEventPublisher::driverAssigned(
+                $solicitudId,
+                (int)$solicitud['cliente_id'],
+                $conductorId,
+                ['driver_name' => $nombreCond]
+            );
+        } catch (\Throwable $rtErr) {
+            error_log('[RealtimePublisher] accept_trip: ' . $rtErr->getMessage());
+        }
+
         echo json_encode([
             'success' => true,
             'message' => 'Viaje aceptado exitosamente',

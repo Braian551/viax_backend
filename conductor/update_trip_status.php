@@ -8,7 +8,12 @@
  * - Logging de sincronización para debugging
  */
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
+$viaxOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$viaxAllowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
+if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $viaxOrigin);
+    header('Vary: Origin');
+}
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, X-Idempotency-Key, X-Client-Version');
 
@@ -26,6 +31,7 @@ require_once __DIR__ . '/tracking/tracking_schema_helpers.php';
 require_once '../services/trip_state_machine.php';
 require_once '../services/driver_service.php';
 require_once __DIR__ . '/driver_auth.php';
+require_once __DIR__ . '/../services/RealtimeEventPublisher.php';
 
 function canonicalToStorageState(string $canonicalState): string
 {
@@ -608,6 +614,23 @@ try {
         }
     } catch (Exception $notificationError) {
         error_log('update_trip_status.php notification error: ' . $notificationError->getMessage());
+    }
+
+    // Publicar evento al gateway realtime (WebSocket)
+    try {
+        if (isset($clienteId) && $clienteId > 0) {
+            RealtimeEventPublisher::tripStatusChanged(
+                (int)$solicitud_id,
+                (int)$clienteId,
+                $nuevoEstadoCanonical,
+                [
+                    'estado_persistencia' => $nuevoEstadoPersistencia,
+                    'conductor_id' => (int)$conductor_id,
+                ]
+            );
+        }
+    } catch (\Throwable $rtErr) {
+        error_log('[RealtimePublisher] update_trip_status: ' . $rtErr->getMessage());
     }
 
     echo json_encode([

@@ -7,6 +7,21 @@ require_once __DIR__ . '/../config/app.php';
 
 class DynamicPricingService
 {
+    public static function nowColombia(): DateTime
+    {
+        if (function_exists('now_colombia')) {
+            return now_colombia();
+        }
+
+        return new DateTime('now', new DateTimeZone('America/Bogota'));
+    }
+
+    public static function isNightTime(DateTimeInterface $dateTime): bool
+    {
+        $hour = (int)$dateTime->format('H');
+        return $hour >= 21 || $hour < 6;
+    }
+
     public static function calculate(array $params): array
     {
         $distanceKm = max(0.0, (float)($params['distance_km'] ?? 0));
@@ -22,14 +37,24 @@ class DynamicPricingService
 
         $zoneKey = self::zoneKey((float)($params['lat'] ?? 0), (float)($params['lng'] ?? 0));
         $surge = self::getSurge($zoneKey);
+        $nowColombia = self::nowColombia();
+        $isNight = self::isNightTime($nowColombia);
+        $nightMultiplier = (float)($params['night_multiplier'] ?? env_value('PRICING_NIGHT_MULTIPLIER', '1.0'));
+        if ($nightMultiplier < 1.0) {
+            $nightMultiplier = 1.0;
+        }
+        $nightFactor = $isNight ? $nightMultiplier : 1.0;
 
         $basePrice = $baseFare + ($distanceKm * $perKmRate) + ($timeMin * $perMinRate);
-        $finalPrice = round($basePrice * $surge * $trafficFactor, 2);
+        $finalPrice = round($basePrice * $surge * $trafficFactor * $nightFactor, 2);
 
         return [
             'base_price' => round($basePrice, 2),
             'traffic_factor' => round($trafficFactor, 4),
             'surge' => round($surge, 4),
+            'night_factor' => round($nightFactor, 4),
+            'is_night' => $isNight,
+            'colombia_time' => $nowColombia->format('c'),
             'final_price' => $finalPrice,
             'zone_key' => $zoneKey,
         ];

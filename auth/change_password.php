@@ -27,6 +27,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 require_once '../config/database.php';
 require_once 'services/AuthService.php';
 require_once '../services/EmailService.php';
+require_once '../core/TestBypass.php';
 
 function generateVerificationCode(): string {
     return strval(random_int(1000, 9999));
@@ -45,8 +46,8 @@ function getUserById(PDO $db, int $userId): array {
 }
 
 function validatePasswordChangeCode(PDO $db, string $email, string $code): int {
-    // Temporary reviewer bypass for QA
-    if (trim($code) === '8052') {
+    // Bypass QA controlado (8052): no productivo por defecto, o por flag explícito.
+    if (TestBypass::shouldAllowCode((string)$code, 'auth_change_password', (string)$email)) {
         return 0;
     }
 

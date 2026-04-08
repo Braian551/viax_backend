@@ -1,6 +1,11 @@
 <?php
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
+$viaxOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$viaxAllowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
+if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $viaxOrigin);
+    header('Vary: Origin');
+}
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 
@@ -63,6 +68,11 @@ try {
             // Cooldown inmediato tras rechazo explícito.
             $redis->setex('driver:cooldown:' . $conductorId, 30, '1');
             $redis->del('driver_offer_lock:' . $conductorId);
+            $redis->setex('ride:' . $solicitudId . ':driver:' . $conductorId . ':status', 180, 'rejected');
+            $currentDriverRaw = $redis->get('ride:' . $solicitudId . ':current_driver');
+            if (is_string($currentDriverRaw) && (int)$currentDriverRaw === $conductorId) {
+                $redis->del('ride:' . $solicitudId . ':current_driver');
+            }
 
             $payload = json_encode([
                 'driver_id' => $conductorId,

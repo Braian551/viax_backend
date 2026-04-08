@@ -1,0 +1,22 @@
+{
+  "name": "viax-realtime-gateway",
+  "version": "1.0.0",
+  "description": "Gateway WebSocket realtime para Viax — uWebSockets.js + Redis Pub/Sub",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node test/smoke.js"
+  },
+  "dependencies": {
+    "ioredis": "^5.4.1",
+    "ws": "^8.18.0"
+  },
+  "optionalDependencies": {
+    "uWebSockets.js": "uNetworking/uWebSockets.js#v20.49.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "private": true
+}

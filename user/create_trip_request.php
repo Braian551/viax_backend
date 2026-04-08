@@ -8,7 +8,12 @@
  * - Búsqueda de conductores cercanos
  */
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
+$origin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$allowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
+if ($origin !== '' && in_array($origin, $allowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $origin);
+    header('Vary: Origin');
+}
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, X-Idempotency-Key, X-Timestamp, X-Nonce, X-Signature, X-Device-Fingerprint, X-Device-Model, X-Device-Platform, X-Integrity-Score, X-Integrity-Warning');
 
@@ -27,6 +32,7 @@ require_once __DIR__ . '/../services/matching_service.php';
 require_once __DIR__ . '/../services/eta_service.php';
 require_once __DIR__ . '/../services/pickup_eta_service.php';
 require_once __DIR__ . '/../services/pricing_service.php';
+require_once __DIR__ . '/../services/upfront_pricing_service.php';
 require_once __DIR__ . '/../services/places_search_service.php';
 
 /** Valida coordenadas geográficas para evitar payloads corruptos. */
@@ -47,7 +53,7 @@ function cacheRideRequest(int $solicitudId, array $data): void
         'longitud_origen' => (float) $data['longitud_origen'],
         'latitud_destino' => (float) $data['latitud_destino'],
         'longitud_destino' => (float) $data['longitud_destino'],
-        'timestamp' => time(),
+        'timestamp' => now_colombia()->getTimestamp(),
     ];
 
     // TTL corto: solicitud en búsqueda activa inicial.
@@ -61,6 +67,35 @@ function recentPlaceNameFromAddress(string $address): string
         return $parts[0];
     }
     return $address !== '' ? $address : 'Ubicación';
+}
+
+/**
+ * Compatibilidad de esquema: valida columnas opcionales sin romper despliegues graduales.
+ */
+function tripRequestColumnExists(PDO $db, string $tableName, string $columnName): bool
+{
+    static $cache = [];
+    $key = strtolower(trim($tableName)) . '.' . strtolower(trim($columnName));
+    if (isset($cache[$key])) {
+        return $cache[$key];
+    }
+
+    $stmt = $db->prepare("
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = :table_name
+              AND column_name = :column_name
+        )
+    ");
+    $stmt->execute([
+        ':table_name' => strtolower(trim($tableName)),
+        ':column_name' => strtolower(trim($columnName)),
+    ]);
+
+    $cache[$key] = (bool)$stmt->fetchColumn();
+    return $cache[$key];
 }
 
 try {
@@ -119,20 +154,70 @@ try {
         // Métrica secundaria, no rompe flujo.
     }
     
+    $upfrontPricingEnabled = UpfrontPricingService::isEnabled();
+    $hasPrecioFijoColumn = tripRequestColumnExists($db, 'solicitudes_servicio', 'precio_fijo');
+    $hasPrecioCongeladoColumn = tripRequestColumnExists($db, 'solicitudes_servicio', 'precio_congelado');
+    $hasDesviacionPorcentajeColumn = tripRequestColumnExists($db, 'solicitudes_servicio', 'desviacion_porcentaje');
+
+    $pricingInput = [
+        'distance_km' => $distanciaKm,
+        'time_min' => $duracionMin,
+        'base_fare' => (float)($data['base_fare'] ?? 5000),
+        'per_km_rate' => (float)($data['per_km_rate'] ?? 1800),
+        'per_min_rate' => (float)($data['per_min_rate'] ?? 250),
+        'avg_speed_kmh' => 28,
+        'current_speed_kmh' => 24,
+        'lat' => $latOrigen,
+        'lng' => $lngOrigen,
+    ];
+
+    $precioEstimadoPayload = isset($data['precio_estimado']) ? (float)$data['precio_estimado'] : (float)($data['precio'] ?? 0);
+    $precioCalculadoServidor = 0.0;
+    try {
+        $pricingServidor = DynamicPricingService::calculate($pricingInput);
+        $precioCalculadoServidor = max(0.0, (float)($pricingServidor['final_price'] ?? 0));
+    } catch (Throwable $pricingError) {
+        error_log('[create_trip_request] pricing server warning: ' . $pricingError->getMessage());
+    }
+
+    $precioEstimado = $precioEstimadoPayload;
+    if ($upfrontPricingEnabled) {
+        $precioEstimado = $precioCalculadoServidor > 0
+            ? $precioCalculadoServidor
+            : max(0.0, $precioEstimadoPayload);
+    }
+
+    $nowColombia = now_colombia();
+    $nowColombiaDb = $nowColombia->format('Y-m-d H:i:s');
+    $idempotencyWindowStart = (clone $nowColombia)->modify('-5 minutes')->format('Y-m-d H:i:s');
+
     // Obtener clave de idempotencia
     $idempotencyKey = $_SERVER['HTTP_X_IDEMPOTENCY_KEY'] ?? $data['idempotency_key'] ?? null;
     
     // Si hay clave de idempotencia, verificar si ya existe una solicitud reciente
     if ($idempotencyKey) {
+        $precioFijoExpr = $hasPrecioFijoColumn
+            ? 'COALESCE(s.precio_fijo, s.precio_estimado, 0) AS precio_fijo'
+            : 'COALESCE(s.precio_estimado, 0) AS precio_fijo';
+        $precioCongeladoExpr = $hasPrecioCongeladoColumn
+            ? 'COALESCE(s.precio_congelado, FALSE) AS precio_congelado'
+            : 'FALSE AS precio_congelado';
         $stmt = $db->prepare("
-            SELECT id, estado FROM solicitudes_servicio 
+            SELECT
+                s.id,
+                s.estado,
+                COALESCE(s.precio_estimado, 0) AS precio_estimado,
+                $precioFijoExpr,
+                $precioCongeladoExpr
+            FROM solicitudes_servicio s
             WHERE cliente_id = :user_id 
             AND last_operation_key = :idem_key
-            AND fecha_creacion > NOW() - INTERVAL '5 minutes'
+            AND fecha_creacion > :fecha_creacion_minima
         ");
         $stmt->execute([
             ':user_id' => $usuarioId,
-            ':idem_key' => $idempotencyKey
+            ':idem_key' => $idempotencyKey,
+            ':fecha_creacion_minima' => $idempotencyWindowStart,
         ]);
         $existing = $stmt->fetch(PDO::FETCH_ASSOC);
         
@@ -144,7 +229,10 @@ try {
                 'solicitud_id' => $existing['id'],
                 'idempotent' => true,
                 'conductores_encontrados' => 0,
-                'conductores' => []
+                'conductores' => [],
+                'precio_estimado' => round((float)($existing['precio_estimado'] ?? 0), 2),
+                'precio_fijo' => round((float)($existing['precio_fijo'] ?? $existing['precio_estimado'] ?? 0), 2),
+                'precio_congelado' => UpfrontPricingService::toBool($existing['precio_congelado'] ?? false)
             ]);
             exit();
         }
@@ -192,55 +280,100 @@ try {
         mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff)
     );
     
-    // Crear la solicitud de servicio con los campos correctos de la tabla
-    $stmt = $db->prepare("
-        INSERT INTO solicitudes_servicio (
-            uuid_solicitud,
-            cliente_id, 
-            tipo_servicio,
-            tipo_vehiculo,
-            empresa_id,
-            latitud_recogida, 
-            longitud_recogida, 
-            direccion_recogida,
-            latitud_destino, 
-            longitud_destino, 
-            direccion_destino,
-            distancia_estimada,
-            tiempo_estimado,
-            precio_estimado,
-            metodo_pago,
-            estado,
-            last_operation_key,
-            fecha_creacion,
-            solicitado_en
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, NOW(), NOW())
-    ");
-    
-    // Obtener precio si se proporcionó, o usar 0 por defecto
-    $precioEstimado = $data['precio_estimado'] ?? $data['precio'] ?? 0;
+    // Crear solicitud con columnas base + columnas upfront (si existen).
     $metodoPago = 'efectivo'; // Solo efectivo soportado
     $tipoVehiculo = $data['tipo_vehiculo'] ?? 'moto'; // Por defecto moto
     $empresaId = isset($data['empresa_id']) && $data['empresa_id'] !== null ? intval($data['empresa_id']) : null;
-    
-    $stmt->execute([
-        $uuid,
-        $usuarioId,
-        $tipoServicio,
-        $tipoVehiculo,
-        $empresaId,
-        $latOrigen,
-        $lngOrigen,
-        $data['direccion_origen'],
-        $latDestino,
-        $lngDestino,
-        $data['direccion_destino'],
-        $distanciaKm,
-        $duracionMin,
-        $precioEstimado,
-        $metodoPago,
-        $idempotencyKey // Clave de idempotencia para evitar duplicados
-    ]);
+
+    $insertColumns = [
+        'uuid_solicitud',
+        'cliente_id',
+        'tipo_servicio',
+        'tipo_vehiculo',
+        'empresa_id',
+        'latitud_recogida',
+        'longitud_recogida',
+        'direccion_recogida',
+        'latitud_destino',
+        'longitud_destino',
+        'direccion_destino',
+        'distancia_estimada',
+        'tiempo_estimado',
+        'precio_estimado',
+        'metodo_pago',
+        'estado',
+        'last_operation_key',
+        'fecha_creacion',
+        'solicitado_en',
+    ];
+
+    $insertValues = [
+        ':uuid_solicitud',
+        ':cliente_id',
+        ':tipo_servicio',
+        ':tipo_vehiculo',
+        ':empresa_id',
+        ':latitud_recogida',
+        ':longitud_recogida',
+        ':direccion_recogida',
+        ':latitud_destino',
+        ':longitud_destino',
+        ':direccion_destino',
+        ':distancia_estimada',
+        ':tiempo_estimado',
+        ':precio_estimado',
+        ':metodo_pago',
+        "'pendiente'",
+        ':last_operation_key',
+        ':fecha_creacion',
+        ':solicitado_en',
+    ];
+
+    $paramsInsert = [
+        ':uuid_solicitud' => $uuid,
+        ':cliente_id' => $usuarioId,
+        ':tipo_servicio' => $tipoServicio,
+        ':tipo_vehiculo' => $tipoVehiculo,
+        ':empresa_id' => $empresaId,
+        ':latitud_recogida' => $latOrigen,
+        ':longitud_recogida' => $lngOrigen,
+        ':direccion_recogida' => $data['direccion_origen'],
+        ':latitud_destino' => $latDestino,
+        ':longitud_destino' => $lngDestino,
+        ':direccion_destino' => $data['direccion_destino'],
+        ':distancia_estimada' => $distanciaKm,
+        ':tiempo_estimado' => $duracionMin,
+        ':precio_estimado' => $precioEstimado,
+        ':metodo_pago' => $metodoPago,
+        ':last_operation_key' => $idempotencyKey,
+        ':fecha_creacion' => $nowColombiaDb,
+        ':solicitado_en' => $nowColombiaDb,
+    ];
+
+    if ($upfrontPricingEnabled && $hasPrecioFijoColumn) {
+        $insertColumns[] = 'precio_fijo';
+        $insertValues[] = ':precio_fijo';
+        $paramsInsert[':precio_fijo'] = $precioEstimado;
+    }
+    if ($upfrontPricingEnabled && $hasPrecioCongeladoColumn) {
+        $insertColumns[] = 'precio_congelado';
+        $insertValues[] = ':precio_congelado';
+        $paramsInsert[':precio_congelado'] = true;
+    }
+    if ($upfrontPricingEnabled && $hasDesviacionPorcentajeColumn) {
+        $insertColumns[] = 'desviacion_porcentaje';
+        $insertValues[] = ':desviacion_porcentaje';
+        $paramsInsert[':desviacion_porcentaje'] = 0;
+    }
+
+    $stmt = $db->prepare("
+        INSERT INTO solicitudes_servicio (
+            " . implode(",\n            ", $insertColumns) . "
+        ) VALUES (
+            " . implode(",\n            ", $insertValues) . "
+        )
+    ");
+    $stmt->execute($paramsInsert);
     
     $solicitudId = $db->lastInsertId();
 
@@ -255,7 +388,7 @@ try {
                 orden,
                 estado,
                 creado_en
-            ) VALUES (?, ?, ?, ?, ?, 'pendiente', NOW())
+            ) VALUES (?, ?, ?, ?, ?, 'pendiente', ?)
         ");
 
         foreach ($data['paradas'] as $index => $parada) {
@@ -269,7 +402,8 @@ try {
                 $parada['latitud'],
                 $parada['longitud'],
                 $parada['direccion'],
-                $index + 1 // Orden basado en el índice (1-based)
+                $index + 1, // Orden basado en el índice (1-based)
+                $nowColombiaDb,
             ]);
         }
     }
@@ -440,17 +574,12 @@ try {
         null
     );
 
-    $pricingPreview = DynamicPricingService::calculate([
-        'distance_km' => $distanciaKm,
-        'time_min' => $duracionMin,
-        'base_fare' => (float)($data['base_fare'] ?? 5000),
-        'per_km_rate' => (float)($data['per_km_rate'] ?? 1800),
-        'per_min_rate' => (float)($data['per_min_rate'] ?? 250),
-        'avg_speed_kmh' => 28,
-        'current_speed_kmh' => 24,
-        'lat' => $latOrigen,
-        'lng' => $lngOrigen,
-    ]);
+    $pricingPreview = DynamicPricingService::calculate($pricingInput);
+    if ($upfrontPricingEnabled) {
+        $pricingPreview['final_price'] = round((float)$precioEstimado, 2);
+        $pricingPreview['upfront_pricing'] = true;
+        $pricingPreview['frozen_price'] = round((float)$precioEstimado, 2);
+    }
 
     if (!empty($conductoresCercanos)) {
         $first = $conductoresCercanos[0];
@@ -487,6 +616,9 @@ try {
         'surge_multiplier' => round($surgeMultiplier, 2),
         'driver_distance' => $driverDistance,
         'eta' => $eta,
+        'precio_estimado' => round((float)$precioEstimado, 2),
+        'precio_fijo' => round((float)$precioEstimado, 2),
+        'precio_congelado' => $upfrontPricingEnabled && $hasPrecioCongeladoColumn,
         'pricing_preview' => $pricingPreview,
     ]);
 
@@ -498,26 +630,30 @@ try {
             $redis->setex('ride:' . $solicitudId . ':radius', 600, '2');
             $redis->setex('trip:active:' . $solicitudId, 7200, json_encode([
                 'status' => 'requested',
-                'created_at' => gmdate('c'),
+                'created_at' => now_colombia()->format('c'),
                 'cliente_id' => (int)$usuarioId,
                 'empresa_id' => $empresaId,
             ], JSON_UNESCAPED_UNICODE));
             $driverIds = array_values(array_map(static fn($x) => (string)($x['driver_id'] ?? $x['id'] ?? ''), $conductoresCercanos));
             $driverIds = array_values(array_filter($driverIds, static fn($x) => $x !== ''));
             if (!empty($driverIds)) {
-                $redis->setex('ride:' . $solicitudId . ':drivers', 600, json_encode($driverIds, JSON_UNESCAPED_UNICODE));
+                $payload = json_encode($driverIds, JSON_UNESCAPED_UNICODE);
+                $redis->setex('ride:' . $solicitudId . ':drivers', 600, $payload);
+                $redis->setex('ride:' . $solicitudId . ':drivers_queue', 600, $payload);
             }
+            $redis->setex('ride:' . $solicitudId . ':matching_status', 180, 'searching');
 
             $zoneKey = DriverGeoService::zoneCellKey($latOrigen, $lngOrigen);
             // Hotspots con ventana móvil de 10 minutos.
-            $bucketTs = gmdate('YmdHi');
+            $hotspotNow = now_colombia();
+            $bucketTs = $hotspotNow->format('YmdHi');
             $bucketKey = 'dispatch:hotspots:bucket:' . $bucketTs;
             $redis->hIncrBy($bucketKey, $zoneKey, 1);
             $redis->expire($bucketKey, 700);
 
             $score10m = 0;
             for ($i = 0; $i < 10; $i++) {
-                $ts = gmdate('YmdHi', time() - ($i * 60));
+                $ts = (clone $hotspotNow)->modify('-' . $i . ' minutes')->format('YmdHi');
                 $score10m += (int)$redis->hGet('dispatch:hotspots:bucket:' . $ts, $zoneKey);
             }
 

@@ -114,4 +114,19 @@ class Cache
             return [];
         }
     }
+
+    /** Elimina una clave de Redis. */
+    public static function delete(string $key): bool
+    {
+        $r = self::redis();
+        if (!$r) {
+            return false;
+        }
+
+        try {
+            return (int)$r->del($key) > 0;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
 }

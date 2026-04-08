@@ -32,7 +32,12 @@
  */
 
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
+$viaxOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$viaxAllowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
+if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $viaxOrigin);
+    header('Vary: Origin');
+}
 header('Access-Control-Allow-Methods: GET, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 
@@ -43,6 +48,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 require_once __DIR__ . '/../config/app.php';
 require_once __DIR__ . '/../conductor/tracking/tracking_schema_helpers.php';
+
+const UI_ROTATION_SEC = 5;
 
 /* ═══════════════════════════════════════════════════════════════════════
  * 1. VALIDACIÓN DE ENTRADA
@@ -260,6 +267,10 @@ function buildFullTripStmt(PDO $db): PDOStatement
     $hasDurationFinal = trackingColumnExists($db, 'solicitudes_servicio', 'duration_final');
     $hasFinalizedAt = trackingColumnExists($db, 'solicitudes_servicio', 'finalized_at');
     $hasPriceFinalEn = trackingColumnExists($db, 'solicitudes_servicio', 'price_final');
+    $hasPrecioFijo = trackingColumnExists($db, 'solicitudes_servicio', 'precio_fijo');
+    $hasPrecioCongelado = trackingColumnExists($db, 'solicitudes_servicio', 'precio_congelado');
+    $hasPrecioCalculadoReal = trackingColumnExists($db, 'solicitudes_servicio', 'precio_calculado_real');
+    $hasDesviacionPorcentaje = trackingColumnExists($db, 'solicitudes_servicio', 'desviacion_porcentaje');
 
     $metricsLockedExpr = $hasMetricsLocked
         ? 'COALESCE(s.metrics_locked, FALSE) AS metrics_locked,'
@@ -276,6 +287,18 @@ function buildFullTripStmt(PDO $db): PDOStatement
     $priceFinalEnExpr = $hasPriceFinalEn
         ? 's.price_final AS price_final_en,'
         : 'NULL::numeric AS price_final_en,';
+    $precioFijoExpr = $hasPrecioFijo
+        ? 's.precio_fijo,'
+        : 'NULL::numeric AS precio_fijo,';
+    $precioCongeladoExpr = $hasPrecioCongelado
+        ? 'COALESCE(s.precio_congelado, FALSE) AS precio_congelado,'
+        : 'FALSE AS precio_congelado,';
+    $precioCalculadoRealExpr = $hasPrecioCalculadoReal
+        ? 's.precio_calculado_real,'
+        : 'NULL::numeric AS precio_calculado_real,';
+    $desviacionPorcentajeExpr = $hasDesviacionPorcentaje
+        ? 's.desviacion_porcentaje,'
+        : 'NULL::numeric AS desviacion_porcentaje,';
 
     return $db->prepare("
         SELECT
@@ -288,6 +311,7 @@ function buildFullTripStmt(PDO $db): PDOStatement
             $durationFinalExpr
             $finalizedAtExpr
             s.tipo_servicio,
+            s.empresa_id,
             s.latitud_recogida,
             s.longitud_recogida,
             s.direccion_recogida,
@@ -302,8 +326,12 @@ function buildFullTripStmt(PDO $db): PDOStatement
             s.distancia_recorrida,
             s.tiempo_transcurrido,
             s.precio_estimado,
+            $precioFijoExpr
+            $precioCongeladoExpr
             s.precio_final,
             $priceFinalEnExpr
+            $precioCalculadoRealExpr
+            $desviacionPorcentajeExpr
             s.precio_en_tracking,
             s.precio_ajustado_por_tracking,
             s.desglose_precio,
@@ -377,6 +405,163 @@ function parseDesglosePrecio($raw): ?array
 
     $parsed = json_decode($raw, true);
     return is_array($parsed) ? $parsed : null;
+}
+
+function resolveSearchMode(array $trip): string
+{
+    $empresaId = isset($trip['empresa_id']) && $trip['empresa_id'] !== null && $trip['empresa_id'] !== ''
+        ? (int)$trip['empresa_id']
+        : 0;
+    return $empresaId > 0 ? 'empresa' : 'azar';
+}
+
+function fetchDriverCheckingSummary(PDO $db, int $driverId): ?array
+{
+    static $cache = [];
+    if ($driverId <= 0) {
+        return null;
+    }
+    if (array_key_exists($driverId, $cache)) {
+        return $cache[$driverId];
+    }
+
+    $stmt = $db->prepare("
+        SELECT
+            u.id,
+            u.nombre,
+            u.apellido,
+            u.empresa_id,
+            et.nombre AS empresa_nombre
+        FROM usuarios u
+        LEFT JOIN empresas_transporte et ON et.id = u.empresa_id
+        WHERE u.id = ?
+        LIMIT 1
+    ");
+    $stmt->execute([$driverId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$row) {
+        $cache[$driverId] = null;
+        return null;
+    }
+
+    $nombre = trim((string)($row['nombre'] ?? '') . ' ' . (string)($row['apellido'] ?? ''));
+    if ($nombre === '') {
+        $nombre = 'Conductor';
+    }
+
+    $empresaNombre = trim((string)($row['empresa_nombre'] ?? ''));
+    if ($empresaNombre === '') {
+        $empresaNombre = 'Libre competencia';
+    }
+
+    $cache[$driverId] = [
+        'id' => (int)$row['id'],
+        'nombre' => $nombre,
+        'empresa_id' => isset($row['empresa_id']) && $row['empresa_id'] !== null ? (int)$row['empresa_id'] : null,
+        'empresa' => $empresaNombre,
+    ];
+
+    return $cache[$driverId];
+}
+
+function resolveDriverChecking(PDO $db, array $trip): ?array
+{
+    $estado = strtolower(trim((string)($trip['estado'] ?? '')));
+    if (!in_array($estado, ['pendiente', 'requested'], true)) {
+        return null;
+    }
+
+    $requestId = (int)($trip['id'] ?? 0);
+    if ($requestId <= 0) {
+        return null;
+    }
+
+    $redis = getRedisConnection();
+    if (!$redis) {
+        return null;
+    }
+
+    $driverId = 0;
+    $source = 'current_driver';
+    $status = 'pending';
+    $shownAt = function_exists('now_colombia')
+        ? now_colombia()->format('c')
+        : (new DateTime('now', new DateTimeZone('America/Bogota')))->format('c');
+
+    try {
+        $currentDriverRaw = $redis->get('ride:' . $requestId . ':current_driver');
+        if (is_string($currentDriverRaw) && trim($currentDriverRaw) !== '') {
+            $driverId = (int)$currentDriverRaw;
+        }
+
+        if ($driverId > 0) {
+            $statusRaw = $redis->get('ride:' . $requestId . ':driver:' . $driverId . ':status');
+            if (is_string($statusRaw) && trim($statusRaw) !== '') {
+                $status = strtolower(trim($statusRaw));
+            }
+        }
+    } catch (Throwable $e) {
+        return null;
+    }
+
+    if ($driverId <= 0) {
+        return null;
+    }
+
+    if (!in_array($status, ['pending', 'offered', 'checking'], true)) {
+        return null;
+    }
+
+    $summary = fetchDriverCheckingSummary($db, $driverId);
+    if (!$summary) {
+        return null;
+    }
+
+    $summary['source'] = $source;
+    $summary['shown_at'] = $shownAt;
+    $summary['status'] = $status;
+    return $summary;
+}
+
+function resolveMatchingStatus(array $trip): ?string
+{
+    $estado = strtolower(trim((string)($trip['estado'] ?? '')));
+    if (!in_array($estado, ['pendiente', 'requested'], true)) {
+        return null;
+    }
+
+    $requestId = (int)($trip['id'] ?? 0);
+    if ($requestId <= 0) {
+        return 'searching';
+    }
+
+    $redis = getRedisConnection();
+    if (!$redis) {
+        return 'searching';
+    }
+
+    try {
+        $raw = $redis->get('ride:' . $requestId . ':matching_status');
+        if (!is_string($raw) || trim($raw) === '') {
+            return 'searching';
+        }
+
+        $normalized = strtolower(trim($raw));
+        $allowed = [
+            'searching',
+            'expanding_search',
+            'search_expanded',
+            'matched',
+            'timeout',
+            'exhausted',
+            'sin_conductores',
+        ];
+
+        return in_array($normalized, $allowed, true) ? $normalized : 'searching';
+    } catch (Throwable $e) {
+        return 'searching';
+    }
 }
 
 /**
@@ -511,7 +696,18 @@ function buildRealtimeSignature(array $trip, ?float $distConductorKm, ?int $eta)
         'distancia_real'      => isset($trip['tracking_distancia'])  ? round((float) $trip['tracking_distancia'], 2)  : 0,
         'tiempo_seg'          => isset($trip['tiempo_transcurrido']) ? (int) $trip['tiempo_transcurrido']              : 0,
         'precio_tracking'     => isset($trip['precio_en_tracking'])  ? round((float) $trip['precio_en_tracking'], 2)  : 0,
+        'search_tick'         => null,
     ];
+
+    $estado = strtolower(trim((string)($trip['estado'] ?? '')));
+    if (in_array($estado, ['pendiente', 'requested'], true)) {
+        $nowTs = function_exists('now_colombia')
+            ? now_colombia()->getTimestamp()
+            : (new DateTime('now', new DateTimeZone('America/Bogota')))->getTimestamp();
+        $createdTsRaw = strtotime((string)($trip['fecha_creacion'] ?? ''));
+        $createdTs = $createdTsRaw !== false ? (int)$createdTsRaw : $nowTs;
+        $data['search_tick'] = (int) floor(max(0, $nowTs - $createdTs) / UI_ROTATION_SEC);
+    }
 
     return sha1(json_encode($data));
 }
@@ -569,6 +765,7 @@ function resolveTrackingValues(array $trip): array
             'tiempo_minutos' => (int) ceil(((int) $duracionFinalSeg) / 60),
             'precio' => (float) $precioFinal,
             'duracion_segundos' => (int) $duracionFinalSeg,
+            'tracking_valido' => ((float) $distanciaFinal > 0.1 && (int) $duracionFinalSeg > 30),
             'metrics_locked' => $metricsLocked,
             'terminal' => true,
         ];
@@ -629,11 +826,15 @@ function resolveTrackingValues(array $trip): array
         $precio = (float) $trip['precio_final'];
     }
 
+    $duracionSegundos = $tiempo !== null ? ($tiempo * 60) : 0;
+    $trackingValido = ($distancia !== null && $distancia > 0.1 && $duracionSegundos > 30);
+
     return [
         'distancia' => $distancia,
         'tiempo_minutos' => $tiempo,
         'precio' => $precio,
-        'duracion_segundos' => $tiempo !== null ? ($tiempo * 60) : 0,
+        'duracion_segundos' => $duracionSegundos,
+        'tracking_valido' => $trackingValido,
         'metrics_locked' => $metricsLocked,
         'terminal' => $isTerminal,
     ];
@@ -668,10 +869,13 @@ function resolveTrackingValues(array $trip): array
  *     }
  *   }
  */
-function buildResponse(array $trip, string $signature, int $waitSeconds, ?float $distConductorKm, ?int $eta): array
+function buildResponse(PDO $db, array $trip, string $signature, int $waitSeconds, ?float $distConductorKm, ?int $eta): array
 {
     $tv = resolveTrackingValues($trip);
     $desglosePrecio = parseDesglosePrecio($trip['desglose_precio'] ?? null);
+    $searchMode = resolveSearchMode($trip);
+    $driverChecking = resolveDriverChecking($db, $trip);
+    $matchingStatus = resolveMatchingStatus($trip);
 
     // Si viene duración canónica explícita, usarla tal cual para evitar recomputar.
     $tiempoSeg = (int) ($tv['duracion_segundos'] ?? 0);
@@ -727,15 +931,24 @@ function buildResponse(array $trip, string $signature, int $waitSeconds, ?float 
         'success' => true,
         'meta' => [
             'signature'    => $signature,
-            'generated_at' => gmdate('c'),
+            'generated_at' => function_exists('now_colombia')
+                ? now_colombia()->format('c')
+                : (new DateTime('now', new DateTimeZone('America/Bogota')))->format('c'),
             'wait_seconds' => $waitSeconds,
             'metrics_locked' => (bool) ($tv['metrics_locked'] ?? false),
+            'tracking_valido' => (bool) ($tv['tracking_valido'] ?? false),
+            'search_mode' => $searchMode,
+            'matching_status' => $matchingStatus,
         ],
         'trip' => [
             'id'                           => (int) $trip['id'],
             'uuid'                         => $trip['uuid_solicitud'],
             'estado'                       => $trip['estado'],
             'tipo_servicio'                => $trip['tipo_servicio'],
+            'empresa_id'                   => isset($trip['empresa_id']) && $trip['empresa_id'] !== null ? (int)$trip['empresa_id'] : null,
+            'search_mode'                  => $searchMode,
+            'matching_status'              => $matchingStatus,
+            'driver_checking'              => $driverChecking,
             'origen' => [
                 'latitud'   => (float) $trip['latitud_recogida'],
                 'longitud'  => (float) $trip['longitud_recogida'],
@@ -764,9 +977,14 @@ function buildResponse(array $trip, string $signature, int $waitSeconds, ?float 
             'tiempo_transcurrido'          => $tv['tiempo_minutos'],
             'tiempo_transcurrido_seg'      => $tiempoSeg,
             'precio_estimado'              => (float) ($trip['precio_estimado'] ?? 0),
+            'precio_fijo'                  => isset($trip['precio_fijo']) && $trip['precio_fijo'] !== null ? (float) $trip['precio_fijo'] : (float) ($trip['precio_estimado'] ?? 0),
+            'precio_congelado'             => isset($trip['precio_congelado']) ? (bool) $trip['precio_congelado'] : false,
             'precio_final'                 => $tv['precio'] ?? (float) ($trip['precio_estimado'] ?? 0),
+            'precio_calculado_real'        => isset($trip['precio_calculado_real']) && $trip['precio_calculado_real'] !== null ? (float) $trip['precio_calculado_real'] : null,
+            'desviacion_porcentaje'        => isset($trip['desviacion_porcentaje']) && $trip['desviacion_porcentaje'] !== null ? (float) $trip['desviacion_porcentaje'] : null,
             'precio_en_tracking'           => isset($trip['precio_en_tracking']) ? (float) $trip['precio_en_tracking'] : null,
             'precio_ajustado_por_tracking' => isset($trip['precio_ajustado_por_tracking']) ? (bool) $trip['precio_ajustado_por_tracking'] : false,
+            'tracking_valido'              => (bool) ($tv['tracking_valido'] ?? false),
             'desglose_precio'              => $desglosePrecio,
             'conductor'                    => $conductor,
             'pickup_eta_minutes'           => $eta,
@@ -891,7 +1109,7 @@ try {
     $signature       = buildRealtimeSignature($trip, $distConductorKm, $etaMinutos);
 
     // ── Enviar respuesta al cliente Flutter ──────────────────────────
-    echo json_encode(buildResponse($trip, $signature, $waitSeconds, $distConductorKm, $etaMinutos));
+    echo json_encode(buildResponse($db, $trip, $signature, $waitSeconds, $distConductorKm, $etaMinutos));
 
 } catch (PDOException $e) {
     // Error de base de datos — loguear internamente, no exponer al cliente.

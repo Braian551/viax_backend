@@ -7,7 +7,12 @@
  */
 
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
+$viaxOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$viaxAllowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
+if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $viaxOrigin);
+    header('Vary: Origin');
+}
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 
@@ -19,6 +24,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../utils/NotificationHelper.php';
 require_once __DIR__ . '/../utils/BlockHelper.php';
+require_once __DIR__ . '/../services/RealtimeEventPublisher.php';
 
 try {
     // Obtener datos del request
@@ -139,6 +145,19 @@ try {
         error_log('send_message.php notification error: ' . $notificationError->getMessage());
     }
     
+    // Publicar al gateway WebSocket para entrega inmediata
+    try {
+        RealtimeEventPublisher::newChatMessage($solicitudId, $remitenteId, $destinatarioId, [
+            'message_id' => (int)$result['id'],
+            'mensaje' => $mensaje,
+            'tipo_remitente' => $tipoRemitente,
+            'tipo_mensaje' => $tipoMensaje,
+            'fecha_creacion' => $result['fecha_creacion'],
+        ]);
+    } catch (\Throwable $rtErr) {
+        error_log('[RealtimePublisher] chat: ' . $rtErr->getMessage());
+    }
+
     echo json_encode([
         'success' => true,
         'message' => 'Mensaje enviado exitosamente',

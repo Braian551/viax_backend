@@ -11,3 +11,4 @@ require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/timezone.php';
 require_once __DIR__ . '/redis.php';
 require_once __DIR__ . '/../core/Cache.php';
+require_once __DIR__ . '/../core/Feature.php';

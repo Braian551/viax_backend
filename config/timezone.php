@@ -207,3 +207,14 @@ function db_now(): string {
 function to_iso8601(?string $dbTimestamp): ?string {
     return TimezoneUtils::dbToIso8601($dbTimestamp);
 }
+
+/**
+ * FunciÃ³n helper de hora oficial para reglas operativas en Colombia.
+ *
+ * REGLA:
+ * - Usar esta hora para pricing, recargos nocturnos, surge y logs de negocio.
+ * - No depender de la hora local del dispositivo cliente.
+ */
+function now_colombia(): DateTime {
+    return new DateTime('now', new DateTimeZone('America/Bogota'));
+}

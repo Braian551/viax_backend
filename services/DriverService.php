@@ -1,6 +1,8 @@
 <?php
 /**
- * Servicio de conductor.
+ * Servicio legacy de conductor.
+ *
+ * @deprecated use driver_service.php (DriverGeoService) con USE_NEW_SERVICES=true
  */
 
 class DriverService

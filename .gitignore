@@ -15,6 +15,7 @@ logs/
 # Cache
 /cache/
 *.cache
+.phpunit.cache/
 
 # IDE
 .idea/
@@ -31,6 +32,16 @@ Thumbs.db
 *.tmp
 *.temp
 /tmp/
+*.pid
+*.seed
+
+# Realtime gateway (Node.js) - artefactos locales
+realtime-gateway/node_modules/
+realtime-gateway/.npm/
+realtime-gateway/npm-debug.log*
+realtime-gateway/yarn-error.log*
+realtime-gateway/.env
+realtime-gateway/.DS_Store
 
 # Uploads de usuarios (no versionar archivos subidos)
 /uploads/temp/

@@ -94,14 +94,18 @@ try {
         sendJsonResponse(false, 'Contraseña incorrecta', [], 401, 'INVALID_CREDENTIALS');
     }
 
-    $status = strtolower((string)($user['status'] ?? 'active'));
+    $statusRaw = strtolower((string)($user['status'] ?? 'active'));
+    $statusAliases = [
+        'inactivo' => 'inactive',
+    ];
+    $status = $statusAliases[$statusRaw] ?? $statusRaw;
     if ($status === 'deleted') {
         sendJsonResponse(false, 'Esta cuenta fue eliminada de forma definitiva.', [], 403, 'ACCOUNT_DELETED');
     }
 
     // Si la cuenta quedó inactiva por eliminación programada, no permitir login directo.
     // El cliente debe mostrar el flujo explícito de reactivación.
-    if (in_array($status, ['inactive', 'inactivo', 'pending_deletion'], true)) {
+    if (in_array($status, ['inactive', 'pending_deletion'], true)) {
         sendJsonResponse(false, 'Tu cuenta está programada para eliminación. Reactívala para continuar.', [
             'pending_deletion' => true,
             'deletion_scheduled_at' => $user['deletion_scheduled_at'] ?? null,

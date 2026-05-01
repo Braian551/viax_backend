@@ -10,6 +10,7 @@
  */
 
 require_once __DIR__ . '/../../config/app.php';
+require_once __DIR__ . '/../../services/RealtimeEventPublisher.php';
 
 function processTrackingPoints(PDO $db, int $solicitudId, int $conductorId, array $points): array
 {
@@ -291,6 +292,17 @@ function refreshRealtimeTrackingCache(
 
             // Canal de actualización en vivo para pasajeros.
             $redis->publish('trip_updates:' . $solicitudId, json_encode($statePayload, JSON_UNESCAPED_UNICODE));
+
+            // Publicar al gateway WebSocket (canal trip:{id})
+            RealtimeEventPublisher::tripUpdate($solicitudId, [
+                'lat' => $latitud,
+                'lng' => $longitud,
+                'distance_km' => round($distanciaKm, 4),
+                'elapsed_time_sec' => $tiempoSeg,
+                'price' => round($precioParcial, 2),
+                'phase' => $faseViaje,
+                'speed_kmh' => $tiempoSeg > 0 ? round(($distanciaKm * 3600) / $tiempoSeg, 2) : 0,
+            ], 'trip.location_updated');
         }
     } catch (Throwable $e) {
         // Redis es capa secundaria: no bloquear flujo principal por cache.

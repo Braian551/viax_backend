@@ -22,7 +22,7 @@ function processPendingDeletionUsers(PDO $db): int
     $selectStmt = $db->prepare(
         "SELECT id, email
          FROM usuarios
-         WHERE status = 'pending_deletion'
+         WHERE status IN ('inactive', 'pending_deletion')
            AND deletion_scheduled_at IS NOT NULL
            AND deletion_scheduled_at <= NOW()
          ORDER BY deletion_scheduled_at ASC

@@ -13,7 +13,12 @@ require_once __DIR__ . '/../core/RateLimiter.php';
 require_once __DIR__ . '/../core/Auth.php';
 
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
+$origin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$allowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
+if ($origin !== '' && in_array($origin, $allowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $origin);
+    header('Vary: Origin');
+}
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
 

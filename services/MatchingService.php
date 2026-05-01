@@ -1,6 +1,8 @@
 <?php
 /**
- * Servicio de matching de conductores cercanos.
+ * Servicio legacy de matching de conductores cercanos.
+ *
+ * @deprecated use matching_service.php (RideMatchingService) con USE_NEW_SERVICES=true
  */
 
 require_once __DIR__ . '/../utils/GeoUtils.php';

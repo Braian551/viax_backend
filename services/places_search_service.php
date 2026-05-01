@@ -18,6 +18,11 @@ class PlacesSearchService
 {
     private const CACHE_TTL_SEC = 300;
     private const CACHE_PREFIX = 'places:search:';
+    private const FREQUENT_MIN_TRIPS = 5;
+    private const FREQUENT_MIN_SPAN_DAYS = 7;
+    private const FREQUENT_MIN_UNIQUE_DAYS = 2;
+    private const FREQUENT_SCORE_THRESHOLD = 0.22;
+    private const FREQUENT_MAX_RECENCY_DAYS = 60.0;
 
     /**
      * @return array<int,array<string,mixed>>
@@ -82,7 +87,7 @@ class PlacesSearchService
             return [];
         }
 
-        return array_map(static function (array $r): array {
+        $items = array_map(static function (array $r): array {
             return [
                 'id' => (int)$r['id'],
                 'name' => (string)$r['place_name'],
@@ -94,6 +99,184 @@ class PlacesSearchService
                 'created_at' => $r['created_at'] ?? null,
             ];
         }, $rows);
+
+        $frequentStats = self::buildFrequentDestinationStats($db, $userId);
+        if (empty($frequentStats['geo']) && empty($frequentStats['address'])) {
+            return $items;
+        }
+
+        foreach ($items as $index => $item) {
+            $items[$index] = self::attachFrequentDestinationMeta($item, $frequentStats);
+        }
+
+        return $items;
+    }
+
+    /**
+     * @return array{geo: array<string,array<string,mixed>>, address: array<string,array<string,mixed>>}
+     */
+    private static function buildFrequentDestinationStats(PDO $db, int $userId): array
+    {
+        $statsByGeo = [];
+        $statsByAddress = [];
+
+        if ($userId <= 0) {
+            return ['geo' => $statsByGeo, 'address' => $statsByAddress];
+        }
+
+        $stmt = $db->prepare(
+            "SELECT
+                ROUND(CAST(latitud_destino AS numeric), 3) AS lat_bucket,
+                ROUND(CAST(longitud_destino AS numeric), 3) AS lng_bucket,
+                LOWER(TRIM(COALESCE(direccion_destino, ''))) AS direccion_norm,
+                COUNT(*) AS total_viajes,
+                COUNT(DISTINCT DATE((COALESCE(completado_en, fecha_creacion) AT TIME ZONE 'America/Bogota'))) AS dias_unicos,
+                EXTRACT(EPOCH FROM (MAX(COALESCE(completado_en, fecha_creacion)) - MIN(COALESCE(completado_en, fecha_creacion)))) / 86400.0 AS span_dias,
+                EXTRACT(EPOCH FROM (NOW() - MAX(COALESCE(completado_en, fecha_creacion)))) / 86400.0 AS dias_desde_ultimo
+            FROM solicitudes_servicio
+            WHERE cliente_id = :user_id
+              AND LOWER(TRIM(COALESCE(estado, ''))) IN (
+                'completada',
+                'completado',
+                'entregado',
+                'finalizada',
+                'finalizado'
+              )
+              AND latitud_destino IS NOT NULL
+              AND longitud_destino IS NOT NULL
+            GROUP BY lat_bucket, lng_bucket, direccion_norm"
+        );
+        $stmt->execute([':user_id' => $userId]);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        if (!is_array($rows) || empty($rows)) {
+            return ['geo' => $statsByGeo, 'address' => $statsByAddress];
+        }
+
+        foreach ($rows as $row) {
+            $totalTrips = max(0, (int)($row['total_viajes'] ?? 0));
+            if ($totalTrips <= 0) {
+                continue;
+            }
+
+            $uniqueDays = max(0, (int)($row['dias_unicos'] ?? 0));
+            $spanDays = max(0.0, (float)($row['span_dias'] ?? 0.0));
+            $daysSinceLastTrip = max(0.0, (float)($row['dias_desde_ultimo'] ?? 0.0));
+
+            $frequency = min(1.0, $totalTrips / 10.0);
+            $recency = self::computeRecencyScore($daysSinceLastTrip);
+            $consistency = $totalTrips > 0
+                ? min(1.0, $uniqueDays / max(2.0, min(7.0, (float)$totalTrips)))
+                : 0.0;
+            $score = $frequency * $recency * $consistency;
+
+            $isFrequent =
+                $totalTrips >= self::FREQUENT_MIN_TRIPS
+                && $spanDays >= self::FREQUENT_MIN_SPAN_DAYS
+                && $uniqueDays >= self::FREQUENT_MIN_UNIQUE_DAYS
+                && $consistency >= 0.35
+                && $score > self::FREQUENT_SCORE_THRESHOLD;
+
+            $payload = [
+                'is_frequent_destination' => $isFrequent,
+                'score' => round($score, 6),
+                'frequency' => round($frequency, 6),
+                'recency' => round($recency, 6),
+                'consistency' => round($consistency, 6),
+                'total_viajes' => $totalTrips,
+                'dias_unicos' => $uniqueDays,
+                'span_dias' => round($spanDays, 2),
+                'dias_desde_ultimo' => round($daysSinceLastTrip, 2),
+                'threshold' => self::FREQUENT_SCORE_THRESHOLD,
+            ];
+
+            $geoKey = self::buildGeoKey((float)($row['lat_bucket'] ?? 0), (float)($row['lng_bucket'] ?? 0));
+            if ($geoKey !== null) {
+                $statsByGeo[$geoKey] = $payload;
+            }
+
+            $addressKey = self::normalizeAddressKey((string)($row['direccion_norm'] ?? ''));
+            if ($addressKey !== '') {
+                if (!isset($statsByAddress[$addressKey])) {
+                    $statsByAddress[$addressKey] = $payload;
+                } elseif (($payload['score'] ?? 0) > ($statsByAddress[$addressKey]['score'] ?? 0)) {
+                    $statsByAddress[$addressKey] = $payload;
+                }
+            }
+        }
+
+        return ['geo' => $statsByGeo, 'address' => $statsByAddress];
+    }
+
+    private static function attachFrequentDestinationMeta(array $item, array $stats): array
+    {
+        $geoStats = is_array($stats['geo'] ?? null) ? $stats['geo'] : [];
+        $addressStats = is_array($stats['address'] ?? null) ? $stats['address'] : [];
+
+        $geoKey = self::buildGeoKey(
+            isset($item['lat']) ? (float)$item['lat'] : null,
+            isset($item['lng']) ? (float)$item['lng'] : null
+        );
+        $addressKey = self::normalizeAddressKey((string)($item['address'] ?? ''));
+
+        $matched = null;
+        if ($geoKey !== null && isset($geoStats[$geoKey])) {
+            $matched = $geoStats[$geoKey];
+        } elseif ($addressKey !== '' && isset($addressStats[$addressKey])) {
+            $matched = $addressStats[$addressKey];
+        }
+
+        if (!is_array($matched)) {
+            $item['is_frequent_destination'] = false;
+            return $item;
+        }
+
+        $item['is_frequent_destination'] = (bool)($matched['is_frequent_destination'] ?? false);
+        $item['frequent_score'] = round((float)($matched['score'] ?? 0.0), 4);
+        $item['frequent_trip_count'] = (int)($matched['total_viajes'] ?? 0);
+        $item['frequent_span_days'] = (float)($matched['span_dias'] ?? 0.0);
+        $item['frequent_unique_days'] = (int)($matched['dias_unicos'] ?? 0);
+        $item['frequent_threshold'] = self::FREQUENT_SCORE_THRESHOLD;
+        $item['frequent_components'] = [
+            'frequency' => round((float)($matched['frequency'] ?? 0.0), 4),
+            'recency' => round((float)($matched['recency'] ?? 0.0), 4),
+            'consistency' => round((float)($matched['consistency'] ?? 0.0), 4),
+        ];
+
+        if (!empty($item['is_frequent_destination'])) {
+            $item['source'] = 'frequent';
+        }
+
+        return $item;
+    }
+
+    private static function computeRecencyScore(float $daysSinceLastTrip): float
+    {
+        $normalizedDays = min(self::FREQUENT_MAX_RECENCY_DAYS, max(0.0, $daysSinceLastTrip));
+        $decay = $normalizedDays / self::FREQUENT_MAX_RECENCY_DAYS;
+        return max(0.3, 1.0 - (0.7 * $decay));
+    }
+
+    private static function normalizeAddressKey(string $address): string
+    {
+        $normalized = strtolower(trim($address));
+        $normalized = preg_replace('/\s+/', ' ', $normalized);
+        if (!is_string($normalized)) {
+            return '';
+        }
+        return trim($normalized);
+    }
+
+    private static function buildGeoKey(?float $lat, ?float $lng): ?string
+    {
+        if ($lat === null || $lng === null) {
+            return null;
+        }
+
+        if ($lat < -90 || $lat > 90 || $lng < -180 || $lng > 180) {
+            return null;
+        }
+
+        return number_format(round($lat, 3), 3, '.', '') . '|' . number_format(round($lng, 3), 3, '.', '');
     }
 
     public static function saveRecentSearch(PDO $db, int $userId, string $name, string $address, float $lat, float $lng, ?string $placeId = null): void

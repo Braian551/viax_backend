@@ -14,7 +14,12 @@
  */
 
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
+$origin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$allowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
+if ($origin !== '' && in_array($origin, $allowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $origin);
+    header('Vary: Origin');
+}
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Accept');
 
@@ -35,7 +40,10 @@ require_once __DIR__ . '/../../services/traffic_zone_resolver.php';
 require_once __DIR__ . '/../../services/traffic_cache.php';
 require_once __DIR__ . '/../../services/traffic_pricing.php';
 require_once __DIR__ . '/../../services/traffic_service.php';
+require_once __DIR__ . '/../../services/pricing_service.php';
 require_once __DIR__ . '/../../services/EmailService.php';
+require_once __DIR__ . '/../../services/upfront_pricing_service.php';
+require_once __DIR__ . '/../../services/canonical_pricing_guard.php';
 
 function normalizarTipoVehiculoTracking($tipoVehiculo) {
     $normalized = strtolower(trim((string)$tipoVehiculo));
@@ -139,6 +147,21 @@ function positiveIntOrNull($value): ?int {
     return $parsed > 0 ? $parsed : null;
 }
 
+function truthyFinalize($value): bool {
+    return UpfrontPricingService::toBool($value);
+}
+
+function logFraudFinalize(int $tripId, int $driverId, string $reason, array $context = []): void {
+    $payload = [
+        'trip_id' => $tripId,
+        'driver_id' => $driverId,
+        'reason' => $reason,
+        'context' => $context,
+        'timestamp' => now_colombia()->format('c'),
+    ];
+    error_log('[fraud_detection] ' . json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+}
+
 function maxFloatOrZero(array $values): float {
     $filtered = array_values(array_filter($values, static fn($value) => $value !== null && $value > 0));
     if (empty($filtered)) {
@@ -184,7 +207,7 @@ function sendTripCompletionSummaryEmail(PDO $db, int $solicitudId, float $precio
         $redis = Cache::redis();
         if ($redis) {
             $lockKey = 'trip:' . $solicitudId . ':email:summary_sent';
-            $created = $redis->setnx($lockKey, (string)time());
+            $created = $redis->setnx($lockKey, (string)now_colombia()->getTimestamp());
             if ($created) {
                 $redis->expire($lockKey, 86400);
             } else {
@@ -669,6 +692,13 @@ try {
     $hasCompletedAt = trackingColumnExists($db, 'solicitudes_servicio', 'completed_at');
     $hasPriceFinalEn = trackingColumnExists($db, 'solicitudes_servicio', 'price_final');
     $hasGpsPointsCount = trackingColumnExists($db, 'solicitudes_servicio', 'gps_points_count');
+    $hasPrecioFijo = trackingColumnExists($db, 'solicitudes_servicio', 'precio_fijo');
+    $hasPrecioCongelado = trackingColumnExists($db, 'solicitudes_servicio', 'precio_congelado');
+    $hasPrecioCalculadoReal = trackingColumnExists($db, 'solicitudes_servicio', 'precio_calculado_real');
+    $hasDesviacionPorcentaje = trackingColumnExists($db, 'solicitudes_servicio', 'desviacion_porcentaje');
+    $hasPricingRuleApplied = trackingColumnExists($db, 'solicitudes_servicio', 'pricing_rule_applied');
+    $hasTrackingValido = trackingColumnExists($db, 'solicitudes_servicio', 'tracking_valido');
+    $hasPriceFinalCanonical = trackingColumnExists($db, 'solicitudes_servicio', 'price_final_canonical');
     
     $db->beginTransaction();
     
@@ -697,6 +727,14 @@ try {
         ? 's.gps_points_count,'
         : 'NULL::integer AS gps_points_count,';
 
+    $precioFijoExpr = $hasPrecioFijo
+        ? 's.precio_fijo,'
+        : 'NULL::numeric AS precio_fijo,';
+
+    $precioCongeladoExpr = $hasPrecioCongelado
+        ? 'COALESCE(s.precio_congelado, FALSE) AS precio_congelado,'
+        : 'FALSE AS precio_congelado,';
+
     $stmt = $db->prepare(" 
         SELECT 
             s.id,
@@ -708,6 +746,8 @@ try {
             s.distancia_estimada,
             s.tiempo_estimado,
             s.precio_estimado,
+            $precioFijoExpr
+            $precioCongeladoExpr
             s.distancia_recorrida,
             s.tiempo_transcurrido,
             $distanceFinalExpr
@@ -835,6 +875,7 @@ try {
     }
     
     $tiempo_real_min = ceil($tiempo_real_seg / 60);
+    $tracking_valido = ($distancia_real > 0.1 && $tiempo_real_seg > 30);
     
     // =====================================================
     // OBTENER CONFIGURACIÓN DE PRECIOS COMPLETA
@@ -999,14 +1040,17 @@ try {
     // 5. Sumar todos los recargos
     $total_recargos = $recargo_nocturno + $recargo_hora_pico + $recargo_festivo + $recargo_espera;
     
-    // 6. Precio total antes de límites
-    $precio_total = $subtotal_con_descuento + $total_recargos;
-    
-    // 7. Aplicar tarifa mínima
-    $tarifa_minima = floatval($config['tarifa_minima']);
+    // 6. Precio variable antes de límites
+    $precio_total_variable = $subtotal_con_descuento + $total_recargos;
+
+    // 7. Aplicar tarifa mínima como componente fijo adicional
+    $tarifa_minima = max(0.0, floatval($config['tarifa_minima']));
     $aplico_tarifa_minima = false;
-    if ($precio_total < $tarifa_minima) {
-        $precio_total = $tarifa_minima;
+    $ajuste_tarifa_minima = 0.0;
+    $precio_total = $precio_total_variable;
+    if ($tarifa_minima > 0.0 && $precio_total_variable < $tarifa_minima) {
+        $precio_total = $tarifa_minima + $precio_total_variable;
+        $ajuste_tarifa_minima = $tarifa_minima;
         $aplico_tarifa_minima = true;
     }
     
@@ -1019,31 +1063,159 @@ try {
     }
     
     // 9. Redondear a 100 COP más cercano (típico en Colombia)
-    $precio_final = round($precio_total / 100) * 100;
-    
-    // 10. Calcular comisión de la EMPRESA al conductor
-    // Esta es la comisión que la empresa cobra a sus conductores
-    $comision_plataforma_porcentaje = floatval($config['comision_plataforma']);
-    $comision_plataforma_valor = $precio_final * ($comision_plataforma_porcentaje / 100);
-    $ganancia_conductor = $precio_final - $comision_plataforma_valor;
-    
-    // 11. Calcular comisión del ADMIN sobre lo que gana la empresa
-    // Esta es la comisión que el admin (VIAX) cobra a las empresas de transporte
-    // Se calcula sobre la comisión que la empresa cobró al conductor
-    $comision_admin_valor = $comision_plataforma_valor * ($comision_admin_porcentaje / 100);
-    $ganancia_empresa = $comision_plataforma_valor - $comision_admin_valor;
-    
-    // =====================================================
-    // DETECTAR DESVÍOS SIGNIFICATIVOS
-    // =====================================================
-    
+    $precio_real = round($precio_total / 100) * 100;
+
     $distancia_estimada = floatval($viaje['distancia_estimada']);
     $diferencia_distancia = $distancia_real - $distancia_estimada;
-    $porcentaje_desvio = $distancia_estimada > 0 
-        ? ($diferencia_distancia / $distancia_estimada) * 100 
+    $porcentaje_desvio = $distancia_estimada > 0
+        ? ($diferencia_distancia / $distancia_estimada) * 100
         : 0;
-    
+
+    $distancia_optima = max(0.001, $distancia_estimada);
+    $eficiencia_ruta = $distancia_real > 0
+        ? ($distancia_optima / max($distancia_real, 0.001))
+        : 1.0;
+
+    $driverFraudDetectionEnabled = Feature::enabled('driver_fraud_detection', true);
+    if ($driverFraudDetectionEnabled && $eficiencia_ruta < 0.7) {
+        logFraudFinalize(
+            (int)$solicitud_id,
+            (int)$conductor_id,
+            'inefficient_route',
+            [
+                'distancia_optima_km' => round($distancia_optima, 3),
+                'distancia_real_km' => round($distancia_real, 3),
+                'eficiencia' => round($eficiencia_ruta, 4),
+            ]
+        );
+    }
+
     $tuvo_desvio = abs($porcentaje_desvio) > 20;
+    $triggerDesvioFuerte = abs($porcentaje_desvio) > 30;
+
+    $triggerCambioDestino = truthyFinalize(
+        $input['destino_cambiado']
+        ?? $input['destination_changed']
+        ?? $input['destination_updated']
+        ?? false
+    );
+    $paradasAdicionalesCount = intval($input['paradas_adicionales_count'] ?? $input['additional_stops_count'] ?? 0);
+    $triggerParadasAdicionales = truthyFinalize(
+        $input['paradas_adicionales']
+        ?? $input['additional_stops']
+        ?? false
+    ) || $paradasAdicionalesCount > 0;
+
+    $upfrontPricingEnabled = UpfrontPricingService::isEnabled();
+    $precioFijoSolicitud = positiveFloatOrNull($viaje['precio_fijo'] ?? null);
+    if ($precioFijoSolicitud === null) {
+        $precioFijoSolicitud = positiveFloatOrNull($viaje['precio_estimado'] ?? null);
+    }
+
+    $precioCongeladoActual = $hasPrecioCongelado
+        ? truthyFinalize($viaje['precio_congelado'] ?? false)
+        : false;
+
+    $pricingDecision = UpfrontPricingService::resolveFinalCharge(
+        $precio_real,
+        $precioFijoSolicitud,
+        $precioCongeladoActual,
+        $upfrontPricingEnabled,
+        $triggerCambioDestino,
+        $triggerDesvioFuerte,
+        $triggerParadasAdicionales,
+        $tracking_valido,
+        0.40
+    );
+
+    $precio_real = (float)$pricingDecision['precio_real'];
+    $precio_fijo = (float)$pricingDecision['precio_fijo'];
+    $precio_estimado_minimo = $precio_fijo > 0
+        ? $precio_fijo
+        : max(0.0, floatval($viaje['precio_estimado'] ?? 0));
+
+    $pricingRedis = Cache::redis();
+    $pricingGuard = canonicalPricingResolve(
+        (float)$precio_real,
+        (float)$precio_estimado_minimo,
+        (bool)$tracking_valido,
+        [
+            'trip_id' => (int)$solicitud_id,
+            'source' => 'finalize',
+            'actor_id' => (int)$conductor_id,
+            'redis' => $pricingRedis,
+            'normalize_step' => 100.0,
+            'extra' => [
+                'distancia_real_km' => round((float)$distancia_real, 3),
+                'tiempo_real_seg' => (int)$tiempo_real_seg,
+                'upfront_pricing_enabled' => (bool)$upfrontPricingEnabled,
+            ],
+        ]
+    );
+
+    $precio_final = (float)$pricingGuard['final_price'];
+    $pricing_rule_applied = (string)$pricingGuard['rule'];
+    $pricing_guard_applied = !empty($pricingGuard['floor_applied']);
+    $pricing_violation_blocked = !empty($pricingGuard['attempted_violation']);
+    $tracking_valido = (bool)$pricingGuard['tracking_valid'];
+
+    $precio_congelado_final = $precio_final <= ($precio_estimado_minimo + 0.001);
+    $desviacion_precio_ratio = (float)$pricingDecision['desviacion_ratio'];
+    $desviacion_precio_porcentaje = (float)$pricingDecision['desviacion_porcentaje'];
+    $recalculo_forzado = $precio_final > ($precio_estimado_minimo + 0.001);
+    $recalculo_reasons = is_array($pricingDecision['reasons']) ? $pricingDecision['reasons'] : [];
+    if (!$tracking_valido) {
+        $recalculo_reasons[] = 'tracking_invalid_fallback_to_estimate';
+    } elseif ($recalculo_forzado) {
+        $recalculo_reasons[] = 'dynamic_price_above_estimate';
+    }
+    if ($pricing_violation_blocked) {
+        $recalculo_reasons[] = 'guard_blocked_below_estimate';
+    }
+    $recalculo_reasons[] = 'rule:' . $pricing_rule_applied;
+    $recalculo_reasons = array_values(array_unique($recalculo_reasons));
+
+    $comision_plataforma_porcentaje = floatval($config['comision_plataforma']);
+    $driverCompensation = UpfrontPricingService::calculateDriverCompensation(
+        $distancia_real,
+        $tiempo_real_min,
+        floatval($config['costo_por_km']),
+        floatval($config['costo_por_minuto']),
+        $comision_plataforma_porcentaje
+    );
+
+    // Regla de negocio: la comisión se calcula sobre el precio final cobrado al usuario.
+    // El costo real se conserva como métrica operativa, no como base de cobro de comisión.
+    $costo_real_conductor = (float)$driverCompensation['costo_real'];
+    $comision_plataforma_valor = round(
+        max(0.0, $precio_final) * (max(0.0, $comision_plataforma_porcentaje) / 100.0),
+        2
+    );
+    if ($comision_plataforma_valor > $precio_final) {
+        $comision_plataforma_valor = max(0.0, $precio_final);
+    }
+    $ganancia_conductor = round(max(0.0, $precio_final - $comision_plataforma_valor), 2);
+
+    $comision_admin_valor = $comision_plataforma_valor * ($comision_admin_porcentaje / 100);
+    $ganancia_empresa = $comision_plataforma_valor - $comision_admin_valor;
+    $margen_plataforma = $precio_final - $costo_real_conductor;
+
+    $telemetryLat = isset($viaje['latitud_recogida']) ? (float)$viaje['latitud_recogida'] : 0.0;
+    $telemetryLng = isset($viaje['longitud_recogida']) ? (float)$viaje['longitud_recogida'] : 0.0;
+    $telemetryZone = ($telemetryLat !== 0.0 || $telemetryLng !== 0.0)
+        ? DynamicPricingService::zoneKey($telemetryLat, $telemetryLng)
+        : 'unknown';
+    $tripTelemetry = [
+        'precio_fijo' => round($precio_fijo, 2),
+        'precio_estimado_minimo' => round($precio_estimado_minimo, 2),
+        'precio_real' => round($precio_real, 2),
+        'desviacion' => round($desviacion_precio_porcentaje, 2),
+        'tracking_valido' => $tracking_valido,
+        'zona' => $telemetryZone,
+        'hora' => $fecha_colombia->format('H:00'),
+        'colombia_time' => now_colombia()->format('c'),
+        'eficiencia_ruta' => round($eficiencia_ruta, 4),
+    ];
     
     // =====================================================
     // CREAR OBJETO JSON DE DESGLOSE COMPLETO
@@ -1067,6 +1239,7 @@ try {
         'porcentaje_recargo_festivo' => round($porcentaje_recargo_festivo, 2),
         'porcentaje_recargo_nocturno' => round($porcentaje_recargo_nocturno, 2),
         'porcentaje_recargo_trafico' => round($porcentaje_recargo_trafico, 2),
+        'ajuste_tarifa_minima' => round($ajuste_tarifa_minima, 2),
         'contexto_colombia' => [
             'fecha_hora_bogota' => formatDateTimeCoAmPm($fecha_colombia),
             'fecha_hora_bogota_24h' => $fecha_colombia->format('Y-m-d H:i:s'),
@@ -1096,15 +1269,31 @@ try {
         ],
         'aplico_tarifa_minima' => $aplico_tarifa_minima,
         'precio_antes_redondeo' => round($precio_total, 2),
+        'upfront_pricing_enabled' => $upfrontPricingEnabled,
+        'precio_real' => round($precio_real, 2),
+        'precio_estimado_minimo' => round($precio_estimado_minimo, 2),
+        'precio_fijo' => round($precio_fijo, 2),
         'precio_final' => $precio_final,
+        'precio_congelado' => $precio_congelado_final,
+        'desviacion_precio_ratio' => round($desviacion_precio_ratio, 6),
+        'desviacion_porcentaje' => round($desviacion_precio_porcentaje, 2),
+        'tracking_valido' => $tracking_valido,
+        'pricing_rule_applied' => $pricing_rule_applied,
+        'price_final_canonical' => round($precio_final, 2),
+        'pricing_guard_applied' => $pricing_guard_applied,
+        'recalculo_forzado' => $recalculo_forzado,
+        'recalculo_reasons' => $recalculo_reasons,
+        'metrics' => $tripTelemetry,
         // Comisión de la empresa al conductor
         'comision_plataforma_porcentaje' => $comision_plataforma_porcentaje,
         'comision_plataforma_valor' => round($comision_plataforma_valor, 2),
         'ganancia_conductor' => round($ganancia_conductor, 2),
+        'costo_real_conductor' => round($costo_real_conductor, 2),
         // Comisión del admin a la empresa
         'comision_admin_porcentaje' => $comision_admin_porcentaje,
         'comision_admin_valor' => round($comision_admin_valor, 2),
         'ganancia_empresa' => round($ganancia_empresa, 2),
+        'margen_plataforma' => round($margen_plataforma, 2),
         // Datos del viaje
         'distancia_km' => round($distancia_real, 2),
         'tiempo_min' => $tiempo_real_min,
@@ -1244,7 +1433,7 @@ try {
         ':diff_tiempo' => $diff_tiempo_min,
         ':porcentaje_desvio' => $porcentaje_desvio,
         ':precio_estimado' => floatval($viaje['precio_estimado']),
-        ':precio_calculado' => $precio_final,
+        ':precio_calculado' => $precio_real,
         ':precio_aplicado' => $precio_final,
         ':tuvo_desvio' => $tuvo_desvio ? 1 : 0,
         ':tarifa_base' => $tarifa_base,
@@ -1270,38 +1459,8 @@ try {
         ':config_precios_id' => $config_precios_id
     ]);
     
-    // =====================================================
-    // ACTUALIZAR SALDO PENDIENTE DE LA EMPRESA CON ADMIN
-    // =====================================================
-    // La empresa debe al admin la comision_admin_valor de cada viaje
-    // MODIFICACION: Se comenta esto porque el cobro se hace ahora al REGISTRAR EL PAGO del conductor.
-    /*
-    if ($empresa_id && $comision_admin_valor > 0) {
-        // Obtener saldo actual de la empresa
-        $stmtSaldo = $db->prepare("SELECT saldo_pendiente FROM empresas_transporte WHERE id = :id FOR UPDATE");
-        $stmtSaldo->execute([':id' => $empresa_id]);
-        $saldo_actual = floatval($stmtSaldo->fetchColumn() ?? 0);
-        $nuevo_saldo = $saldo_actual + $comision_admin_valor;
-        
-        // Actualizar saldo pendiente
-        $stmtUpdate = $db->prepare("UPDATE empresas_transporte SET saldo_pendiente = :nuevo_saldo, actualizado_en = NOW() WHERE id = :id");
-        $stmtUpdate->execute([':nuevo_saldo' => $nuevo_saldo, ':id' => $empresa_id]);
-        
-        // Registrar movimiento en pagos_empresas (cargo por comisión del viaje)
-        $stmtMovimiento = $db->prepare("
-            INSERT INTO pagos_empresas (empresa_id, monto, tipo, descripcion, viaje_id, saldo_anterior, saldo_nuevo, creado_en)
-            VALUES (:empresa_id, :monto, 'cargo', :descripcion, :viaje_id, :saldo_anterior, :saldo_nuevo, NOW())
-        ");
-        $stmtMovimiento->execute([
-            ':empresa_id' => $empresa_id,
-            ':monto' => $comision_admin_valor,
-            ':descripcion' => "Comisión viaje #$solicitud_id ({$comision_admin_porcentaje}%)",
-            ':viaje_id' => $solicitud_id,
-            ':saldo_anterior' => $saldo_actual,
-            ':saldo_nuevo' => $nuevo_saldo
-        ]);
-    }
-    */
+    // Importante: finalizar viaje NO debe afectar la deuda empresa-admin.
+    // El cargo a empresa se registra solo al confirmar pago de comisión del conductor.
     
     // =====================================================
     // ACTUALIZAR SOLICITUD Y CONGELAR MÉTRICAS FINALES
@@ -1336,6 +1495,27 @@ try {
     if ($hasGpsPointsCount) {
         $updateSet[] = 'gps_points_count = :gps_points_count';
     }
+    if ($hasPrecioCalculadoReal) {
+        $updateSet[] = 'precio_calculado_real = :precio_calculado_real';
+    }
+    if ($hasPrecioCongelado) {
+        $updateSet[] = 'precio_congelado = :precio_congelado';
+    }
+    if ($hasPrecioFijo) {
+        $updateSet[] = 'precio_fijo = COALESCE(precio_fijo, :precio_fijo)';
+    }
+    if ($hasDesviacionPorcentaje) {
+        $updateSet[] = 'desviacion_porcentaje = :desviacion_porcentaje';
+    }
+    if ($hasPricingRuleApplied) {
+        $updateSet[] = 'pricing_rule_applied = :pricing_rule_applied';
+    }
+    if ($hasTrackingValido) {
+        $updateSet[] = 'tracking_valido = :tracking_valido';
+    }
+    if ($hasPriceFinalCanonical) {
+        $updateSet[] = 'price_final_canonical = :price_final_canonical';
+    }
 
     $stmt = $db->prepare(
         "UPDATE solicitudes_servicio SET
@@ -1364,6 +1544,44 @@ try {
     if ($hasGpsPointsCount) {
         $paramsSolicitud[':gps_points_count'] = intval($reconciliacion['accepted_points'] ?? 0);
     }
+    if ($hasPrecioCalculadoReal) {
+        $paramsSolicitud[':precio_calculado_real'] = $precio_real;
+    }
+    if ($hasPrecioCongelado) {
+        $paramsSolicitud[':precio_congelado'] = $precio_congelado_final ? 1 : 0;
+    }
+    if ($hasPrecioFijo) {
+        $paramsSolicitud[':precio_fijo'] = $precio_fijo;
+    }
+    if ($hasDesviacionPorcentaje) {
+        $paramsSolicitud[':desviacion_porcentaje'] = $desviacion_precio_porcentaje;
+    }
+    if ($hasPricingRuleApplied) {
+        $paramsSolicitud[':pricing_rule_applied'] = $pricing_rule_applied;
+    }
+    if ($hasTrackingValido) {
+        $paramsSolicitud[':tracking_valido'] = $tracking_valido ? 1 : 0;
+    }
+    if ($hasPriceFinalCanonical) {
+        $paramsSolicitud[':price_final_canonical'] = $precio_final;
+    }
+
+    error_log('[upfront_pricing] ' . json_encode([
+        'trip_id' => $solicitud_id,
+        'precio_fijo' => round($precio_fijo, 2),
+        'precio_real' => round($precio_real, 2),
+        'precio_final' => round($precio_final, 2),
+        'desviacion' => round($desviacion_precio_porcentaje, 2),
+        'tracking_valido' => $tracking_valido,
+        'server_time' => now_colombia()->format('c'),
+        'colombia_time' => now_colombia()->format('c'),
+        'eficiencia_ruta' => round($eficiencia_ruta, 4),
+        'zona' => $telemetryZone,
+        'hora' => $tripTelemetry['hora'],
+        'recalculo_forzado' => $recalculo_forzado,
+        'pricing_rule_applied' => $pricing_rule_applied,
+        'reasons' => $recalculo_reasons,
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
 
     $stmt->execute($paramsSolicitud);
 
@@ -1409,13 +1627,48 @@ try {
             'tiempo_seg' => $tiempo_real_seg,
             'precio_final' => $precio_final,
             'estado' => 'trip_completed',
-            'timestamp' => time(),
+            'timestamp' => now_colombia()->getTimestamp(),
         ]), 300);
 
         $redis = Cache::redis();
         if ($redis) {
-            $redis->del('trip:' . $solicitud_id . ':state');
-            $redis->del('trip:' . $solicitud_id . ':metrics');
+            $finalizedAt = now_colombia()->format('c');
+
+            $redis->setex('trip:' . $solicitud_id . ':state', 86400, json_encode([
+                'lat' => isset($viaje['latitud_destino']) ? (float)$viaje['latitud_destino'] : null,
+                'lng' => isset($viaje['longitud_destino']) ? (float)$viaje['longitud_destino'] : null,
+                'timestamp' => $finalizedAt,
+                'speed' => 0,
+                'heading' => 0,
+                'fase' => 'completada',
+                'metrics_locked' => true,
+                'price_final' => $precio_final,
+            ], JSON_UNESCAPED_UNICODE));
+
+            $redis->setex('trip:' . $solicitud_id . ':metrics', 86400, json_encode([
+                'distance_km' => round($distancia_real, 4),
+                'elapsed_time_sec' => intval($tiempo_real_seg),
+                'avg_speed_kmh' => $tiempo_real_seg > 0
+                    ? round(($distancia_real * 3600) / max(1, $tiempo_real_seg), 2)
+                    : 0,
+                'price' => round($precio_final, 2),
+                'estimated_price' => round($precio_estimado_minimo, 2),
+                'price_floor' => round($precio_estimado_minimo, 2),
+                'metrics_locked' => true,
+                'finalized_at' => $finalizedAt,
+                'pricing_rule_applied' => $pricing_rule_applied,
+                'tracking_valido' => $tracking_valido,
+            ], JSON_UNESCAPED_UNICODE));
+
+            canonicalPricingPersistRedisLock(
+                $redis,
+                (int)$solicitud_id,
+                (float)$precio_final,
+                (string)$pricing_rule_applied,
+                (bool)$tracking_valido,
+                86400
+            );
+
             $redis->del('trip:' . $solicitud_id . ':anomalies');
         }
     } catch (Throwable $cacheError) {
@@ -1437,7 +1690,11 @@ try {
     $response = [
         'success' => true,
         'message' => 'Tracking finalizado y precio calculado',
+        'precio_real' => round($precio_real, 2),
+        'precio_fijo' => round($precio_fijo, 2),
         'precio_final' => $precio_final,
+        'price_final_canonical' => $precio_final,
+        'pricing_rule_applied' => $pricing_rule_applied,
         'desglose' => [
             'tarifa_base' => round($tarifa_base, 2),
             'precio_distancia' => round($precio_distancia, 2),
@@ -1457,7 +1714,17 @@ try {
             'porcentaje_recargo_trafico' => round($porcentaje_recargo_trafico, 2),
             'aplico_tarifa_minima' => $aplico_tarifa_minima,
             'precio_antes_redondeo' => round($precio_total, 2),
+            'upfront_pricing_enabled' => $upfrontPricingEnabled,
+            'precio_real' => round($precio_real, 2),
+            'precio_fijo' => round($precio_fijo, 2),
             'precio_final' => $precio_final,
+            'precio_congelado' => $precio_congelado_final,
+            'desviacion_precio_ratio' => round($desviacion_precio_ratio, 6),
+            'desviacion_porcentaje' => round($desviacion_precio_porcentaje, 2),
+            'pricing_rule_applied' => $pricing_rule_applied,
+            'recalculo_forzado' => $recalculo_forzado,
+            'recalculo_reasons' => $recalculo_reasons,
+            'metrics' => $tripTelemetry,
             'contexto_colombia' => [
                 'fecha_hora_bogota' => formatDateTimeCoAmPm($fecha_colombia),
                 'fecha_hora_bogota_24h' => $fecha_colombia->format('Y-m-d H:i:s'),
@@ -1479,6 +1746,7 @@ try {
             'distancia_real_km' => round($distancia_real, 2),
             'tiempo_real_min' => $tiempo_real_min,
             'tiempo_real_seg' => $tiempo_real_seg,
+            'tracking_valido' => $tracking_valido,
             'distancia_estimada_km' => $distancia_estimada,
             'tiempo_estimado_min' => $tiempo_estimado_min,
             'gps_puntos_validos' => intval($reconciliacion['accepted_points'] ?? 0),
@@ -1493,18 +1761,30 @@ try {
         'comisiones' => [
             'comision_plataforma_porcentaje' => $comision_plataforma_porcentaje,
             'comision_plataforma_valor' => round($comision_plataforma_valor, 2),
-            'ganancia_conductor' => round($ganancia_conductor, 2)
+            'ganancia_conductor' => round($ganancia_conductor, 2),
+            'costo_real_conductor' => round($costo_real_conductor, 2),
+            'margen_plataforma' => round($margen_plataforma, 2),
         ],
         'comparacion_precio' => [
             'precio_estimado' => floatval($viaje['precio_estimado']),
+            'precio_real' => round($precio_real, 2),
+            'precio_fijo' => round($precio_fijo, 2),
             'precio_final' => $precio_final,
-            'diferencia' => $precio_final - floatval($viaje['precio_estimado'])
+            'diferencia' => $precio_final - floatval($viaje['precio_estimado']),
+            'desviacion_porcentaje' => round($desviacion_precio_porcentaje, 2),
         ],
         'meta' => [
             'empresa_id' => $empresa_id,
             'config_precios_id' => $config_precios_id,
             'tipo_vehiculo' => $viaje['tipo_vehiculo'] ?? 'moto',
             'metrics_locked' => $hasMetricsLocked ? true : null,
+            'upfront_pricing_enabled' => $upfrontPricingEnabled,
+            'precio_congelado' => $precio_congelado_final,
+            'tracking_valido' => $tracking_valido,
+            'pricing_rule_applied' => $pricing_rule_applied,
+            'recalculo_forzado' => $recalculo_forzado,
+            'recalculo_reasons' => $recalculo_reasons,
+            'metrics' => $tripTelemetry,
         ]
     ];
     
@@ -1518,5 +1798,15 @@ try {
     echo json_encode([
         'success' => false,
         'message' => $e->getMessage()
+    ]);
+} catch (Throwable $e) {
+    if (isset($db) && $db instanceof PDO && $db->inTransaction()) {
+        $db->rollBack();
+    }
+    error_log('finalize.php fatal: ' . $e->getMessage());
+    http_response_code(500);
+    echo json_encode([
+        'success' => false,
+        'message' => 'Error interno al finalizar tracking'
     ]);
 }

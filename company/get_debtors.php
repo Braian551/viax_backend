@@ -9,8 +9,29 @@
 
 require_once '../config/database.php';
 
+function hasColumn(PDO $db, string $table, string $column): bool
+{
+        $sql = "SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                            AND table_name = :table
+                            AND column_name = :column
+                        LIMIT 1";
+        $stmt = $db->prepare($sql);
+        $stmt->execute([
+                ':table' => $table,
+                ':column' => $column,
+        ]);
+        return (bool) $stmt->fetchColumn();
+}
+
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
+$viaxOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$viaxAllowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
+if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $viaxOrigin);
+    header('Vary: Origin');
+}
 header('Access-Control-Allow-Methods: GET, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 
@@ -28,6 +49,11 @@ try {
     
     $database = new Database();
     $db = $database->getConnection();
+    $completedStates = "'completada', 'completado', 'entregado', 'finalizada', 'finalizado'";
+    $hasCompletedAt = hasColumn($db, 'solicitudes_servicio', 'completed_at');
+    $tripDateExpr = $hasCompletedAt
+        ? "COALESCE(s.completed_at, s.completado_en, s.solicitado_en, s.fecha_creacion)"
+        : "COALESCE(s.completado_en, s.solicitado_en, s.fecha_creacion)";
     
     // Obtener conductores de la empresa y calcular deuda por ciclo vigente.
     // Ciclo vigente = transacciones posteriores al último pago confirmado.
@@ -64,7 +90,7 @@ try {
         INNER JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id
         LEFT JOIN viaje_resumen_tracking vrt ON s.id = vrt.solicitud_id
         WHERE ac.conductor_id = :conductor_id
-          AND s.estado IN ('completada', 'entregado')");
+                    AND LOWER(COALESCE(s.estado, '')) IN ($completedStates)");
 
     $stmtComisionConAnchor = $db->prepare("SELECT COALESCE(SUM(
             CASE
@@ -79,8 +105,8 @@ try {
         INNER JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id
         LEFT JOIN viaje_resumen_tracking vrt ON s.id = vrt.solicitud_id
         WHERE ac.conductor_id = :conductor_id
-          AND s.estado IN ('completada', 'entregado')
-          AND COALESCE(s.completado_en, s.solicitado_en) > :anchor_ts");
+                    AND LOWER(COALESCE(s.estado, '')) IN ($completedStates)
+                    AND $tripDateExpr > :anchor_ts");
 
     $stmtPagosSinAnchor = $db->prepare("SELECT COALESCE(SUM(monto), 0) AS total_pagado
         FROM pagos_comision

@@ -10,7 +10,12 @@
  */
 
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
+$viaxOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$viaxAllowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
+if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $viaxOrigin);
+    header('Vary: Origin');
+}
 header('Access-Control-Allow-Methods: GET');
 header('Access-Control-Allow-Headers: Content-Type, Accept');
 
@@ -97,12 +102,37 @@ try {
     $dateRange = buildBogotaRangeUtc($fecha_inicio, $fecha_fin);
     $completedStates = "'completada', 'completado', 'entregado', 'finalizada', 'finalizado'";
     $hasCompletedAt = hasColumn($db, 'solicitudes_servicio', 'completed_at');
+    $hasPrecioFijo = hasColumn($db, 'solicitudes_servicio', 'precio_fijo');
+    $hasTrackingValido = hasColumn($db, 'solicitudes_servicio', 'tracking_valido');
+    $hasPriceFinalCanonical = hasColumn($db, 'solicitudes_servicio', 'price_final_canonical');
     $tripDateExpr = $hasCompletedAt
         ? "COALESCE(s.completed_at, s.completado_en, s.solicitado_en, s.fecha_creacion)"
         : "COALESCE(s.completado_en, s.solicitado_en, s.fecha_creacion)";
     $tripDateBogotaExpr = "DATE(($tripDateExpr) - INTERVAL '5 hours')";
 
-    $precioBaseExpr = "COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(s.precio_final, 0), s.precio_estimado, 0)";
+    $precioEstimadoMinimoExpr = $hasPrecioFijo
+        ? "COALESCE(NULLIF(s.precio_fijo, 0), s.precio_estimado, 0)"
+        : "COALESCE(s.precio_estimado, 0)";
+    $trackingDistanceExpr = "COALESCE(NULLIF(vrt.distancia_real_km, 0), NULLIF(s.distancia_recorrida, 0), 0)";
+    $trackingDurationExpr = "COALESCE(NULLIF(vrt.tiempo_real_minutos, 0) * 60, NULLIF(s.tiempo_transcurrido, 0), 0)";
+    $trackingValidoDerivadoExpr = "CASE
+        WHEN ($trackingDistanceExpr) > 0.1 AND ($trackingDurationExpr) > 30 THEN TRUE
+        ELSE FALSE
+    END";
+    $trackingValidoExpr = $hasTrackingValido
+        ? "COALESCE(s.tracking_valido, $trackingValidoDerivadoExpr)"
+        : $trackingValidoDerivadoExpr;
+
+    $precioDinamicoExpr = "COALESCE(NULLIF(vrt.precio_final_aplicado, 0), NULLIF(s.precio_final, 0), $precioEstimadoMinimoExpr, 0)";
+    if ($hasPriceFinalCanonical) {
+        $precioDinamicoExpr = "COALESCE(NULLIF(s.price_final_canonical, 0), $precioDinamicoExpr)";
+    }
+
+    $precioBaseExpr = "CASE
+        WHEN ($precioEstimadoMinimoExpr) <= 0 THEN GREATEST(0, $precioDinamicoExpr)
+        WHEN ($trackingValidoExpr) THEN GREATEST(($precioEstimadoMinimoExpr), $precioDinamicoExpr)
+        ELSE ($precioEstimadoMinimoExpr)
+    END";
     $trackingPctExpr = "NULLIF(vrt.comision_plataforma_porcentaje, 0)";
     $pctDesdeValorExpr = "CASE
         WHEN vrt.comision_plataforma_valor > 0 AND ($precioBaseExpr) > 0 THEN (vrt.comision_plataforma_valor * 100.0) / NULLIF(($precioBaseExpr), 0)
@@ -122,14 +152,15 @@ try {
         ELSE COALESCE(vrt.ganancia_conductor, 0) * (($porcentajeComisionEfectivoExpr) / NULLIF(100 - ($porcentajeComisionEfectivoExpr), 0))
     END";
     $comisionExpr = "CASE
+        WHEN vrt.solicitud_id IS NOT NULL AND ($trackingPctExpr) IS NOT NULL THEN ($precioBaseExpr) * (($trackingPctExpr) / 100)
         WHEN vrt.comision_plataforma_valor > 0 THEN vrt.comision_plataforma_valor
         WHEN vrt.solicitud_id IS NOT NULL AND COALESCE(vrt.ganancia_conductor, 0) > 0 AND ($trackingPctExpr) IS NOT NULL THEN $comisionDesdeGananciaExpr
-        WHEN vrt.solicitud_id IS NOT NULL AND ($trackingPctExpr) IS NOT NULL THEN ($precioBaseExpr) * (($trackingPctExpr) / 100)
         ELSE 0
     END";
     $gananciaExpr = "CASE
+        WHEN ($precioBaseExpr) > 0 THEN ($precioBaseExpr) - ($comisionExpr)
         WHEN COALESCE(vrt.ganancia_conductor, 0) > 0 THEN vrt.ganancia_conductor
-        ELSE ($precioBaseExpr) - ($comisionExpr)
+        ELSE 0
     END";
     $cobradoExpr = "CASE
         WHEN ($precioBaseExpr) > 0 THEN ($precioBaseExpr)

@@ -30,6 +30,7 @@ require_once '../core/Cache.php';
 require_once __DIR__ . '/tracking/tracking_schema_helpers.php';
 require_once '../services/trip_state_machine.php';
 require_once '../services/driver_service.php';
+require_once __DIR__ . '/../services/canonical_pricing_guard.php';
 require_once __DIR__ . '/driver_auth.php';
 require_once __DIR__ . '/../services/RealtimeEventPublisher.php';
 
@@ -124,6 +125,8 @@ try {
     $tiempo_transcurrido = isset($input['tiempo_transcurrido']) ? intval($input['tiempo_transcurrido']) : null;
     $motivo_cancelacion = isset($input['motivo_cancelacion']) ? $input['motivo_cancelacion'] : null;
     $precio_final = isset($input['precio_final']) ? floatval($input['precio_final']) : null;
+    $pricing_rule_applied = 'status_update_passthrough';
+    $tracking_valido_final = false;
 
     $database = new Database();
     $db = $database->getConnection();
@@ -178,6 +181,10 @@ try {
     $hasDurationFinal = trackingColumnExists($db, 'solicitudes_servicio', 'duration_final');
     $hasFinalizedAt = trackingColumnExists($db, 'solicitudes_servicio', 'finalized_at');
     $hasPriceFinalEn = trackingColumnExists($db, 'solicitudes_servicio', 'price_final');
+    $hasPrecioFijo = trackingColumnExists($db, 'solicitudes_servicio', 'precio_fijo');
+    $hasPricingRuleApplied = trackingColumnExists($db, 'solicitudes_servicio', 'pricing_rule_applied');
+    $hasTrackingValido = trackingColumnExists($db, 'solicitudes_servicio', 'tracking_valido');
+    $hasPriceFinalCanonical = trackingColumnExists($db, 'solicitudes_servicio', 'price_final_canonical');
 
     $estadoActualNorm = strtolower(trim((string)($solicitud['estado'] ?? '')));
     $isTerminalActual = in_array($estadoActualNorm, [
@@ -312,6 +319,60 @@ try {
         $update_fields[] = "completado_en = NOW()";
         $update_fields[] = "entregado_en = NOW()";
 
+        $precioEstimadoMinimo = ($hasPrecioFijo && isset($solicitud['precio_fijo']) && $solicitud['precio_fijo'] !== null)
+            ? floatval($solicitud['precio_fijo'])
+            : floatval($solicitud['precio_estimado'] ?? 0);
+
+        $distanciaFinalCandidata = $distancia_recorrida !== null
+            ? floatval($distancia_recorrida)
+            : (
+                ($hasDistanceFinal && isset($solicitud['distance_final']) && $solicitud['distance_final'] !== null)
+                    ? floatval($solicitud['distance_final'])
+                    : floatval($solicitud['distancia_recorrida'] ?? 0)
+            );
+
+        $duracionFinalCandidata = $tiempo_transcurrido !== null
+            ? intval($tiempo_transcurrido)
+            : (
+                ($hasDurationFinal && isset($solicitud['duration_final']) && $solicitud['duration_final'] !== null)
+                    ? intval($solicitud['duration_final'])
+                    : intval($solicitud['tiempo_transcurrido'] ?? 0)
+            );
+
+        $tracking_valido_final = canonicalPricingTrackingValid($distanciaFinalCandidata, $duracionFinalCandidata);
+
+        $precioDinamicoCandidato = $precio_final !== null ? floatval($precio_final) : 0.0;
+        if ($precioDinamicoCandidato <= 0 && $hasPriceFinalEn && isset($solicitud['price_final']) && $solicitud['price_final'] !== null) {
+            $precioDinamicoCandidato = floatval($solicitud['price_final']);
+        }
+        if ($precioDinamicoCandidato <= 0) {
+            $precioDinamicoCandidato = floatval($solicitud['precio_final'] ?? 0);
+        }
+        if ($precioDinamicoCandidato <= 0) {
+            $precioDinamicoCandidato = $precioEstimadoMinimo;
+        }
+
+        $pricingGuard = canonicalPricingResolve(
+            $precioDinamicoCandidato,
+            $precioEstimadoMinimo,
+            $tracking_valido_final,
+            [
+                'trip_id' => (int)$solicitud_id,
+                'actor_id' => (int)$conductor_id,
+                'source' => 'update_trip_status',
+                'redis' => Cache::redis(),
+                'normalize_step' => 100.0,
+                'extra' => [
+                    'distancia_final_km' => round($distanciaFinalCandidata, 3),
+                    'duracion_final_seg' => $duracionFinalCandidata,
+                    'estado_origen' => (string)$solicitud['estado'],
+                ],
+            ]
+        );
+
+        $precio_final = (float)$pricingGuard['final_price'];
+        $pricing_rule_applied = (string)$pricingGuard['rule'];
+
         // Arquitectura canónica: al cerrar viaje se congelan métricas finales.
         if ($hasMetricsLocked) {
             $update_fields[] = "metrics_locked = TRUE";
@@ -319,14 +380,24 @@ try {
         if ($hasFinalizedAt) {
             $update_fields[] = "finalized_at = COALESCE(finalized_at, NOW())";
         }
-        
-        if ($precio_final !== null) {
-            $update_fields[] = "precio_final = :precio";
-            $params[':precio'] = $precio_final;
-            if ($hasPriceFinalEn) {
-                $update_fields[] = "price_final = :price_final_en";
-                $params[':price_final_en'] = $precio_final;
-            }
+
+        $update_fields[] = "precio_final = :precio";
+        $params[':precio'] = $precio_final;
+        if ($hasPriceFinalEn) {
+            $update_fields[] = "price_final = :price_final_en";
+            $params[':price_final_en'] = $precio_final;
+        }
+        if ($hasPricingRuleApplied) {
+            $update_fields[] = "pricing_rule_applied = :pricing_rule_applied";
+            $params[':pricing_rule_applied'] = $pricing_rule_applied;
+        }
+        if ($hasTrackingValido) {
+            $update_fields[] = "tracking_valido = :tracking_valido";
+            $params[':tracking_valido'] = $tracking_valido_final ? 1 : 0;
+        }
+        if ($hasPriceFinalCanonical) {
+            $update_fields[] = "price_final_canonical = :price_final_canonical";
+            $params[':price_final_canonical'] = $precio_final;
         }
 
         if ($distancia_recorrida !== null) {
@@ -347,7 +418,9 @@ try {
             $params[':tiempo'] = $tiempo_transcurrido;
         }
 
-        error_log('[TripFinalize] Final metrics stored for trip_id=' . intval($solicitud_id));
+        error_log('[TripFinalize] Final metrics stored for trip_id=' . intval($solicitud_id)
+            . ' pricing_rule=' . $pricing_rule_applied
+            . ' tracking_valido=' . ($tracking_valido_final ? '1' : '0'));
     } elseif ($nuevoEstadoCanonical === TripStateMachine::TRIP_CANCELLED) {
         $update_fields[] = "cancelado_en = NOW()";
         if ($motivo_cancelacion) {
@@ -548,6 +621,7 @@ try {
         $redis = Cache::redis();
         if ($redis) {
             if ($nuevoEstadoCanonical === TripStateMachine::TRIP_COMPLETED || $nuevoEstadoCanonical === TripStateMachine::TRIP_CANCELLED) {
+                $redis->del('driver:' . (int)$conductor_id . ':active_ride');
                 $redis->del('trip:active:' . (int)$solicitud_id);
                 $redis->setex('trip:finished:' . (int)$solicitud_id, 86400, json_encode([
                     'status' => $nuevoEstadoCanonical,
@@ -555,6 +629,7 @@ try {
                     'conductor_id' => (int)$conductor_id,
                 ], JSON_UNESCAPED_UNICODE));
             } else {
+                $redis->setex('driver:' . (int)$conductor_id . ':active_ride', 14400, (string)((int)$solicitud_id));
                 $redis->setex('trip:active:' . (int)$solicitud_id, 7200, json_encode([
                     'status' => $nuevoEstadoCanonical,
                     'updated_at' => gmdate('c'),
@@ -564,6 +639,15 @@ try {
 
             if ($nuevoEstadoCanonical === TripStateMachine::TRIP_COMPLETED) {
                 $redis->incr('metrics:rides_completed');
+
+                canonicalPricingPersistRedisLock(
+                    $redis,
+                    (int)$solicitud_id,
+                    (float)($precio_final ?? 0),
+                    (string)$pricing_rule_applied,
+                    (bool)$tracking_valido_final,
+                    86400
+                );
 
                 $actualSec = $tiempo_transcurrido !== null ? (int)$tiempo_transcurrido : 0;
                 $estimatedSec = isset($solicitud['tiempo_estimado']) ? ((int)$solicitud['tiempo_estimado'] * 60) : 0;
@@ -637,7 +721,10 @@ try {
         'success' => true,
         'message' => 'Estado actualizado correctamente',
         'nuevo_estado' => $nuevoEstadoPersistencia,
-        'nuevo_estado_canonico' => $nuevoEstadoCanonical
+        'nuevo_estado_canonico' => $nuevoEstadoCanonical,
+        'price_final_canonical' => $precio_final,
+        'pricing_rule_applied' => $pricing_rule_applied,
+        'tracking_valido' => $tracking_valido_final,
     ]);
 
     $concurrencyService->releaseLock('solicitud', (int) $solicitud_id);

@@ -17,7 +17,7 @@ if ($origin !== '' && in_array($origin, $allowedOrigins, true)) {
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, X-Idempotency-Key, X-Timestamp, X-Nonce, X-Signature, X-Device-Fingerprint, X-Device-Model, X-Device-Platform, X-Integrity-Score, X-Integrity-Warning');
 
-// Handle CLI environment
+// Compatibilidad para ejecución por CLI.
 if (php_sapi_name() === 'cli') {
     $_SERVER['REQUEST_METHOD'] = 'POST';
 }
@@ -99,7 +99,7 @@ function tripRequestColumnExists(PDO $db, string $tableName, string $columnName)
 }
 
 try {
-    // Read input
+    // Leer payload de entrada.
     $input = file_get_contents('php://input');
     if (empty($input) && php_sapi_name() === 'cli') {
         $input = file_get_contents('php://stdin');
@@ -172,24 +172,35 @@ try {
     ];
 
     $precioEstimadoPayload = isset($data['precio_estimado']) ? (float)$data['precio_estimado'] : (float)($data['precio'] ?? 0);
+    $precioPayloadNormalizado = UpfrontPricingService::normalizeCopAmount($precioEstimadoPayload, 100);
+
     $precioCalculadoServidor = 0.0;
+    $precioServidorNormalizado = 0.0;
     try {
         $pricingServidor = DynamicPricingService::calculate($pricingInput);
         $precioCalculadoServidor = max(0.0, (float)($pricingServidor['final_price'] ?? 0));
+        $precioServidorNormalizado = UpfrontPricingService::normalizeCopAmount($precioCalculadoServidor, 100);
     } catch (Throwable $pricingError) {
         error_log('[create_trip_request] pricing server warning: ' . $pricingError->getMessage());
     }
 
-    $precioEstimado = $precioEstimadoPayload;
+    $precioEstimado = $precioPayloadNormalizado;
     if ($upfrontPricingEnabled) {
-        $precioEstimado = $precioCalculadoServidor > 0
-            ? $precioCalculadoServidor
-            : max(0.0, $precioEstimadoPayload);
+        // En upfront, la fuente canónica es el valor ya mostrado al cliente en preview.
+        $precioEstimado = $precioPayloadNormalizado > 0
+            ? $precioPayloadNormalizado
+            : $precioServidorNormalizado;
+    } else {
+        $precioEstimado = $precioServidorNormalizado > 0
+            ? $precioServidorNormalizado
+            : $precioPayloadNormalizado;
     }
 
-    $nowColombia = now_colombia();
-    $nowColombiaDb = $nowColombia->format('Y-m-d H:i:s');
-    $idempotencyWindowStart = (clone $nowColombia)->modify('-5 minutes')->format('Y-m-d H:i:s');
+    // Los timestamps persistidos en BD deben ir en UTC para mantener
+    // consistencia con filtros basados en NOW() del servidor.
+    $nowUtc = new DateTime('now', new DateTimeZone('UTC'));
+    $nowUtcDb = $nowUtc->format('Y-m-d H:i:s');
+    $idempotencyWindowStart = (clone $nowUtc)->modify('-5 minutes')->format('Y-m-d H:i:s');
 
     // Obtener clave de idempotencia
     $idempotencyKey = $_SERVER['HTTP_X_IDEMPOTENCY_KEY'] ?? $data['idempotency_key'] ?? null;
@@ -222,6 +233,11 @@ try {
         $existing = $stmt->fetch(PDO::FETCH_ASSOC);
         
         if ($existing) {
+            $precioExistenteCanonico = UpfrontPricingService::normalizeCopAmount(
+                (float)($existing['precio_fijo'] ?? $existing['precio_estimado'] ?? 0),
+                100
+            );
+
             // Retornar la solicitud existente (idempotente)
             echo json_encode([
                 'success' => true,
@@ -230,8 +246,8 @@ try {
                 'idempotent' => true,
                 'conductores_encontrados' => 0,
                 'conductores' => [],
-                'precio_estimado' => round((float)($existing['precio_estimado'] ?? 0), 2),
-                'precio_fijo' => round((float)($existing['precio_fijo'] ?? $existing['precio_estimado'] ?? 0), 2),
+                'precio_estimado' => $precioExistenteCanonico,
+                'precio_fijo' => $precioExistenteCanonico,
                 'precio_congelado' => UpfrontPricingService::toBool($existing['precio_congelado'] ?? false)
             ]);
             exit();
@@ -346,8 +362,8 @@ try {
         ':precio_estimado' => $precioEstimado,
         ':metodo_pago' => $metodoPago,
         ':last_operation_key' => $idempotencyKey,
-        ':fecha_creacion' => $nowColombiaDb,
-        ':solicitado_en' => $nowColombiaDb,
+        ':fecha_creacion' => $nowUtcDb,
+        ':solicitado_en' => $nowUtcDb,
     ];
 
     if ($upfrontPricingEnabled && $hasPrecioFijoColumn) {
@@ -403,7 +419,7 @@ try {
                 $parada['longitud'],
                 $parada['direccion'],
                 $index + 1, // Orden basado en el índice (1-based)
-                $nowColombiaDb,
+                $nowUtcDb,
             ]);
         }
     }
@@ -464,13 +480,15 @@ try {
         'source' => 'fallback',
     ];
     $pricingPreview = [
-        'base_price' => round((float)$precioEstimado, 2),
+        'base_price' => (float)$precioEstimado,
         'traffic_factor' => 1.0,
         'surge' => 1.0,
-        'final_price' => round((float)$precioEstimado, 2),
+        'final_price' => (float)$precioEstimado,
         'zone_key' => null,
     ];
     $surgeMultiplier = 1.0;
+    $surgeLevel = 'normal';
+    $surgeMessage = '';
     $driverDistance = null;
 
     try {
@@ -557,11 +575,9 @@ try {
         $pickupEtaPreview = PickupEtaService::estimateFromRankedDrivers($latOrigen, $lngOrigen, $conductoresCercanos);
 
         try {
-            $activeStmt = $db->query("SELECT COUNT(*) FROM solicitudes_servicio WHERE estado IN ('pendiente', 'aceptada', 'asignado')");
-            $activeRequests = (int)$activeStmt->fetchColumn();
-            $availableDrivers = max(1, count($conductoresCercanos));
-            $zoneKey = DynamicPricingService::zoneKey($latOrigen, $lngOrigen);
-            DynamicPricingService::updateZoneDemand($zoneKey, $activeRequests, $availableDrivers);
+            $zoneCell = DriverGeoService::zoneCellKey($latOrigen, $lngOrigen);
+            DynamicPricingService::registerRequestInZone($zoneCell, (int)$solicitudId);
+            DriverGeoService::refreshAvailableDriversForCell($zoneCell, count($conductoresCercanos));
         } catch (Throwable $e) {}
     }
 
@@ -576,9 +592,10 @@ try {
 
     $pricingPreview = DynamicPricingService::calculate($pricingInput);
     if ($upfrontPricingEnabled) {
-        $pricingPreview['final_price'] = round((float)$precioEstimado, 2);
+        $pricingPreview['base_price'] = (float)$precioEstimado;
+        $pricingPreview['final_price'] = (float)$precioEstimado;
         $pricingPreview['upfront_pricing'] = true;
-        $pricingPreview['frozen_price'] = round((float)$precioEstimado, 2);
+        $pricingPreview['frozen_price'] = (float)$precioEstimado;
     }
 
     if (!empty($conductoresCercanos)) {
@@ -598,6 +615,20 @@ try {
             $surgePayload = is_string($surgeRaw) ? json_decode($surgeRaw, true) : null;
             if (is_array($surgePayload) && isset($surgePayload['multiplier'])) {
                 $surgeMultiplier = max(1.0, (float)$surgePayload['multiplier']);
+                $surgeLevel = isset($surgePayload['demand_level'])
+                    ? (string)$surgePayload['demand_level']
+                    : DynamicPricingService::demandLevel($surgeMultiplier);
+                $surgeMessage = isset($surgePayload['message'])
+                    ? (string)$surgePayload['message']
+                    : DynamicPricingService::demandMessage($surgeMultiplier);
+            } else {
+                $zonePrefix = 'zone:' . $gridId;
+                $zoneMultiplierRaw = $redis->get($zonePrefix . ':surge_multiplier');
+                if (is_string($zoneMultiplierRaw) && is_numeric($zoneMultiplierRaw)) {
+                    $surgeMultiplier = max(1.0, (float)$zoneMultiplierRaw);
+                    $surgeLevel = DynamicPricingService::demandLevel($surgeMultiplier);
+                    $surgeMessage = DynamicPricingService::demandMessage($surgeMultiplier);
+                }
             }
         }
     } catch (Throwable $e) {}
@@ -614,10 +645,12 @@ try {
         'pickup_eta' => $pickupEtaPreview,
         'pickup_eta_minutes' => $pickupEtaPreview['eta_minutes'] ?? null,
         'surge_multiplier' => round($surgeMultiplier, 2),
+        'surge_level' => $surgeLevel,
+        'surge_message' => $surgeMessage,
         'driver_distance' => $driverDistance,
         'eta' => $eta,
-        'precio_estimado' => round((float)$precioEstimado, 2),
-        'precio_fijo' => round((float)$precioEstimado, 2),
+        'precio_estimado' => (float)$precioEstimado,
+        'precio_fijo' => (float)$precioEstimado,
         'precio_congelado' => $upfrontPricingEnabled && $hasPrecioCongeladoColumn,
         'pricing_preview' => $pricingPreview,
     ]);
@@ -628,12 +661,39 @@ try {
             $redis->lPush('dispatch:trip_queue', (string)$solicitudId);
             $redis->lPush('ride_requests_queue', (string)$solicitudId);
             $redis->setex('ride:' . $solicitudId . ':radius', 600, '2');
+            $createdAtIso = now_colombia()->format('c');
             $redis->setex('trip:active:' . $solicitudId, 7200, json_encode([
                 'status' => 'requested',
-                'created_at' => now_colombia()->format('c'),
+                'created_at' => $createdAtIso,
                 'cliente_id' => (int)$usuarioId,
                 'empresa_id' => $empresaId,
             ], JSON_UNESCAPED_UNICODE));
+
+            // Seed de cache canónico para tiempo real: precio base garantizado desde el inicio.
+            $redis->setex('trip:' . $solicitudId . ':state', 7200, json_encode([
+                'lat' => (float)$latOrigen,
+                'lng' => (float)$lngOrigen,
+                'timestamp' => $createdAtIso,
+                'speed' => 0,
+                'heading' => 0,
+                'fase' => 'pendiente',
+                'metrics_locked' => false,
+            ], JSON_UNESCAPED_UNICODE));
+
+            $redis->setex('trip:' . $solicitudId . ':metrics', 7200, json_encode([
+                'distance_km' => 0,
+                'elapsed_time_sec' => 0,
+                'avg_speed_kmh' => 0,
+                'price' => round((float)$precioEstimado, 2),
+                'estimated_price' => round((float)$precioEstimado, 2),
+                'price_floor' => round((float)$precioEstimado, 2),
+                'metrics_locked' => false,
+                'last_timestamp' => $createdAtIso,
+                'last_ts' => time(),
+                'planned_route_km' => max(0.0, (float)$distanciaKm),
+                'estimated_time_min' => max(0, (int)$duracionMin),
+            ], JSON_UNESCAPED_UNICODE));
+
             $driverIds = array_values(array_map(static fn($x) => (string)($x['driver_id'] ?? $x['id'] ?? ''), $conductoresCercanos));
             $driverIds = array_values(array_filter($driverIds, static fn($x) => $x !== ''));
             if (!empty($driverIds)) {

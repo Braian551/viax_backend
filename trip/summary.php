@@ -135,6 +135,7 @@ try {
     $hasDistanceFinal = trackingColumnExists($db, 'solicitudes_servicio', 'distance_final');
     $hasDurationFinal = trackingColumnExists($db, 'solicitudes_servicio', 'duration_final');
     $hasPriceFinalEn = trackingColumnExists($db, 'solicitudes_servicio', 'price_final');
+    $hasPrecioFijo = trackingColumnExists($db, 'solicitudes_servicio', 'precio_fijo');
     $hasCompletedAt = trackingColumnExists($db, 'solicitudes_servicio', 'completed_at');
     $hasFinalizedAt = trackingColumnExists($db, 'solicitudes_servicio', 'finalized_at');
 
@@ -154,6 +155,10 @@ try {
         ? 's.price_final AS price_final_en,'
         : 'NULL::numeric AS price_final_en,';
 
+    $precioFijoExpr = $hasPrecioFijo
+        ? 's.precio_fijo,'
+        : 'NULL::numeric AS precio_fijo,';
+
     $completedAtExpr = $hasCompletedAt
         ? 's.completed_at,'
         : 'NULL::timestamp AS completed_at,';
@@ -169,8 +174,10 @@ try {
             $metricsLockedExpr
             s.distancia_recorrida,
             s.tiempo_transcurrido,
+            s.precio_estimado,
             s.precio_final,
             s.precio_en_tracking,
+            $precioFijoExpr
             s.desglose_precio,
             $distanceFinalExpr
             $durationFinalExpr
@@ -266,6 +273,19 @@ try {
         $price = max(0, floatval($price));
     }
 
+    $trackingValido = ((float)$distanceKm > 0.1 && (int)$durationSec > 30);
+    $precioEstimadoMinimo = isset($trip['precio_fijo']) && $trip['precio_fijo'] !== null
+        ? (float)$trip['precio_fijo']
+        : (float)($trip['precio_estimado'] ?? 0);
+    if ($precioEstimadoMinimo > 0) {
+        if (!$trackingValido) {
+            $price = $precioEstimadoMinimo;
+        } else {
+            $price = max((float)$price, $precioEstimadoMinimo);
+        }
+    }
+    $price = max(0.0, round((float)$price, 2));
+
     $completedAt = $trip['finalized_at']
         ?? $trip['completed_at']
         ?? $trip['completado_en']
@@ -297,6 +317,8 @@ try {
             'ganancia_empresa' => round(floatval($trip['ganancia_empresa'] ?? 0), 2),
             'precio_final' => round($price, 2),
         ];
+    } else {
+        $breakdown['precio_final'] = round($price, 2);
     }
 
     echo json_encode([

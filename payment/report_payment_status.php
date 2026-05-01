@@ -1,10 +1,10 @@
 <?php
 /**
- * Endpoint para reportar estado de pago.
+ * Punto de entrada para reportar estado de pago.
  * 
  * POST /payment/report_payment_status.php
  * 
- * Body:
+ * Cuerpo (JSON):
  * {
  *   "solicitud_id": 123,
  *   "usuario_id": 456,
@@ -33,6 +33,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once '../config/database.php';
+require_once '../services/canonical_pricing_guard.php';
+
+function paymentStatusColumnExists(PDO $db, string $table, string $column): bool
+{
+    $stmt = $db->prepare("SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = :table
+          AND column_name = :column
+        LIMIT 1");
+    $stmt->execute([
+        ':table' => $table,
+        ':column' => $column,
+    ]);
+    return (bool)$stmt->fetchColumn();
+}
 
 try {
     $input = json_decode(file_get_contents('php://input'), true);
@@ -53,6 +69,11 @@ try {
     $database = new Database();
     $db = $database->getConnection();
     $db->beginTransaction();
+
+    $hasPrecioFijo = paymentStatusColumnExists($db, 'solicitudes_servicio', 'precio_fijo');
+    $hasTrackingValido = paymentStatusColumnExists($db, 'solicitudes_servicio', 'tracking_valido');
+    $hasPricingRuleApplied = paymentStatusColumnExists($db, 'solicitudes_servicio', 'pricing_rule_applied');
+    $hasPriceFinalCanonical = paymentStatusColumnExists($db, 'solicitudes_servicio', 'price_final_canonical');
     
     // Obtener datos del viaje
     $stmt = $db->prepare("
@@ -170,18 +191,107 @@ try {
         $resultado['mensaje'] = 'Pago confirmado por ambas partes.';
         
         // Obtener precio del viaje para crear la transacción
-        $stmtPrecio = $db->prepare("SELECT precio_final, precio_estimado FROM solicitudes_servicio WHERE id = ?");
+        $precioFijoExpr = $hasPrecioFijo
+            ? 's.precio_fijo,'
+            : 'NULL::numeric AS precio_fijo,';
+        $trackingValidoExpr = $hasTrackingValido
+            ? 's.tracking_valido AS tracking_valido_guard,'
+            : 'NULL::boolean AS tracking_valido_guard,';
+        $pricingRuleExpr = $hasPricingRuleApplied
+            ? 's.pricing_rule_applied,'
+            : 'NULL::text AS pricing_rule_applied,';
+        $priceFinalCanonicalExpr = $hasPriceFinalCanonical
+            ? 's.price_final_canonical,'
+            : 'NULL::numeric AS price_final_canonical,';
+
+        $stmtPrecio = $db->prepare("SELECT
+            s.precio_final,
+            s.precio_estimado,
+            $precioFijoExpr
+            $trackingValidoExpr
+            $pricingRuleExpr
+            $priceFinalCanonicalExpr
+            s.distancia_recorrida,
+            s.tiempo_transcurrido,
+            vrt.precio_final_aplicado AS tracking_precio,
+            vrt.distancia_real_km,
+            vrt.tiempo_real_minutos,
+            vrt.comision_plataforma_porcentaje,
+            vrt.comision_plataforma_valor,
+            vrt.ganancia_conductor
+        FROM solicitudes_servicio s
+        LEFT JOIN viaje_resumen_tracking vrt ON s.id = vrt.solicitud_id
+        WHERE s.id = ?");
         $stmtPrecio->execute([$solicitudId]);
         $precioData = $stmtPrecio->fetch(PDO::FETCH_ASSOC);
-        $montoTotal = $precioData['precio_final'] > 0 ? $precioData['precio_final'] : $precioData['precio_estimado'];
+
+        $precioEstimado = max(0.0, (float)($precioData['precio_estimado'] ?? 0.0));
+        $precioFijo = isset($precioData['precio_fijo']) ? (float)$precioData['precio_fijo'] : 0.0;
+        $precioEstimadoMinimo = $precioFijo > 0 ? $precioFijo : $precioEstimado;
+
+        $distanciaTrackingKm = isset($precioData['distancia_real_km']) && $precioData['distancia_real_km'] !== null
+            ? (float)$precioData['distancia_real_km']
+            : (float)($precioData['distancia_recorrida'] ?? 0.0);
+        $duracionTrackingSeg = isset($precioData['tiempo_real_minutos']) && $precioData['tiempo_real_minutos'] !== null
+            ? (int)round(((float)$precioData['tiempo_real_minutos']) * 60)
+            : (int)($precioData['tiempo_transcurrido'] ?? 0);
+
+        $trackingValido = ($hasTrackingValido && $precioData['tracking_valido_guard'] !== null)
+            ? (bool)$precioData['tracking_valido_guard']
+            : canonicalPricingTrackingValid($distanciaTrackingKm, $duracionTrackingSeg);
+
+        $precioDinamico = 0.0;
+        if (isset($precioData['price_final_canonical']) && (float)$precioData['price_final_canonical'] > 0) {
+            $precioDinamico = (float)$precioData['price_final_canonical'];
+        } elseif (isset($precioData['tracking_precio']) && (float)$precioData['tracking_precio'] > 0) {
+            $precioDinamico = (float)$precioData['tracking_precio'];
+        } elseif (isset($precioData['precio_final']) && (float)$precioData['precio_final'] > 0) {
+            $precioDinamico = (float)$precioData['precio_final'];
+        } else {
+            $precioDinamico = $precioEstimadoMinimo;
+        }
+
+        $pricingDecision = canonicalPricingResolve(
+            $precioDinamico,
+            $precioEstimadoMinimo,
+            $trackingValido,
+            [
+                'trip_id' => (int)$solicitudId,
+                'source' => 'report_payment_status',
+                'emit_audit' => true,
+                'emit_alerts' => true,
+                'normalize_step' => 100.0,
+            ]
+        );
+
+        $montoTotal = (float)$pricingDecision['final_price'];
+        $pricingRuleApplied = !empty($precioData['pricing_rule_applied'])
+            ? (string)$precioData['pricing_rule_applied']
+            : (string)$pricingDecision['rule'];
+
+        $comisionPorcentaje = max(0.0, (float)($precioData['comision_plataforma_porcentaje'] ?? 0.0));
+        $trackingGanancia = max(0.0, (float)($precioData['ganancia_conductor'] ?? 0.0));
+        $comisionPlataforma = 0.0;
+        if (isset($precioData['comision_plataforma_valor']) && (float)$precioData['comision_plataforma_valor'] > 0) {
+            $comisionPlataforma = (float)$precioData['comision_plataforma_valor'];
+        } elseif ($comisionPorcentaje > 0 && $montoTotal > 0) {
+            $comisionPlataforma = $montoTotal * ($comisionPorcentaje / 100.0);
+        } elseif ($trackingGanancia > 0 && $montoTotal > $trackingGanancia) {
+            $comisionPlataforma = $montoTotal - $trackingGanancia;
+        }
+
+        $comisionPlataforma = min(max(0.0, $comisionPlataforma), max(0.0, $montoTotal));
+        $montoConductor = ($trackingValido && $trackingGanancia > 0)
+            ? $trackingGanancia
+            : max(0.0, $montoTotal - $comisionPlataforma);
+        if ($montoConductor > $montoTotal) {
+            $montoConductor = max(0.0, $montoTotal);
+        }
         
         // Crear transacción si no existe
         $stmtCheckTx = $db->prepare("SELECT id FROM transacciones WHERE solicitud_id = ?");
         $stmtCheckTx->execute([$solicitudId]);
         if (!$stmtCheckTx->fetch()) {
-            $montoConductor = $montoTotal * 0.90; // 90% para el conductor
-            $comisionPlataforma = $montoTotal * 0.10; // 10% comisión
-            
             $stmtTx = $db->prepare("
                 INSERT INTO transacciones (
                     solicitud_id, cliente_id, conductor_id, 
@@ -216,17 +326,48 @@ try {
             ");
             $stmtPago->execute([$solicitudId, $viaje['conductor_id'], $viaje['cliente_id'], $montoTotal]);
             
-            // Marcar pago como confirmado en solicitud
-            $stmtConfirmar = $db->prepare("
-                UPDATE solicitudes_servicio 
-                SET pago_confirmado = TRUE, pago_confirmado_en = NOW()
-                WHERE id = ?
-            ");
-            $stmtConfirmar->execute([$solicitudId]);
-            
             $resultado['transaccion_creada'] = true;
-            $resultado['monto_conductor'] = $montoConductor;
+        } else {
+            $resultado['transaccion_creada'] = false;
         }
+
+        // Marcar pago como confirmado en solicitud (idempotente).
+        $updateFields = [
+            "pago_confirmado = TRUE",
+            "pago_confirmado_en = NOW()",
+            "precio_final = GREATEST(COALESCE(precio_final, 0), :monto_total)",
+        ];
+        if ($hasPriceFinalCanonical) {
+            $updateFields[] = "price_final_canonical = :price_final_canonical";
+        }
+        if ($hasPricingRuleApplied) {
+            $updateFields[] = "pricing_rule_applied = :pricing_rule_applied";
+        }
+        if ($hasTrackingValido) {
+            $updateFields[] = "tracking_valido = :tracking_valido";
+        }
+
+        $stmtConfirmar = $db->prepare("UPDATE solicitudes_servicio SET\n            " . implode(",\n            ", $updateFields) . "\n            WHERE id = :solicitud_id");
+        $paramsConfirmar = [
+            ':monto_total' => $montoTotal,
+            ':solicitud_id' => $solicitudId,
+        ];
+        if ($hasPriceFinalCanonical) {
+            $paramsConfirmar[':price_final_canonical'] = $montoTotal;
+        }
+        if ($hasPricingRuleApplied) {
+            $paramsConfirmar[':pricing_rule_applied'] = $pricingRuleApplied;
+        }
+        if ($hasTrackingValido) {
+            $paramsConfirmar[':tracking_valido'] = $trackingValido ? 1 : 0;
+        }
+        $stmtConfirmar->execute($paramsConfirmar);
+
+        $resultado['monto_total'] = round($montoTotal, 2);
+        $resultado['monto_conductor'] = round($montoConductor, 2);
+        $resultado['comision_plataforma'] = round($comisionPlataforma, 2);
+        $resultado['pricing_rule_applied'] = $pricingRuleApplied;
+        $resultado['tracking_valido'] = $trackingValido;
         
         // Si había disputa, resolverla
         if ($viaje['tiene_disputa']) {

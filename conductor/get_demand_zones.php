@@ -27,6 +27,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once '../config/database.php';
+require_once '../config/app.php';
+require_once '../services/pricing_service.php';
 
 try {
     // Obtener parámetros
@@ -250,27 +252,33 @@ try {
  * basado en ratio solicitudes/conductores
  */
 function calculateDemandLevel($requests, $drivers) {
-    if ($drivers == 0) {
-        // Sin conductores = máxima demanda
-        if ($requests >= 5) return ['level' => 5, 'multiplier' => 2.5];
-        if ($requests >= 3) return ['level' => 4, 'multiplier' => 2.0];
-        if ($requests >= 2) return ['level' => 3, 'multiplier' => 1.5];
-        return ['level' => 2, 'multiplier' => 1.3];
-    }
-    
-    $ratio = $requests / $drivers;
-    
-    if ($ratio >= 4.0) {
-        return ['level' => 5, 'multiplier' => 2.5]; // Muy alta demanda
-    } elseif ($ratio >= 3.0) {
-        return ['level' => 4, 'multiplier' => 2.0]; // Alta demanda
-    } elseif ($ratio >= 2.0) {
-        return ['level' => 3, 'multiplier' => 1.5]; // Media demanda
-    } elseif ($ratio >= 1.0) {
-        return ['level' => 2, 'multiplier' => 1.2]; // Demanda normal-alta
+    $activeRequests = max(0, (int)$requests);
+    $availableDrivers = max(0, (int)$drivers);
+    $ratio = $availableDrivers > 0
+        ? ((float)$activeRequests / (float)$availableDrivers)
+        : ($activeRequests > 0 ? 99.0 : 0.0);
+
+    $multiplier = DynamicPricingService::resolveSurgeTarget(
+        $ratio,
+        $activeRequests,
+        $availableDrivers
+    );
+
+    $levelText = DynamicPricingService::demandLevel($multiplier);
+    if ($levelText === 'alta') {
+        $level = $multiplier >= 1.8 ? 5 : 4;
+    } elseif ($levelText === 'media') {
+        $level = 3;
+    } elseif ($levelText === 'leve') {
+        $level = 2;
     } else {
-        return ['level' => 1, 'multiplier' => 1.0]; // Baja demanda
+        $level = 1;
     }
+
+    return [
+        'level' => $level,
+        'multiplier' => round($multiplier, 2),
+    ];
 }
 
 /**

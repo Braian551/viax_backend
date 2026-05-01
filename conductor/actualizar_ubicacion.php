@@ -50,21 +50,252 @@ function isValidLng(float $lng): bool
  * Guarda ubicación en Redis para lectura ultra-rápida en tiempo real.
  *
  * Claves:
- * - driver_location:{id}
+ * - driver_location:{id} (legacy)
+ * - driver:{id}:location (canónica realtime)
+ * - driver:{id}:history (últimos puntos)
  * - active_drivers (set)
  */
-function writeLocationToRedis(int $conductorId, float $lat, float $lng, ?float $speed): void
+function writeLocationToRedis(
+    int $conductorId,
+    float $lat,
+    float $lng,
+    ?float $speed,
+    ?float $heading,
+    int $timestampSec
+): void
 {
     $payload = json_encode([
         'lat' => $lat,
         'lng' => $lng,
         'speed' => $speed,
-        'timestamp' => time(),
+        'heading' => $heading,
+        'timestamp' => $timestampSec,
     ]);
 
     Cache::set("driver_location:{$conductorId}", (string) $payload, 30);
+    Cache::set("driver:{$conductorId}:location", (string) $payload, 30);
     Cache::sAdd('active_drivers', (string) $conductorId);
-    DriverGeoService::upsertDriverLocation($conductorId, $lat, $lng, $speed);
+    DriverGeoService::upsertDriverLocation(
+        $conductorId,
+        $lat,
+        $lng,
+        $speed,
+        $heading,
+        $timestampSec
+    );
+    appendDriverHistory($conductorId, [
+        'lat' => $lat,
+        'lng' => $lng,
+        'speed' => $speed,
+        'heading' => $heading,
+        'timestamp' => $timestampSec,
+    ]);
+}
+
+/** Normaliza heading para dejarlo en rango [0, 360). */
+function normalizeHeading(?float $heading): ?float
+{
+    if ($heading === null || !is_finite($heading)) {
+        return null;
+    }
+
+    $normalized = fmod($heading, 360.0);
+    if ($normalized < 0) {
+        $normalized += 360.0;
+    }
+
+    return round($normalized, 2);
+}
+
+/**
+ * Convierte timestamps (segundos/milisegundos/iso8601) a epoch en segundos.
+ */
+function normalizeEpochTimestamp($rawTimestamp): int
+{
+    $now = time();
+    if ($rawTimestamp === null || $rawTimestamp === '') {
+        return $now;
+    }
+
+    $timestamp = null;
+    if (is_numeric($rawTimestamp)) {
+        $numeric = (float) $rawTimestamp;
+        $timestamp = $numeric > 1000000000000
+            ? (int) floor($numeric / 1000)
+            : (int) floor($numeric);
+    } elseif (is_string($rawTimestamp)) {
+        $parsed = strtotime($rawTimestamp);
+        if ($parsed !== false) {
+            $timestamp = $parsed;
+        }
+    }
+
+    if ($timestamp === null || $timestamp <= 0) {
+        return $now;
+    }
+
+    // Evita timestamps absurdos sin bloquear al cliente.
+    if ($timestamp < ($now - 300) || $timestamp > ($now + 300)) {
+        return $now;
+    }
+
+    return $timestamp;
+}
+
+/** Distancia Haversine en metros entre dos coordenadas. */
+function haversineMeters(float $lat1, float $lng1, float $lat2, float $lng2): float
+{
+    $earthRadius = 6371000.0;
+    $latDelta = deg2rad($lat2 - $lat1);
+    $lngDelta = deg2rad($lng2 - $lng1);
+
+    $a = sin($latDelta / 2) * sin($latDelta / 2)
+        + cos(deg2rad($lat1)) * cos(deg2rad($lat2))
+        * sin($lngDelta / 2) * sin($lngDelta / 2);
+    $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
+
+    return $earthRadius * $c;
+}
+
+/** Calcula bearing de A -> B en grados [0, 360). */
+function calculateBearingDeg(float $fromLat, float $fromLng, float $toLat, float $toLng): float
+{
+    $fromLatRad = deg2rad($fromLat);
+    $toLatRad = deg2rad($toLat);
+    $deltaLngRad = deg2rad($toLng - $fromLng);
+
+    $y = sin($deltaLngRad) * cos($toLatRad);
+    $x = cos($fromLatRad) * sin($toLatRad)
+        - sin($fromLatRad) * cos($toLatRad) * cos($deltaLngRad);
+
+    $bearing = rad2deg(atan2($y, $x));
+    $bearing = fmod(($bearing + 360.0), 360.0);
+
+    return round($bearing, 2);
+}
+
+/**
+ * Lee la última posición realtime para derivar velocidad y heading cuando el
+ * cliente no los envía.
+ */
+function getLastDriverLocationSnapshot(int $conductorId): ?array
+{
+    $raw = Cache::get("driver:{$conductorId}:location");
+    if (!is_string($raw) || trim($raw) === '') {
+        $raw = Cache::get("driver_location:{$conductorId}");
+    }
+    if (!is_string($raw) || trim($raw) === '') {
+        return null;
+    }
+
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) {
+        return null;
+    }
+
+    $lat = isset($decoded['lat']) ? (float) $decoded['lat'] : null;
+    $lng = isset($decoded['lng']) ? (float) $decoded['lng'] : null;
+    $ts = isset($decoded['timestamp']) ? (int) $decoded['timestamp'] : 0;
+    $heading = isset($decoded['heading']) ? (float) $decoded['heading'] : null;
+
+    if ($lat === null || $lng === null || $ts <= 0) {
+        return null;
+    }
+
+    return [
+        'lat' => $lat,
+        'lng' => $lng,
+        'timestamp' => $ts,
+        'heading' => normalizeHeading($heading),
+    ];
+}
+
+/** Resuelve velocidad final (reportada o estimada por delta GPS). */
+function resolveSpeedKmh(
+    ?float $reportedSpeed,
+    ?array $lastSnapshot,
+    float $lat,
+    float $lng,
+    int $timestampSec
+): float {
+    if ($reportedSpeed !== null && is_finite($reportedSpeed) && $reportedSpeed >= 0 && $reportedSpeed <= 220) {
+        return round($reportedSpeed, 2);
+    }
+
+    if ($lastSnapshot === null) {
+        return 0.0;
+    }
+
+    $deltaSec = $timestampSec - (int) ($lastSnapshot['timestamp'] ?? 0);
+    if ($deltaSec <= 0 || $deltaSec > 45) {
+        return 0.0;
+    }
+
+    $meters = haversineMeters(
+        (float) $lastSnapshot['lat'],
+        (float) $lastSnapshot['lng'],
+        $lat,
+        $lng
+    );
+    $speedKmh = ($meters / max(1, $deltaSec)) * 3.6;
+    if (!is_finite($speedKmh)) {
+        return 0.0;
+    }
+
+    return round(min(220.0, max(0.0, $speedKmh)), 2);
+}
+
+/** Resuelve heading final (reportado o inferido por desplazamiento). */
+function resolveHeading(
+    ?float $reportedHeading,
+    ?array $lastSnapshot,
+    float $lat,
+    float $lng
+): ?float {
+    $normalizedReported = normalizeHeading($reportedHeading);
+    if ($normalizedReported !== null) {
+        return $normalizedReported;
+    }
+
+    if ($lastSnapshot === null) {
+        return null;
+    }
+
+    $meters = haversineMeters(
+        (float) $lastSnapshot['lat'],
+        (float) $lastSnapshot['lng'],
+        $lat,
+        $lng
+    );
+    if ($meters < 1.5) {
+        return $lastSnapshot['heading'] ?? null;
+    }
+
+    return calculateBearingDeg(
+        (float) $lastSnapshot['lat'],
+        (float) $lastSnapshot['lng'],
+        $lat,
+        $lng
+    );
+}
+
+/** Guarda un historial corto de posiciones recientes en Redis. */
+function appendDriverHistory(int $conductorId, array $point): void
+{
+    $redis = Cache::redis();
+    if (!$redis) {
+        return;
+    }
+
+    $historyKey = "driver:{$conductorId}:history";
+    $pointJson = json_encode($point, JSON_UNESCAPED_UNICODE);
+    if (!is_string($pointJson) || $pointJson === '') {
+        return;
+    }
+
+    $redis->lPush($historyKey, $pointJson);
+    $redis->lTrim($historyKey, 0, 9); // Mantener últimos 10 puntos.
+    $redis->expire($historyKey, 180);
 }
 
 /**
@@ -103,6 +334,17 @@ try {
     $latitud = isset($input['latitud']) ? (float) $input['latitud'] : null;
     $longitud = isset($input['longitud']) ? (float) $input['longitud'] : null;
     $velocidad = isset($input['velocidad']) ? (float) $input['velocidad'] : null;
+    $headingRaw = null;
+    if (isset($input['heading'])) {
+        $headingRaw = (float) $input['heading'];
+    } elseif (isset($input['bearing'])) {
+        $headingRaw = (float) $input['bearing'];
+    }
+    $timestampSec = normalizeEpochTimestamp(
+        $input['timestamp']
+            ?? $input['timestamp_ms']
+            ?? null
+    );
 
     if ($conductorId <= 0) {
         throw new Exception('ID de conductor inválido');
@@ -117,12 +359,23 @@ try {
     if ($latitud === null || $longitud === null) {
         throw new Exception('Latitud y longitud son requeridas');
     }
-    if (!isValidLat($latitud) || !isValidLng($longitud)) {
+    if (!is_finite($latitud) || !is_finite($longitud) || !isValidLat($latitud) || !isValidLng($longitud)) {
         throw new Exception('Coordenadas inválidas');
     }
 
+    $lastSnapshot = getLastDriverLocationSnapshot($conductorId);
+    $speedKmh = resolveSpeedKmh($velocidad, $lastSnapshot, $latitud, $longitud, $timestampSec);
+    $heading = resolveHeading($headingRaw, $lastSnapshot, $latitud, $longitud);
+
     // Escritura rápida en cache (camino crítico realtime).
-    writeLocationToRedis($conductorId, $latitud, $longitud, $velocidad);
+    writeLocationToRedis(
+        $conductorId,
+        $latitud,
+        $longitud,
+        $speedKmh,
+        $heading,
+        $timestampSec
+    );
     DriverGeoService::touchDriverHeartbeat($conductorId, 20);
     DriverGeoService::setDriverState($conductorId, 'available');
 
@@ -165,7 +418,7 @@ try {
                 ':conductor_id' => $conductorId,
                 ':lat' => $latitud,
                 ':lng' => $longitud,
-                ':speed_kmh' => $velocidad,
+                ':speed_kmh' => $speedKmh,
                 ':grid_id' => $gridId,
                 ':city_id' => $cityId,
             ]);
@@ -181,6 +434,13 @@ try {
     echo json_encode([
         'success' => true,
         'message' => 'Ubicación actualizada exitosamente',
+        'data' => [
+            'lat' => $latitud,
+            'lng' => $longitud,
+            'speed' => $speedKmh,
+            'heading' => $heading,
+            'timestamp' => $timestampSec,
+        ],
     ]);
 } catch (Exception $e) {
     http_response_code(500);

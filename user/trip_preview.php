@@ -6,6 +6,8 @@
  * Campos aditivos incluidos:
  * - pickup_eta_minutes
  * - surge_multiplier
+ * - surge_level
+ * - surge_message
  * - driver_distance
  */
 
@@ -61,6 +63,12 @@ try {
     }
     if (!isset($response['surge_multiplier'])) {
         $response['surge_multiplier'] = 1.0;
+    }
+    if (!isset($response['surge_level'])) {
+        $response['surge_level'] = 'normal';
+    }
+    if (!isset($response['surge_message'])) {
+        $response['surge_message'] = '';
     }
     if (!isset($response['driver_distance'])) {
         $response['driver_distance'] = null;

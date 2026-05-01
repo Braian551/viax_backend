@@ -48,6 +48,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 require_once __DIR__ . '/../config/app.php';
 require_once __DIR__ . '/../conductor/tracking/tracking_schema_helpers.php';
+require_once __DIR__ . '/../services/pricing_service.php';
 
 const UI_ROTATION_SEC = 5;
 
@@ -465,14 +466,69 @@ function fetchDriverCheckingSummary(PDO $db, int $driverId): ?array
     return $cache[$driverId];
 }
 
-function resolveDriverChecking(PDO $db, array $trip): ?array
+function driversViewingListKey(int $requestId): string
 {
-    $estado = strtolower(trim((string)($trip['estado'] ?? '')));
-    if (!in_array($estado, ['pendiente', 'requested'], true)) {
+    return 'ride:' . $requestId . ':drivers_viewing';
+}
+
+function driverViewingPayloadKey(int $requestId, int $driverId): string
+{
+    return 'ride:' . $requestId . ':drivers_viewing:driver:' . $driverId;
+}
+
+function decodeDriverViewingPayload($raw): ?array
+{
+    if (!is_string($raw) || trim($raw) === '') {
         return null;
     }
 
-    $requestId = (int)($trip['id'] ?? 0);
+    $decoded = json_decode($raw, true);
+    return is_array($decoded) ? $decoded : null;
+}
+
+function fetchDriverViewingPayloadFromCache(int $requestId, int $driverId): ?array
+{
+    if ($requestId <= 0 || $driverId <= 0) {
+        return null;
+    }
+
+    $redis = getRedisConnection();
+    if (!$redis) {
+        return null;
+    }
+
+    try {
+        $cached = decodeDriverViewingPayload(
+            $redis->get(driverViewingPayloadKey($requestId, $driverId))
+        );
+        if ($cached !== null) {
+            return $cached;
+        }
+
+        $entries = $redis->lRange(driversViewingListKey($requestId), 0, 9);
+        if (!is_array($entries)) {
+            return null;
+        }
+
+        foreach ($entries as $raw) {
+            $decoded = decodeDriverViewingPayload($raw);
+            if (!is_array($decoded)) {
+                continue;
+            }
+
+            if ((int)($decoded['driver_id'] ?? 0) === $driverId) {
+                return $decoded;
+            }
+        }
+    } catch (Throwable $e) {
+        return null;
+    }
+
+    return null;
+}
+
+function fetchLatestDriverViewingPayloadFromCache(int $requestId): ?array
+{
     if ($requestId <= 0) {
         return null;
     }
@@ -482,31 +538,151 @@ function resolveDriverChecking(PDO $db, array $trip): ?array
         return null;
     }
 
-    $driverId = 0;
-    $source = 'current_driver';
-    $status = 'pending';
-    $shownAt = function_exists('now_colombia')
-        ? now_colombia()->format('c')
-        : (new DateTime('now', new DateTimeZone('America/Bogota')))->format('c');
-
     try {
-        $currentDriverRaw = $redis->get('ride:' . $requestId . ':current_driver');
-        if (is_string($currentDriverRaw) && trim($currentDriverRaw) !== '') {
-            $driverId = (int)$currentDriverRaw;
+        $entries = $redis->lRange(driversViewingListKey($requestId), 0, 0);
+        if (!is_array($entries) || empty($entries)) {
+            return null;
         }
 
-        if ($driverId > 0) {
-            $statusRaw = $redis->get('ride:' . $requestId . ':driver:' . $driverId . ':status');
-            if (is_string($statusRaw) && trim($statusRaw) !== '') {
-                $status = strtolower(trim($statusRaw));
-            }
-        }
+        return decodeDriverViewingPayload($entries[0] ?? null);
     } catch (Throwable $e) {
         return null;
+    }
+}
+
+/**
+ * Lee del cache Redis el estado dinámico de matching que debe observar la UI.
+ *
+ * Esto permite que el long-poll despierte cuando cambia el conductor que está
+ * revisando la solicitud, el estado de matching o el número de conductores que
+ * ya vieron la oferta activa.
+ *
+ * @return array<string,mixed>
+ */
+function resolveSearchRealtimeState(array $trip): array
+{
+    $estado = strtolower(trim((string)($trip['estado'] ?? '')));
+    if (!in_array($estado, ['pendiente', 'requested'], true)) {
+        return [
+            'matching_status' => null,
+            'current_driver_id' => 0,
+            'current_driver_status' => '',
+            'conductores_cerca' => 0,
+            'ui_message' => '',
+        ];
+    }
+
+    $snapshot = [
+        'matching_status' => 'searching',
+        'current_driver_id' => 0,
+        'current_driver_status' => '',
+        'conductores_cerca' => 0,
+        'ui_message' => '',
+    ];
+
+    $requestId = (int)($trip['id'] ?? 0);
+    if ($requestId <= 0) {
+        return $snapshot;
+    }
+
+    $redis = getRedisConnection();
+    if (!$redis) {
+        return $snapshot;
+    }
+
+    try {
+        $rawMatchingStatus = $redis->get('ride:' . $requestId . ':matching_status');
+        if (is_string($rawMatchingStatus) && trim($rawMatchingStatus) !== '') {
+            $normalized = strtolower(trim($rawMatchingStatus));
+            $allowed = [
+                'searching',
+                'expanding_search',
+                'search_expanded',
+                'matched',
+                'timeout',
+                'exhausted',
+                'sin_conductores',
+                'checking',
+                'driver_viewing',
+                'sending_request',
+                'contacting_drivers',
+            ];
+
+            if (in_array($normalized, $allowed, true)) {
+                $snapshot['matching_status'] = $normalized;
+            }
+        }
+
+        $currentDriverRaw = $redis->get('ride:' . $requestId . ':current_driver');
+        if (is_string($currentDriverRaw) && trim($currentDriverRaw) !== '') {
+            $snapshot['current_driver_id'] = (int)$currentDriverRaw;
+        }
+
+        if ((int)$snapshot['current_driver_id'] > 0) {
+            $statusRaw = $redis->get(
+                'ride:' . $requestId . ':driver:' . $snapshot['current_driver_id'] . ':status'
+            );
+            if (is_string($statusRaw) && trim($statusRaw) !== '') {
+                $snapshot['current_driver_status'] = strtolower(trim($statusRaw));
+            }
+        }
+
+        $viewingCountRaw = $redis->lLen(driversViewingListKey($requestId));
+        if (is_numeric($viewingCountRaw)) {
+            $snapshot['conductores_cerca'] = max(0, (int)$viewingCountRaw);
+        }
+
+        if ((int)$snapshot['current_driver_id'] > 0) {
+            $snapshot['conductores_cerca'] = max(1, (int)$snapshot['conductores_cerca']);
+        }
+
+        $uiMessageRaw = $redis->get('ride:' . $requestId . ':ui_message');
+        if (is_string($uiMessageRaw) && trim($uiMessageRaw) !== '') {
+            $snapshot['ui_message'] = trim($uiMessageRaw);
+        }
+    } catch (Throwable $e) {
+        return $snapshot;
+    }
+
+    return $snapshot;
+}
+
+function resolveDriverChecking(PDO $db, array $trip, ?array $realtimeState = null): ?array
+{
+    $estado = strtolower(trim((string)($trip['estado'] ?? '')));
+    $realtimeState = $realtimeState ?? resolveSearchRealtimeState($trip);
+
+    if (!in_array($estado, ['pendiente', 'requested'], true) && !hasRecoverableRealtimeSearchActivity($trip, $realtimeState)) {
+        return null;
+    }
+
+    $requestId = (int)($trip['id'] ?? 0);
+    if ($requestId <= 0) {
+        return null;
+    }
+
+    $driverId = (int)($realtimeState['current_driver_id'] ?? 0);
+    $source = 'current_driver';
+    $status = strtolower(trim((string)($realtimeState['current_driver_status'] ?? 'pending')));
+    $cachedViewing = null;
+
+    if ($driverId > 0) {
+        $cachedViewing = fetchDriverViewingPayloadFromCache($requestId, $driverId);
+    }
+
+    if ($driverId <= 0) {
+        $cachedViewing = fetchLatestDriverViewingPayloadFromCache($requestId);
+        $driverId = (int)($cachedViewing['driver_id'] ?? 0);
+        $status = $status !== '' ? $status : 'checking';
+        $source = 'drivers_viewing';
     }
 
     if ($driverId <= 0) {
         return null;
+    }
+
+    if ($status === '') {
+        $status = 'pending';
     }
 
     if (!in_array($status, ['pending', 'offered', 'checking'], true)) {
@@ -515,7 +691,47 @@ function resolveDriverChecking(PDO $db, array $trip): ?array
 
     $summary = fetchDriverCheckingSummary($db, $driverId);
     if (!$summary) {
-        return null;
+        if (!is_array($cachedViewing)) {
+            return null;
+        }
+
+        $summary = [
+            'id' => $driverId,
+            'nombre' => trim((string)($cachedViewing['name'] ?? 'Conductor')) ?: 'Conductor',
+            'empresa_id' => null,
+            'empresa' => 'Libre competencia',
+        ];
+    }
+
+    if (is_array($cachedViewing)) {
+        $cachedName = trim((string)($cachedViewing['name'] ?? ''));
+        if ($cachedName !== '') {
+            $summary['nombre'] = $cachedName;
+        }
+
+        if (isset($cachedViewing['rating']) && is_numeric($cachedViewing['rating'])) {
+            $summary['rating'] = round((float)$cachedViewing['rating'], 1);
+        }
+
+        if (isset($cachedViewing['eta_minutes']) && $cachedViewing['eta_minutes'] !== null && $cachedViewing['eta_minutes'] !== '') {
+            $summary['eta_minutes'] = (int)$cachedViewing['eta_minutes'];
+        }
+
+        $photo = trim((string)($cachedViewing['photo'] ?? ''));
+        if ($photo !== '') {
+            $summary['photo'] = $photo;
+        }
+
+        if (isset($cachedViewing['distance_km']) && is_numeric($cachedViewing['distance_km'])) {
+            $summary['distance_km'] = round((float)$cachedViewing['distance_km'], 2);
+        }
+    }
+
+    $shownAt = trim((string)($cachedViewing['updated_at'] ?? ''));
+    if ($shownAt === '') {
+        $shownAt = function_exists('now_colombia')
+            ? now_colombia()->format('c')
+            : (new DateTime('now', new DateTimeZone('America/Bogota')))->format('c');
     }
 
     $summary['source'] = $source;
@@ -524,44 +740,42 @@ function resolveDriverChecking(PDO $db, array $trip): ?array
     return $summary;
 }
 
-function resolveMatchingStatus(array $trip): ?string
+function hasRecoverableRealtimeSearchActivity(array $trip, ?array $realtimeState = null): bool
 {
     $estado = strtolower(trim((string)($trip['estado'] ?? '')));
-    if (!in_array($estado, ['pendiente', 'requested'], true)) {
+    if (!in_array($estado, ['sin_conductores', 'timeout', 'exhausted'], true)) {
+        return false;
+    }
+
+    $realtimeState = $realtimeState ?? resolveSearchRealtimeState($trip);
+
+    $currentDriverId = (int)($realtimeState['current_driver_id'] ?? 0);
+    if ($currentDriverId > 0) {
+        return true;
+    }
+
+    $conductoresCerca = (int)($realtimeState['conductores_cerca'] ?? 0);
+    if ($conductoresCerca > 0) {
+        return true;
+    }
+
+    $matchingStatus = strtolower(trim((string)($realtimeState['matching_status'] ?? '')));
+    return in_array($matchingStatus, ['checking', 'driver_viewing', 'sending_request', 'contacting_drivers'], true);
+}
+
+function resolveMatchingStatus(array $trip, ?array $realtimeState = null): ?string
+{
+    $estado = strtolower(trim((string)($trip['estado'] ?? '')));
+    $realtimeState = $realtimeState ?? resolveSearchRealtimeState($trip);
+
+    if (!in_array($estado, ['pendiente', 'requested'], true) && !hasRecoverableRealtimeSearchActivity($trip, $realtimeState)) {
         return null;
     }
 
-    $requestId = (int)($trip['id'] ?? 0);
-    if ($requestId <= 0) {
-        return 'searching';
-    }
-
-    $redis = getRedisConnection();
-    if (!$redis) {
-        return 'searching';
-    }
-
-    try {
-        $raw = $redis->get('ride:' . $requestId . ':matching_status');
-        if (!is_string($raw) || trim($raw) === '') {
-            return 'searching';
-        }
-
-        $normalized = strtolower(trim($raw));
-        $allowed = [
-            'searching',
-            'expanding_search',
-            'search_expanded',
-            'matched',
-            'timeout',
-            'exhausted',
-            'sin_conductores',
-        ];
-
-        return in_array($normalized, $allowed, true) ? $normalized : 'searching';
-    } catch (Throwable $e) {
-        return 'searching';
-    }
+    $matchingStatus = $realtimeState['matching_status'] ?? null;
+    return is_string($matchingStatus) && trim($matchingStatus) !== ''
+        ? $matchingStatus
+        : 'searching';
 }
 
 /**
@@ -677,6 +891,9 @@ function calcularDistanciaYEta(array $trip): array
  *   - distancia real recorrida
  *   - tiempo transcurrido
  *   - precio en tracking
+ *   - estado de matching
+ *   - conductor actual revisando la solicitud
+ *   - número de conductores activos en revisión
  *
  * @param array $trip         Datos del viaje
  * @param float|null $distConductorKm  Distancia conductor-recogida
@@ -685,6 +902,7 @@ function calcularDistanciaYEta(array $trip): array
  */
 function buildRealtimeSignature(array $trip, ?float $distConductorKm, ?int $eta): string
 {
+    $realtimeState = resolveSearchRealtimeState($trip);
     $data = [
         'id'                  => (int) $trip['id'],
         'estado'              => (string) ($trip['estado'] ?? ''),
@@ -696,6 +914,11 @@ function buildRealtimeSignature(array $trip, ?float $distConductorKm, ?int $eta)
         'distancia_real'      => isset($trip['tracking_distancia'])  ? round((float) $trip['tracking_distancia'], 2)  : 0,
         'tiempo_seg'          => isset($trip['tiempo_transcurrido']) ? (int) $trip['tiempo_transcurrido']              : 0,
         'precio_tracking'     => isset($trip['precio_en_tracking'])  ? round((float) $trip['precio_en_tracking'], 2)  : 0,
+        'matching_status'     => $realtimeState['matching_status'] ?? null,
+        'current_driver_id'   => (int)($realtimeState['current_driver_id'] ?? 0),
+        'current_driver_status' => (string)($realtimeState['current_driver_status'] ?? ''),
+        'conductores_cerca'   => (int)($realtimeState['conductores_cerca'] ?? 0),
+        'ui_message'          => (string)($realtimeState['ui_message'] ?? ''),
         'search_tick'         => null,
     ];
 
@@ -755,6 +978,19 @@ function resolveTrackingValues(array $trip): array
             $precioFinal = $trip['tracking_precio'] ?? $trip['precio_final'] ?? 0;
         }
 
+        $trackingValidoTerminal = ((float) $distanciaFinal > 0.1 && (int) $duracionFinalSeg > 30);
+        $precioEstimadoMinimo = isset($trip['precio_fijo']) && $trip['precio_fijo'] !== null
+            ? (float)$trip['precio_fijo']
+            : (float)($trip['precio_estimado'] ?? 0);
+
+        if ($precioEstimadoMinimo > 0) {
+            if (!$trackingValidoTerminal) {
+                $precioFinal = $precioEstimadoMinimo;
+            } else {
+                $precioFinal = max((float)$precioFinal, $precioEstimadoMinimo);
+            }
+        }
+
         error_log('[CanonicalMetricsUsed] trip_id=' . (int)$trip['id']
             . ' distance_final=' . floatval($distanciaFinal)
             . ' duration_final=' . intval($duracionFinalSeg)
@@ -765,7 +1001,7 @@ function resolveTrackingValues(array $trip): array
             'tiempo_minutos' => (int) ceil(((int) $duracionFinalSeg) / 60),
             'precio' => (float) $precioFinal,
             'duracion_segundos' => (int) $duracionFinalSeg,
-            'tracking_valido' => ((float) $distanciaFinal > 0.1 && (int) $duracionFinalSeg > 30),
+            'tracking_valido' => $trackingValidoTerminal,
             'metrics_locked' => $metricsLocked,
             'terminal' => true,
         ];
@@ -873,9 +1109,15 @@ function buildResponse(PDO $db, array $trip, string $signature, int $waitSeconds
 {
     $tv = resolveTrackingValues($trip);
     $desglosePrecio = parseDesglosePrecio($trip['desglose_precio'] ?? null);
+    if (is_array($desglosePrecio) && isset($tv['precio']) && $tv['precio'] !== null) {
+        $desglosePrecio['precio_final'] = (float)$tv['precio'];
+    }
     $searchMode = resolveSearchMode($trip);
-    $driverChecking = resolveDriverChecking($db, $trip);
-    $matchingStatus = resolveMatchingStatus($trip);
+    $realtimeState = resolveSearchRealtimeState($trip);
+    $driverChecking = resolveDriverChecking($db, $trip, $realtimeState);
+    $matchingStatus = resolveMatchingStatus($trip, $realtimeState);
+    $conductoresCerca = (int)($realtimeState['conductores_cerca'] ?? 0);
+    $uiMessage = (string)($realtimeState['ui_message'] ?? '');
 
     // Si viene duración canónica explícita, usarla tal cual para evitar recomputar.
     $tiempoSeg = (int) ($tv['duracion_segundos'] ?? 0);
@@ -911,6 +1153,8 @@ function buildResponse(PDO $db, array $trip, string $signature, int $waitSeconds
     }
 
     $surgeMultiplier = 1.0;
+    $surgeLevel = 'normal';
+    $surgeMessage = '';
     try {
         $redis = Cache::redis();
         if ($redis) {
@@ -923,12 +1167,28 @@ function buildResponse(PDO $db, array $trip, string $signature, int $waitSeconds
             $surgePayload = is_string($surgeRaw) ? json_decode($surgeRaw, true) : null;
             if (is_array($surgePayload) && isset($surgePayload['multiplier'])) {
                 $surgeMultiplier = max(1.0, (float)$surgePayload['multiplier']);
+                $surgeLevel = isset($surgePayload['demand_level'])
+                    ? (string)$surgePayload['demand_level']
+                    : DynamicPricingService::demandLevel($surgeMultiplier);
+                $surgeMessage = isset($surgePayload['message'])
+                    ? (string)$surgePayload['message']
+                    : DynamicPricingService::demandMessage($surgeMultiplier);
+            } else {
+                $zonePrefix = 'zone:' . $gridId;
+                $zoneMultiplierRaw = $redis->get($zonePrefix . ':surge_multiplier');
+                if (is_string($zoneMultiplierRaw) && is_numeric($zoneMultiplierRaw)) {
+                    $surgeMultiplier = max(1.0, (float)$zoneMultiplierRaw);
+                    $surgeLevel = DynamicPricingService::demandLevel($surgeMultiplier);
+                    $surgeMessage = DynamicPricingService::demandMessage($surgeMultiplier);
+                }
             }
         }
     } catch (Throwable $e) {}
 
     return [
         'success' => true,
+        'conductores_cerca' => $conductoresCerca,
+        'ui_message' => $uiMessage,
         'meta' => [
             'signature'    => $signature,
             'generated_at' => function_exists('now_colombia')
@@ -939,6 +1199,8 @@ function buildResponse(PDO $db, array $trip, string $signature, int $waitSeconds
             'tracking_valido' => (bool) ($tv['tracking_valido'] ?? false),
             'search_mode' => $searchMode,
             'matching_status' => $matchingStatus,
+            'conductores_cerca' => $conductoresCerca,
+            'ui_message' => $uiMessage,
         ],
         'trip' => [
             'id'                           => (int) $trip['id'],
@@ -949,6 +1211,8 @@ function buildResponse(PDO $db, array $trip, string $signature, int $waitSeconds
             'search_mode'                  => $searchMode,
             'matching_status'              => $matchingStatus,
             'driver_checking'              => $driverChecking,
+            'conductores_cerca'            => $conductoresCerca,
+            'ui_message'                   => $uiMessage,
             'origen' => [
                 'latitud'   => (float) $trip['latitud_recogida'],
                 'longitud'  => (float) $trip['longitud_recogida'],
@@ -966,7 +1230,7 @@ function buildResponse(PDO $db, array $trip, string $signature, int $waitSeconds
             'duracion_segundos'            => $tiempoSeg,
             'distance_final'               => isset($trip['distance_final']) && $trip['distance_final'] !== null ? (float) $trip['distance_final'] : ($tv['distancia'] ?? null),
             'duration_final'               => isset($trip['duration_final']) && $trip['duration_final'] !== null ? (int) $trip['duration_final'] : $tiempoSeg,
-            'price_final_canonical'        => isset($trip['price_final_en']) && $trip['price_final_en'] !== null ? (float) $trip['price_final_en'] : ($tv['precio'] ?? null),
+            'price_final_canonical'        => $tv['precio'] ?? (isset($trip['price_final_en']) && $trip['price_final_en'] !== null ? (float) $trip['price_final_en'] : null),
             'metrics_locked'               => (bool) ($tv['metrics_locked'] ?? false),
             'finalized_at'                 => to_iso8601($trip['finalized_at'] ?? null),
             'fecha_creacion'               => to_iso8601($trip['fecha_creacion']),
@@ -989,6 +1253,8 @@ function buildResponse(PDO $db, array $trip, string $signature, int $waitSeconds
             'conductor'                    => $conductor,
             'pickup_eta_minutes'           => $eta,
             'surge_multiplier'             => round($surgeMultiplier, 2),
+            'surge_level'                  => $surgeLevel,
+            'surge_message'                => $surgeMessage,
             'driver_distance'              => $distConductorKm !== null ? round($distConductorKm, 2) : null,
         ],
     ];

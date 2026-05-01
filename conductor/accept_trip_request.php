@@ -78,6 +78,7 @@ function publishAcceptedToRedis($redis, int $solicitudId, int $conductorId): voi
     $redis->setex('ride:' . $solicitudId . ':accepted_driver', 120, (string)$conductorId);
     $redis->setex('ride:' . $solicitudId . ':current_driver', 180, (string)$conductorId);
     $redis->setex('ride:' . $solicitudId . ':driver:' . $conductorId . ':status', 180, 'accepted');
+    $redis->setex('driver:' . $conductorId . ':active_ride', 14400, (string)$solicitudId);
     $redis->del('driver:' . $conductorId . ':offer_lock');
     $redis->del('driver_offer_lock:' . $conductorId);
     $redis->publish('trip:responses:' . $solicitudId, (string)$conductorId);
@@ -89,6 +90,12 @@ function publishAcceptedToRedis($redis, int $solicitudId, int $conductorId): voi
     $redis->expire('trip:responses_queue:' . $solicitudId, 120);
     $redis->incr('metrics:dispatch_accepts');
     DriverGeoService::updateDriverStats($conductorId, 1.0, null, 0);
+}
+
+function isAcceptableTripRequestState(?string $estado): bool
+{
+    $normalized = strtolower(trim((string)($estado ?? '')));
+    return in_array($normalized, ['pendiente', 'sin_conductores', 'timeout', 'exhausted'], true);
 }
 
 try {
@@ -201,7 +208,7 @@ try {
             throw new Exception('Solicitud no encontrada');
         }
         
-        if ($solicitud['estado'] !== 'pendiente') {
+        if (!isAcceptableTripRequestState($solicitud['estado'] ?? null)) {
             throw new Exception('La solicitud ya fue aceptada por otro conductor');
         }
         
@@ -253,7 +260,7 @@ try {
             SET estado = 'aceptada',
                 aceptado_en = NOW()
             WHERE id = ?
-              AND estado = 'pendiente'
+              AND LOWER(TRIM(COALESCE(estado, ''))) IN ('pendiente', 'sin_conductores', 'timeout', 'exhausted')
         ");
         $stmt->execute([$solicitudId]);
         if ($stmt->rowCount() === 0) {

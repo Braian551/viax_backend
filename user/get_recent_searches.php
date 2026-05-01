@@ -32,10 +32,14 @@ try {
 
     $db = (new Database())->getConnection();
     $items = PlacesSearchService::getRecentSearches($db, $userId, 10);
+    $frequentPlaces = array_values(array_filter($items, static function ($item): bool {
+        return is_array($item) && !empty($item['is_frequent_destination']);
+    }));
 
     echo json_encode([
         'success' => true,
         'recent_searches' => $items,
+        'frequent_places' => $frequentPlaces,
         'places' => $items,
         'total' => count($items),
     ]);

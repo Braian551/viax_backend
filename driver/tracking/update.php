@@ -35,6 +35,7 @@ require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../services/driver_service.php';
 require_once __DIR__ . '/../../services/roads_snap_service.php';
+require_once __DIR__ . '/../../services/canonical_pricing_guard.php';
 require_once __DIR__ . '/../../conductor/driver_auth.php';
 
 const TRACKING_STREAM_KEY = 'trip_tracking_stream';
@@ -235,6 +236,23 @@ function ensureTrackingConsumerGroup($redis): void {
     }
 }
 
+function trackingColumnExists(PDO $db, string $tableName, string $columnName): bool {
+    static $cache = [];
+    $key = strtolower(trim($tableName)) . '.' . strtolower(trim($columnName));
+    if (isset($cache[$key])) {
+        return $cache[$key];
+    }
+
+    $stmt = $db->prepare("\n        SELECT EXISTS (\n            SELECT 1\n            FROM information_schema.columns\n            WHERE table_schema = 'public'\n              AND table_name = :table_name\n              AND column_name = :column_name\n        )\n    ");
+    $stmt->execute([
+        ':table_name' => strtolower(trim($tableName)),
+        ':column_name' => strtolower(trim($columnName)),
+    ]);
+
+    $cache[$key] = (bool)$stmt->fetchColumn();
+    return $cache[$key];
+}
+
 function upsertDriverLiveLocationSnapshot(int $conductorId, float $lat, float $lng, ?float $speedKmh, string $source = 'tracking'): void
 {
     $throttleKey = 'driver_live_location:last_db:' . $conductorId;
@@ -343,6 +361,8 @@ try {
 
     $estimatedTimeMin = isset($existing['estimated_time_min']) ? intval($existing['estimated_time_min']) : 0;
     $estimatedPrice = isset($existing['estimated_price']) ? floatval($existing['estimated_price']) : 0.0;
+    $priceFloor = max(0.0, $estimatedPrice);
+    $tripMetricsLocked = !empty($existing['metrics_locked']);
     $empresaId = null;
     $tipoVehiculo = 'moto';
     $db = null;
@@ -350,7 +370,29 @@ try {
     try {
         $database = new Database();
         $db = $database->getConnection();
-        $stmt = $db->prepare('SELECT distancia_estimada, tiempo_estimado, precio_estimado, empresa_id, tipo_vehiculo FROM solicitudes_servicio WHERE id = :id LIMIT 1');
+
+        $hasPrecioFijoColumn = trackingColumnExists($db, 'solicitudes_servicio', 'precio_fijo');
+        $hasMetricsLockedColumn = trackingColumnExists($db, 'solicitudes_servicio', 'metrics_locked');
+
+        $precioMinExpr = $hasPrecioFijoColumn
+            ? 'COALESCE(precio_fijo, precio_estimado) AS precio_minimo'
+            : 'precio_estimado AS precio_minimo';
+        $metricsLockedExpr = $hasMetricsLockedColumn
+            ? 'COALESCE(metrics_locked, FALSE) AS metrics_locked'
+            : 'FALSE AS metrics_locked';
+
+        $stmt = $db->prepare("\n            SELECT
+                distancia_estimada,
+                tiempo_estimado,
+                precio_estimado,
+                {$precioMinExpr},
+                {$metricsLockedExpr},
+                empresa_id,
+                tipo_vehiculo
+            FROM solicitudes_servicio
+            WHERE id = :id
+            LIMIT 1
+        ");
         $stmt->execute([':id' => $tripId]);
         $tripRow = $stmt->fetch(PDO::FETCH_ASSOC);
         if (is_array($tripRow)) {
@@ -363,6 +405,11 @@ try {
             if ($estimatedPrice <= 0) {
                 $estimatedPrice = floatval($tripRow['precio_estimado'] ?? 0);
             }
+            $priceFloor = max($priceFloor, floatval($tripRow['precio_minimo'] ?? $tripRow['precio_estimado'] ?? 0));
+            if ($estimatedPrice <= 0) {
+                $estimatedPrice = $priceFloor;
+            }
+            $tripMetricsLocked = $tripMetricsLocked || !empty($tripRow['metrics_locked']);
             if (isset($tripRow['empresa_id'])) {
                 $empresaId = intval($tripRow['empresa_id']);
             }
@@ -373,6 +420,59 @@ try {
     } catch (Throwable $e) {
         $plannedRouteKm = max(0.0, $plannedRouteKm);
         $db = null;
+    }
+
+    if ($tripMetricsLocked) {
+        $lockedPrice = round(max($priceFloor, $estimatedPrice, floatval($existing['price'] ?? 0)), 2);
+        $lockedAvgSpeed = $elapsedSec > 0 ? round(($distanceTotalKm * 3600) / $elapsedSec, 2) : 0.0;
+        $lockedTrackingValido = canonicalPricingTrackingValid((float)$distanceTotalKm, (int)$elapsedSec);
+
+        if ($redis) {
+            $lockedMetricsPayload = [
+                'distance_km' => round(max(0.0, $distanceTotalKm), 4),
+                'elapsed_time_sec' => max(0, $elapsedSec),
+                'avg_speed_kmh' => $lockedAvgSpeed,
+                'price' => $lockedPrice,
+                'last_timestamp' => gmdate('c', $timestampSec),
+                'last_ts' => $timestampSec,
+                'last_lat' => $lat,
+                'last_lng' => $lng,
+                'planned_route_km' => round(max(0.0, $plannedRouteKm), 4),
+                'estimated_time_min' => max(0, $estimatedTimeMin),
+                'estimated_price' => round(max(0.0, $priceFloor, $estimatedPrice), 2),
+                'price_floor' => round(max(0.0, $priceFloor, $estimatedPrice), 2),
+                'pricing_rule_applied' => 'metrics_locked_preserved',
+                'tracking_valido' => $lockedTrackingValido,
+                'metrics_locked' => true,
+            ];
+            $redis->setex($metricsKey, $ttlSec, json_encode($lockedMetricsPayload, JSON_UNESCAPED_UNICODE));
+
+            canonicalPricingPersistRedisLock(
+                $redis,
+                (int)$tripId,
+                (float)$lockedPrice,
+                'metrics_locked_preserved',
+                (bool)$lockedTrackingValido,
+                86400
+            );
+        }
+
+        echo json_encode([
+            'success' => true,
+            'message' => 'Tracking ignorado: métricas finales bloqueadas',
+            'data' => [
+                'trip_id' => $tripId,
+                'distance_km' => round(max(0.0, $distanceTotalKm), 4),
+                'elapsed_time_sec' => max(0, $elapsedSec),
+                'avg_speed_kmh' => $lockedAvgSpeed,
+                'precio_parcial' => $lockedPrice,
+                'price_final_canonical' => $lockedPrice,
+                'pricing_rule_applied' => 'metrics_locked_preserved',
+                'metrics_locked' => true,
+                'snap_source' => $snapSource,
+            ],
+        ]);
+        exit();
     }
 
     $deltaSec = 0;
@@ -508,6 +608,30 @@ try {
         $currentPrice = round($estimatedPrice * $progress, 2);
     }
 
+    // Regla canónica en vivo: mismo motor de guard para evitar regresiones entre flujos.
+    $priceFloor = max(0.0, $priceFloor, $estimatedPrice);
+    $trackingValidoParcial = canonicalPricingTrackingValid((float)$distanceTotalKm, (int)$elapsedSec);
+    $pricingGuardLive = canonicalPricingResolve(
+        (float)$currentPrice,
+        (float)$priceFloor,
+        (bool)$trackingValidoParcial,
+        [
+            'trip_id' => (int)$tripId,
+            'actor_id' => (int)$conductorId,
+            'source' => 'tracking_update',
+            'redis' => $redis,
+            'emit_audit' => false,
+            'emit_alerts' => true,
+            'normalize_step' => 0,
+            'extra' => [
+                'partial_tracking' => true,
+                'progress' => round((float)$progress, 4),
+            ],
+        ]
+    );
+    $currentPrice = round((float)$pricingGuardLive['final_price'], 2);
+    $pricingRuleApplied = (string)$pricingGuardLive['rule'];
+
     if ($db instanceof PDO) {
         try {
             $stmtPersist = $db->prepare("\n                UPDATE solicitudes_servicio
@@ -547,7 +671,11 @@ try {
         'last_lng' => $lng,
         'planned_route_km' => round(max(0.0, $plannedRouteKm), 4),
         'estimated_time_min' => max(0, $estimatedTimeMin),
-        'estimated_price' => max(0.0, $estimatedPrice),
+        'estimated_price' => max(0.0, $estimatedPrice, $priceFloor),
+        'price_floor' => max(0.0, $priceFloor),
+        'pricing_rule_applied' => $pricingRuleApplied,
+        'tracking_valido' => $trackingValidoParcial,
+        'metrics_locked' => false,
     ];
 
     if ($redis) {
@@ -568,19 +696,21 @@ try {
             'timestamp' => $timestampSec,
         ], JSON_UNESCAPED_UNICODE), $ttlSec);
 
-        Cache::set('driver_location:' . $conductorId, (string) json_encode([
+        $driverLocationPayload = [
             'lat' => $lat,
             'lng' => $lng,
             'speed' => $speedKmhInput,
+            'heading' => $heading,
             'timestamp' => $timestampSec,
-        ], JSON_UNESCAPED_UNICODE), 30);
-        $redis->setex('drivers:location:' . $conductorId, 30, json_encode([
-            'lat' => $lat,
-            'lng' => $lng,
-            'bearing' => $heading,
-            'speed' => $speedKmhInput,
-            'timestamp' => $timestampSec,
-        ], JSON_UNESCAPED_UNICODE));
+        ];
+        $driverLocationJson = json_encode($driverLocationPayload, JSON_UNESCAPED_UNICODE);
+
+        Cache::set('driver_location:' . $conductorId, (string) $driverLocationJson, 30);
+        Cache::set('driver:' . $conductorId . ':location', (string) $driverLocationJson, 30);
+        $redis->setex('drivers:location:' . $conductorId, 30, (string) $driverLocationJson);
+        $redis->lPush('driver:' . $conductorId . ':history', (string) $driverLocationJson);
+        $redis->lTrim('driver:' . $conductorId . ':history', 0, 9);
+        $redis->expire('driver:' . $conductorId . ':history', 180);
         Cache::sAdd('active_drivers', (string) $conductorId);
 
         // Publicación compacta para SSE/passenger.
@@ -629,6 +759,9 @@ try {
             'elapsed_time_sec' => $elapsedSec,
             'avg_speed_kmh' => $avgSpeed,
             'precio_parcial' => $currentPrice,
+            'price_final_canonical' => $currentPrice,
+            'pricing_rule_applied' => $pricingRuleApplied,
+            'tracking_valido' => $trackingValidoParcial,
             'published' => $redis ? true : false,
             'queued' => $redis ? true : false,
             'stream' => TRACKING_STREAM_KEY,

@@ -147,6 +147,20 @@ class UpfrontPricingService
     }
 
     /**
+     * Normaliza un monto para mostrar/guardar en COP aproximado.
+     *
+     * Por defecto usa múltiplos de 100 COP para mantener consistencia
+     * con la lógica canónica de finalización del viaje.
+     */
+    public static function normalizeCopAmount(?float $value, int $step = 100): float
+    {
+        $amount = max(0.0, (float)($value ?? 0.0));
+        $safeStep = max(1, $step);
+
+        return (float)(round($amount / $safeStep) * $safeStep);
+    }
+
+    /**
      * Normaliza valores booleanos heterogeneos.
      */
     public static function toBool($value): bool

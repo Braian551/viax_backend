@@ -3,6 +3,7 @@ require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../services/driver_service.php';
 require_once __DIR__ . '/../../services/traffic_pricing.php';
+require_once __DIR__ . '/../../services/pricing_service.php';
 
 class CompanyService {
     private $db;
@@ -556,6 +557,8 @@ class CompanyService {
         $gridId = DriverGeoService::gridIdForCoordinates((float)$latitud, (float)$longitud);
         $surge = $this->resolveSurgeData($gridId);
         $surgeMultiplier = $surge['multiplier'];
+        $surgeLevel = $surge['level'];
+        $surgeMessage = $surge['message'];
 
         $tarifasIndex = $tarifasData['index'];
         $tarifasGlobales = $tarifasData['global'];
@@ -621,6 +624,8 @@ class CompanyService {
                     'periodo' => $precio['periodo'],
                     'recargo_porcentaje' => $precio['recargo_porcentaje'],
                     'surge_multiplier' => $precio['surge_multiplier'],
+                    'surge_level' => $surgeLevel,
+                    'surge_message' => $surgeMessage,
                     'company_fare' => $precio['company_fare'],
                     'calificacion' => isset($empresa['calificacion_promedio']) ? floatval($empresa['calificacion_promedio']) : 0.0
                 ];
@@ -680,6 +685,8 @@ class CompanyService {
             'total_tipos_vehiculo' => count($vehiculosDisponibles),
             'total_conductores_cerca' => $totalConductoresCerca,
             'surge_multiplier' => $surgeMultiplier,
+            'surge_level' => $surgeLevel,
+            'surge_message' => $surgeMessage,
             'pickup_eta_minutes' => $pickupEtaMin,
             'driver_distance' => $mejorDistancia < PHP_FLOAT_MAX ? round($mejorDistancia, 2) : null,
             'vehiculos_disponibles' => $vehiculosDisponibles,
@@ -743,10 +750,20 @@ class CompanyService {
         
         $recargoPrecio = $subtotal * ($recargoPorcentaje / 100);
         $companyFare = $subtotal + $recargoPrecio;
-        $total = $companyFare * max(1.0, (float)$surgeMultiplier);
-        $tarifaMinima = floatval($tarifa['tarifa_minima']);
-        
-        if ($total < $tarifaMinima) $total = $tarifaMinima;
+        $totalVariable = $companyFare * max(1.0, (float)$surgeMultiplier);
+
+        // Regla comercial VIAX: si aplica tarifa mínima, se cobra como componente fijo
+        // y los componentes variables (distancia, tiempo y recargos) se suman aparte.
+        $tarifaMinima = max(0.0, floatval($tarifa['tarifa_minima']));
+        $aplicoTarifaMinima = false;
+        $ajusteTarifaMinima = 0.0;
+        $total = $totalVariable;
+
+        if ($tarifaMinima > 0.0 && $totalVariable < $tarifaMinima) {
+            $aplicoTarifaMinima = true;
+            $ajusteTarifaMinima = $tarifaMinima;
+            $total = $tarifaMinima + $totalVariable;
+        }
         
         return [
             'tarifa_base' => round($tarifaBase, 0),
@@ -756,7 +773,10 @@ class CompanyService {
             'recargo_porcentaje' => round($recargoPorcentaje, 2),
             'recargo_precio' => round($recargoPrecio, 0),
             'company_fare' => round($companyFare, 0),
+            'total_variable' => round($totalVariable, 0),
             'surge_multiplier' => round((float)$surgeMultiplier, 2),
+            'aplico_tarifa_minima' => $aplicoTarifaMinima,
+            'ajuste_tarifa_minima' => round($ajusteTarifaMinima, 0),
             'total' => round($total, 0),
             'periodo' => $periodo
         ];
@@ -816,17 +836,40 @@ class CompanyService {
     private function resolveSurgeData(string $gridId): array {
         $redis = Cache::redis();
         if (!$redis) {
-            return ['multiplier' => 1.0];
+            return ['multiplier' => 1.0, 'level' => 'normal', 'message' => ''];
         }
 
         $raw = $redis->get('surge:grid:' . $gridId);
         $data = is_string($raw) ? json_decode($raw, true) : null;
-        if (!is_array($data)) {
-            return ['multiplier' => 1.0];
+        if (is_array($data)) {
+            $multiplier = isset($data['multiplier']) ? (float)$data['multiplier'] : 1.0;
+            $safeMultiplier = max(1.0, $multiplier);
+            $level = isset($data['demand_level'])
+                ? (string)$data['demand_level']
+                : DynamicPricingService::demandLevel($safeMultiplier);
+            $message = isset($data['message'])
+                ? (string)$data['message']
+                : DynamicPricingService::demandMessage($safeMultiplier);
+
+            return [
+                'multiplier' => $safeMultiplier,
+                'level' => $level,
+                'message' => $message,
+            ];
         }
 
-        $multiplier = isset($data['multiplier']) ? (float)$data['multiplier'] : 1.0;
-        return ['multiplier' => max(1.0, $multiplier)];
+        $zonePrefix = 'zone:' . $gridId;
+        $zoneMultiplierRaw = $redis->get($zonePrefix . ':surge_multiplier');
+        if (is_string($zoneMultiplierRaw) && is_numeric($zoneMultiplierRaw)) {
+            $safeMultiplier = max(1.0, (float)$zoneMultiplierRaw);
+            return [
+                'multiplier' => $safeMultiplier,
+                'level' => DynamicPricingService::demandLevel($safeMultiplier),
+                'message' => DynamicPricingService::demandMessage($safeMultiplier),
+            ];
+        }
+
+        return ['multiplier' => 1.0, 'level' => 'normal', 'message' => ''];
     }
 
     private function estimatePickupEtaMinutes(float $distanceKm): int {

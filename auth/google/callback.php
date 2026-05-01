@@ -54,7 +54,7 @@ try {
     
     // Buscar si el usuario ya existe por email o google_id
     $query = "SELECT id, uuid, nombre, apellido, email, telefono, tipo_usuario, 
-                     foto_perfil, es_verificado, google_id, empresa_id
+                     foto_perfil, es_verificado, google_id, empresa_id, status, deletion_scheduled_at
               FROM usuarios 
               WHERE email = :email OR google_id = :google_id
               LIMIT 1";
@@ -70,6 +70,25 @@ try {
     $user = null;
     
     if ($existingUser) {
+        $statusRaw = strtolower((string)($existingUser['status'] ?? 'active'));
+        $statusAliases = [
+            'inactivo' => 'inactive',
+        ];
+        $status = $statusAliases[$statusRaw] ?? $statusRaw;
+
+        if ($status === 'deleted') {
+            sendJsonResponse(false, 'Esta cuenta ya fue eliminada de forma definitiva.', [], 403, 'ACCOUNT_DELETED');
+        }
+
+        if (in_array($status, ['inactive', 'pending_deletion'], true)) {
+            sendJsonResponse(false, 'Tu cuenta está programada para eliminación. Reactívala para continuar.', [
+                'pending_deletion' => true,
+                'deletion_scheduled_at' => $existingUser['deletion_scheduled_at'] ?? null,
+                'email' => $existingUser['email'] ?? $email,
+                'auth_provider' => 'google',
+            ], 403, 'ACCOUNT_PENDING_DELETION');
+        }
+
         // Usuario existente - actualizar información de Google si es necesario
         $userId = $existingUser['id'];
         

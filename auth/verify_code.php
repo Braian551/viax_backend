@@ -1,5 +1,6 @@
 <?php
 require_once '../config/config.php';
+require_once '../core/TestBypass.php';
 
 // Usar la misma conexión y helpers que el resto del módulo auth
 try {
@@ -23,9 +24,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         echo json_encode(['success' => false, 'message' => 'Datos incompletos o inválidos']);
         exit;
     }
-
-    // Temporary reviewer bypass: allow fixed test code without DB validation.
-    if (trim((string)$code) === '8052') {
+    // Bypass QA controlado (8052): no productivo por defecto, o por flag explicito.
+    if (TestBypass::shouldAllowCode((string)$code, 'auth_verify_code', (string)$email)) {
         echo json_encode(['success' => true, 'message' => 'Código verificado correctamente']);
         exit;
     }
@@ -34,8 +34,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $markDeviceTrusted = isset($input['mark_device_trusted']) ? (bool)$input['mark_device_trusted'] : false;
 
     try {
-        // Verificar si la tabla existe
-        $tableCheck = $pdo->query("SHOW TABLES LIKE 'verification_codes'")->fetch();
+        // Verificar si la tabla existe de forma compatible (PostgreSQL/MySQL).
+        $tableCheckStmt = $pdo->prepare("
+            SELECT 1
+            FROM information_schema.tables
+            WHERE LOWER(table_name) = 'verification_codes'
+            LIMIT 1
+        ");
+        $tableCheckStmt->execute();
+        $tableCheck = $tableCheckStmt->fetch();
         if (!$tableCheck) {
             throw new Exception("La tabla verification_codes no existe en la base de datos");
         }

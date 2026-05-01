@@ -10,11 +10,62 @@
  */
 
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
+$viaxOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$viaxAllowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
+if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $viaxOrigin);
+    header('Vary: Origin');
+}
 header('Access-Control-Allow-Methods: GET');
 header('Access-Control-Allow-Headers: Content-Type, Accept');
 
 require_once '../config/database.php';
+
+$canonicalGuardPath = __DIR__ . '/../services/canonical_pricing_guard.php';
+if (is_file($canonicalGuardPath)) {
+    require_once $canonicalGuardPath;
+}
+
+if (!function_exists('canonicalPricingTrackingValid')) {
+    function canonicalPricingTrackingValid(float $distanceKm, int $durationSeconds): bool
+    {
+        return $distanceKm > 0.1 && $durationSeconds > 30;
+    }
+}
+
+if (!function_exists('canonicalPricingResolve')) {
+    function canonicalPricingResolve(
+        float $dynamicPrice,
+        float $estimatedPrice,
+        bool $trackingValid,
+        array $options = []
+    ): array {
+        $dynamicPrice = max(0.0, (float)$dynamicPrice);
+        $estimatedPrice = max(0.0, (float)$estimatedPrice);
+        $normalizeStep = isset($options['normalize_step']) ? (float)$options['normalize_step'] : 0.0;
+
+        $finalPrice = $trackingValid
+            ? max($dynamicPrice, $estimatedPrice)
+            : $estimatedPrice;
+
+        if ($normalizeStep > 0) {
+            $finalPrice = round($finalPrice / $normalizeStep) * $normalizeStep;
+        }
+
+        $attemptedViolation = $trackingValid && $dynamicPrice < $estimatedPrice;
+        $floorApplied = !$trackingValid || $attemptedViolation;
+        $rule = !$trackingValid
+            ? 'tracking_invalid_floor'
+            : ($attemptedViolation ? 'floor_enforced' : 'dynamic_valid');
+
+        return [
+            'final_price' => max(0.0, round($finalPrice, 2)),
+            'rule' => $rule,
+            'attempted_violation' => $attemptedViolation,
+            'floor_applied' => $floorApplied,
+        ];
+    }
+}
 
 date_default_timezone_set('America/Bogota');
 
@@ -32,6 +83,28 @@ function formatDateTimeColombiaAmPm(?string $value): ?string {
     }
 }
 
+if (!function_exists('to_iso8601')) {
+    function to_iso8601(?string $value): ?string {
+        if (empty($value)) {
+            return null;
+        }
+
+        try {
+            $value = trim((string)$value);
+            $hasTimezone = (bool)preg_match('/(Z|[+\-]\d{2}:\d{2})$/', $value);
+            $dt = $hasTimezone
+                ? new DateTimeImmutable($value)
+                : new DateTimeImmutable($value, new DateTimeZone('UTC'));
+
+            return $dt
+                ->setTimezone(new DateTimeZone('UTC'))
+                ->format('Y-m-d\TH:i:s\Z');
+        } catch (Throwable $e) {
+            return (string)$value;
+        }
+    }
+}
+
 function canonicalVehicleTypeSqlExpr(string $column): string {
     $clean = "LOWER(REPLACE(REPLACE(COALESCE($column, ''), '_', ''), ' ', ''))";
     return "CASE $clean
@@ -42,6 +115,22 @@ function canonicalVehicleTypeSqlExpr(string $column): string {
         WHEN 'motocarga' THEN 'mototaxi'
         ELSE $clean
     END";
+}
+
+function hasColumn(PDO $db, string $table, string $column): bool
+{
+    $sql = "SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = :table
+              AND column_name = :column
+            LIMIT 1";
+    $stmt = $db->prepare($sql);
+    $stmt->execute([
+        ':table' => $table,
+        ':column' => $column,
+    ]);
+    return (bool) $stmt->fetchColumn();
 }
 
 if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
@@ -58,6 +147,24 @@ try {
     $page = isset($_GET['page']) ? intval($_GET['page']) : 1;
     $limit = isset($_GET['limit']) ? intval($_GET['limit']) : 20;
     $offset = ($page - 1) * $limit;
+
+    $hasPrecioFijo = hasColumn($db, 'solicitudes_servicio', 'precio_fijo');
+    $hasTrackingValido = hasColumn($db, 'solicitudes_servicio', 'tracking_valido');
+    $hasPricingRuleApplied = hasColumn($db, 'solicitudes_servicio', 'pricing_rule_applied');
+    $hasPriceFinalCanonical = hasColumn($db, 'solicitudes_servicio', 'price_final_canonical');
+
+    $precioFijoExpr = $hasPrecioFijo
+        ? 's.precio_fijo,'
+        : 'NULL::numeric AS precio_fijo,';
+    $trackingValidoExpr = $hasTrackingValido
+        ? 's.tracking_valido AS tracking_valido_guard,'
+        : 'NULL::boolean AS tracking_valido_guard,';
+    $pricingRuleExpr = $hasPricingRuleApplied
+        ? 's.pricing_rule_applied,'
+        : 'NULL::text AS pricing_rule_applied,';
+    $priceFinalCanonicalExpr = $hasPriceFinalCanonical
+        ? 's.price_final_canonical,'
+        : 'NULL::numeric AS price_final_canonical,';
 
     if ($conductor_id <= 0) {
         throw new Exception('ID de conductor inválido');
@@ -105,7 +212,11 @@ try {
                 s.direccion_recogida as origen,
                 s.direccion_destino as destino,
                 s.precio_estimado,
+                $precioFijoExpr
                 s.precio_final,
+                $trackingValidoExpr
+                $pricingRuleExpr
+                $priceFinalCanonicalExpr
                 s.metodo_pago,
                 s.pago_confirmado,
                 s.desglose_precio,
@@ -152,61 +263,92 @@ try {
 
     $viajes = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    $viajes = array_map(function($viaje) {
-        // Precio REAL: prioridad -> tracking_precio > precio_final > precio_estimado
-        $precioReal = 0;
-        if (isset($viaje['tracking_precio']) && $viaje['tracking_precio'] > 0) {
-            $precioReal = (float)$viaje['tracking_precio'];
-        } elseif (isset($viaje['precio_final']) && $viaje['precio_final'] > 0) {
-            $precioReal = (float)$viaje['precio_final'];
+    $viajes = array_map(function($viaje) use ($hasTrackingValido) {
+        $distanciaKm = (float)($viaje['distancia_km'] ?? 0.0);
+        $duracionSegundos = isset($viaje['duracion_segundos'])
+            ? (int)round((float)$viaje['duracion_segundos'])
+            : 0;
+
+        $precioEstimado = max(0.0, (float)($viaje['precio_estimado'] ?? 0.0));
+        $precioFijo = isset($viaje['precio_fijo']) ? (float)$viaje['precio_fijo'] : 0.0;
+        $precioEstimadoMinimo = $precioFijo > 0 ? $precioFijo : $precioEstimado;
+
+        $trackingValido = ($hasTrackingValido && $viaje['tracking_valido_guard'] !== null)
+            ? (bool)$viaje['tracking_valido_guard']
+            : canonicalPricingTrackingValid($distanciaKm, $duracionSegundos);
+
+        $precioDinamico = 0.0;
+        if (isset($viaje['tracking_precio']) && (float)$viaje['tracking_precio'] > 0) {
+            $precioDinamico = (float)$viaje['tracking_precio'];
+        } elseif (isset($viaje['precio_final']) && (float)$viaje['precio_final'] > 0) {
+            $precioDinamico = (float)$viaje['precio_final'];
         } else {
-            $precioReal = (float)($viaje['precio_estimado'] ?? 0);
-        }
-        
-        // Comisión REAL de la empresa
-        $comisionPorcentaje = 0.0;
-        $comisionValor = 0;
-        $gananciaViaje = 0;
-        $trackingGanancia = isset($viaje['ganancia_conductor']) ? (float)$viaje['ganancia_conductor'] : 0.0;
-        $hasTrackingSnapshot = !empty($viaje['tracking_id']);
-        
-        // Prioridad: snapshot tracking del viaje. Evita recalcular con configuración mutable.
-        if (isset($viaje['comision_plataforma_porcentaje']) && $viaje['comision_plataforma_porcentaje'] !== null) {
-            $comisionPorcentaje = (float)$viaje['comision_plataforma_porcentaje'];
-        } elseif ($hasTrackingSnapshot) {
-            $comisionPorcentaje = 0.0;
+            $precioDinamico = $precioEstimadoMinimo;
         }
 
-        if (isset($viaje['comision_plataforma_valor']) && $viaje['comision_plataforma_valor'] > 0) {
+        $guardDecision = canonicalPricingResolve(
+            $precioDinamico,
+            $precioEstimadoMinimo,
+            $trackingValido,
+            [
+                'trip_id' => (int)($viaje['id'] ?? 0),
+                'source' => 'get_historial',
+                'emit_audit' => false,
+                'emit_alerts' => false,
+                'normalize_step' => 0.0,
+            ]
+        );
+
+        $precioCanonicalPersistido = isset($viaje['price_final_canonical'])
+            ? (float)$viaje['price_final_canonical']
+            : 0.0;
+        $precioReal = $precioCanonicalPersistido > 0
+            ? $precioCanonicalPersistido
+            : (float)$guardDecision['final_price'];
+
+        $pricingRuleApplied = !empty($viaje['pricing_rule_applied'])
+            ? (string)$viaje['pricing_rule_applied']
+            : (string)$guardDecision['rule'];
+
+        $trackingGanancia = max(0.0, (float)($viaje['ganancia_conductor'] ?? 0.0));
+        $comisionPorcentaje = max(0.0, (float)($viaje['comision_plataforma_porcentaje'] ?? 0.0));
+        $comisionValor = 0.0;
+        $comisionEsperada = ($comisionPorcentaje > 0 && $precioReal > 0)
+            ? ($precioReal * ($comisionPorcentaje / 100.0))
+            : 0.0;
+
+        if ($comisionEsperada > 0) {
+            $comisionValor = $comisionEsperada;
+        } elseif (isset($viaje['comision_plataforma_valor']) && (float)$viaje['comision_plataforma_valor'] > 0) {
             $comisionValor = (float)$viaje['comision_plataforma_valor'];
-            $gananciaViaje = $trackingGanancia > 0 ? $trackingGanancia : ($precioReal - $comisionValor);
-        } elseif ($precioReal > 0) {
-            $comisionValor = $precioReal * ($comisionPorcentaje / 100);
-            $gananciaViaje = $trackingGanancia > 0 ? $trackingGanancia : ($precioReal - $comisionValor);
-        } elseif ($trackingGanancia > 0) {
-            if ($comisionPorcentaje > 0 && $comisionPorcentaje < 100) {
-                $comisionValor = $trackingGanancia * ($comisionPorcentaje / (100 - $comisionPorcentaje));
-            }
-            $gananciaViaje = $trackingGanancia;
-            $precioReal = $gananciaViaje + $comisionValor;
-        } else {
-            $comisionValor = $precioReal * ($comisionPorcentaje / 100);
-            $gananciaViaje = $precioReal - $comisionValor;
+        } elseif ($trackingGanancia > 0 && $precioReal > 0) {
+            $comisionValor = max(0.0, $precioReal - $trackingGanancia);
         }
-        
+
+        $comisionValor = min(max(0.0, $comisionValor), max(0.0, $precioReal));
+
+        $gananciaViaje = max(0.0, $precioReal - $comisionValor);
+        if ($gananciaViaje <= 0 && $trackingValido && $trackingGanancia > 0) {
+            $gananciaViaje = $trackingGanancia;
+        }
+
+        if ($gananciaViaje > $precioReal) {
+            $gananciaViaje = max(0.0, $precioReal);
+        }
+
         // Construir desglose de precio
         $desglose = null;
-        
+
         // Primero intentar obtener del campo desglose_precio (JSON)
         if (!empty($viaje['desglose_precio'])) {
-            $desgloseJson = is_string($viaje['desglose_precio']) 
-                ? json_decode($viaje['desglose_precio'], true) 
+            $desgloseJson = is_string($viaje['desglose_precio'])
+                ? json_decode($viaje['desglose_precio'], true)
                 : $viaje['desglose_precio'];
             if ($desgloseJson && is_array($desgloseJson)) {
                 $desglose = $desgloseJson;
             }
         }
-        
+
         // Si no hay desglose en JSON, construir desde columnas del tracking
         if (!$desglose && isset($viaje['tarifa_base'])) {
             $desglose = [
@@ -220,27 +362,29 @@ try {
                 'tiempo_espera_minutos' => (float)($viaje['tiempo_espera_min'] ?? 0),
                 'subtotal_antes_minimo' => 0,
                 'aplico_minimo' => false,
-                'precio_final' => $precioReal,
-                'comision_porcentaje' => $comisionPorcentaje,
-                'comision_valor' => $comisionValor,
-                'ganancia_conductor' => $gananciaViaje
             ];
-            
+
             // Calcular subtotal
-            $desglose['subtotal_antes_minimo'] = 
-                $desglose['tarifa_base'] + 
-                $desglose['precio_distancia'] + 
-                $desglose['precio_tiempo'] + 
-                $desglose['recargo_nocturno'] + 
-                $desglose['recargo_hora_pico'] + 
-                $desglose['recargo_festivo'] + 
+            $desglose['subtotal_antes_minimo'] =
+                $desglose['tarifa_base'] +
+                $desglose['precio_distancia'] +
+                $desglose['precio_tiempo'] +
+                $desglose['recargo_nocturno'] +
+                $desglose['recargo_hora_pico'] +
+                $desglose['recargo_festivo'] +
                 $desglose['recargo_espera'];
         }
-        
-        // Distancia y duración
-        $distanciaKm = (float)($viaje['distancia_km'] ?? 0);
-        $duracionSegundos = isset($viaje['duracion_segundos']) ? (int)round((float)$viaje['duracion_segundos']) : null;
-        
+
+        if (is_array($desglose)) {
+            $desglose['precio_final'] = round($precioReal, 2);
+            $desglose['precio_estimado_minimo'] = round($precioEstimadoMinimo, 2);
+            $desglose['tracking_valido'] = $trackingValido;
+            $desglose['pricing_rule_applied'] = $pricingRuleApplied;
+            $desglose['comision_porcentaje'] = round($comisionPorcentaje, 2);
+            $desglose['comision_valor'] = round($comisionValor, 2);
+            $desglose['ganancia_conductor'] = round($gananciaViaje, 2);
+        }
+
         return [
             'id' => (int)$viaje['id'],
             'cliente_id' => isset($viaje['cliente_id']) ? (int)$viaje['cliente_id'] : null,
@@ -273,8 +417,12 @@ try {
             'calificacion' => $viaje['calificacion'] ? (int)$viaje['calificacion'] : null,
             'comentario' => $viaje['comentarios'],
             // Precios
-            'precio_estimado' => round((float)($viaje['precio_estimado'] ?? 0), 0),
+            'precio_estimado' => round($precioEstimado, 0),
+            'precio_estimado_minimo' => round($precioEstimadoMinimo, 0),
             'precio_final' => round($precioReal, 0),
+            'price_final_canonical' => round($precioReal, 2),
+            'pricing_rule_applied' => $pricingRuleApplied,
+            'tracking_valido' => $trackingValido,
             'metodo_pago' => $viaje['metodo_pago'] ?? 'efectivo',
             'pago_confirmado' => (bool)$viaje['pago_confirmado'],
             // DESGLOSE COMPLETO DEL PRECIO
@@ -298,7 +446,7 @@ try {
         'message' => 'Historial obtenido exitosamente'
     ], JSON_NUMERIC_CHECK);
 
-} catch (Exception $e) {
+} catch (Throwable $e) {
     http_response_code(500);
     echo json_encode([
         'success' => false,

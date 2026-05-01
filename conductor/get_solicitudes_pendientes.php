@@ -9,7 +9,12 @@
  */
 
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
+$viaxOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$viaxAllowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
+if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $viaxOrigin);
+    header('Vary: Origin');
+}
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 
@@ -19,12 +24,62 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once '../config/database.php';
+require_once '../core/Cache.php';
+require_once '../services/upfront_pricing_service.php';
+require_once __DIR__ . '/request_viewing_cache.php';
 
 // Cargar servicio de confianza si existe
 $confianzaServicePath = __DIR__ . '/../confianza/ConfianzaService.php';
 $useConfianza = file_exists($confianzaServicePath);
 if ($useConfianza) {
     require_once $confianzaServicePath;
+}
+
+function conductorPendingColumnExists(PDO $db, string $tableName, string $columnName): bool
+{
+    static $cache = [];
+    $key = strtolower(trim($tableName)) . '.' . strtolower(trim($columnName));
+    if (isset($cache[$key])) {
+        return $cache[$key];
+    }
+
+    $stmt = $db->prepare(" 
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = :table_name
+              AND column_name = :column_name
+        )
+    ");
+    $stmt->execute([
+        ':table_name' => strtolower(trim($tableName)),
+        ':column_name' => strtolower(trim($columnName)),
+    ]);
+
+    $cache[$key] = (bool)$stmt->fetchColumn();
+    return $cache[$key];
+}
+
+function conductorPendingTableExists(PDO $db, string $tableName): bool
+{
+    static $cache = [];
+    $key = strtolower(trim($tableName));
+    if (isset($cache[$key])) {
+        return $cache[$key];
+    }
+
+    $stmt = $db->prepare(" 
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name = :table_name
+        )
+    ");
+    $stmt->execute([':table_name' => $key]);
+    $cache[$key] = (bool)$stmt->fetchColumn();
+    return $cache[$key];
 }
 
 try {
@@ -42,10 +97,18 @@ try {
     
     $database = new Database();
     $db = $database->getConnection();
+    $hasPrecioFijoColumn = conductorPendingColumnExists($db, 'solicitudes_servicio', 'precio_fijo');
+    $hasRechazosTable = conductorPendingTableExists($db, 'rechazos_conductor');
+    $precioFijoSelectExpr = $hasPrecioFijoColumn
+        ? 'COALESCE(s.precio_fijo, 0) AS precio_fijo,'
+        : '0::numeric AS precio_fijo,';
+    $precioReferenciaExpr = $hasPrecioFijoColumn
+        ? 'COALESCE(s.precio_fijo, s.precio_estimado, 0)'
+        : 'COALESCE(s.precio_estimado, 0)';
     
     // Verificar que sea un conductor válido y disponible
-    $stmt = $db->prepare("
-        SELECT u.id, u.empresa_id, dc.disponible, dc.vehiculo_tipo
+    $stmt = $db->prepare(" 
+        SELECT u.id, u.nombre, u.apellido, u.empresa_id, dc.disponible, dc.vehiculo_tipo
         FROM usuarios u
         INNER JOIN detalles_conductor dc ON u.id = dc.usuario_id
         WHERE u.id = ? 
@@ -78,12 +141,14 @@ try {
         exit;
     }
     
-    // Buscar solicitudes pendientes cercanas al conductor
+    // Buscar solicitudes cercanas al conductor.
+    // Además de `pendiente`, permitir rescatar solicitudes recientes que quedaron
+    // en estados terminales sin conductor cuando un conductor se conecta después.
     // MODIFICADO: Incluye información de confianza para priorización
     // Usa la fórmula de Haversine para calcular distancia
     // Nota: Compatible con PostgreSQL - usa WHERE en lugar de HAVING y sintaxis de intervalo PostgreSQL
     
-    // Query con LEFT JOIN a tablas de confianza (graceful degradation si no existen)
+    // Consulta con LEFT JOIN a tablas de confianza (degradación segura si no existen)
     $queryBase = "
         SELECT 
             s.id,
@@ -98,6 +163,8 @@ try {
             s.tipo_vehiculo,
             s.empresa_id as solicitud_empresa_id,
             s.precio_estimado,
+            $precioFijoSelectExpr
+            $precioReferenciaExpr AS precio_referencia,
             s.distancia_estimada,
             s.tiempo_estimado,
             s.estado,
@@ -143,7 +210,18 @@ try {
     $conductorEmpresaId = $conductor['empresa_id'];
     
     $queryBase .= "
-        WHERE s.estado = 'pendiente'
+        WHERE (
+            LOWER(TRIM(COALESCE(s.estado, ''))) = 'pendiente'
+            OR (
+                LOWER(TRIM(COALESCE(s.estado, ''))) IN ('sin_conductores', 'timeout', 'exhausted')
+                AND COALESCE(s.solicitado_en, s.fecha_creacion) >= NOW() - INTERVAL '5 minutes'
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM asignaciones_conductor ac_pend
+                    WHERE ac_pend.solicitud_id = s.id
+                )
+            )
+        )
         AND s.tipo_servicio = 'transporte'
         AND COALESCE(s.solicitado_en, s.fecha_creacion) >= NOW() - INTERVAL '15 minutes'
         AND NOT EXISTS (
@@ -155,7 +233,19 @@ try {
                   OR
                   (bu.user_id = ? AND bu.blocked_user_id = s.cliente_id)
               )
-        )
+        )";
+
+    if ($hasRechazosTable) {
+        $queryBase .= "
+        AND NOT EXISTS (
+            SELECT 1
+            FROM rechazos_conductor rc
+            WHERE rc.solicitud_id = s.id
+              AND rc.conductor_id = ?
+        )";
+    }
+
+    $queryBase .= "
         AND (6371 * acos(
             cos(radians(?)) * cos(radians(s.latitud_recogida)) *
             cos(radians(s.longitud_recogida) - radians(?)) +
@@ -180,47 +270,74 @@ try {
     }
     
     $stmt = $db->prepare($queryBase);
-    
+
+    $paramsQuery = [
+        $latitudActual,
+        $longitudActual,
+        $latitudActual,
+    ];
+
     if ($includeConfianza) {
-        $stmt->execute([
-            $latitudActual,
-            $longitudActual,
-            $latitudActual,
-            $conductorId,  // Para historial_confianza
-            $conductorId,  // Para conductores_favoritos
-            $conductorId,  // Bloqueos (cliente -> conductor)
-            $conductorId,  // Bloqueos (conductor -> cliente)
-            $latitudActual,
-            $longitudActual,
-            $latitudActual,
-            $radioKm,
-            $conductorVehiculoTipo,  // Filtro por tipo de vehículo
-            $conductorEmpresaId      // Filtro por empresa
-        ]);
-    } else {
-        $stmt->execute([
-            $latitudActual,
-            $longitudActual,
-            $latitudActual,
-            $conductorId,  // Bloqueos (cliente -> conductor)
-            $conductorId,  // Bloqueos (conductor -> cliente)
-            $latitudActual,
-            $longitudActual,
-            $latitudActual,
-            $radioKm,
-            $conductorVehiculoTipo,  // Filtro por tipo de vehículo
-            $conductorEmpresaId      // Filtro por empresa
-        ]);
+        $paramsQuery[] = $conductorId; // historial_confianza
+        $paramsQuery[] = $conductorId; // conductores_favoritos
     }
+
+    $paramsQuery[] = $conductorId; // bloqueos (cliente -> conductor)
+    $paramsQuery[] = $conductorId; // bloqueos (conductor -> cliente)
+
+    if ($hasRechazosTable) {
+        $paramsQuery[] = $conductorId; // rechazos por ride
+    }
+
+    $paramsQuery[] = $latitudActual;
+    $paramsQuery[] = $longitudActual;
+    $paramsQuery[] = $latitudActual;
+    $paramsQuery[] = $radioKm;
+    $paramsQuery[] = $conductorVehiculoTipo;
+    $paramsQuery[] = $conductorEmpresaId;
+
+    $stmt->execute($paramsQuery);
     
     $solicitudes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    // Filtro adicional en Redis para bloquear rechazos por ride incluso tras reconexión.
+    try {
+        $redis = Cache::redis();
+        if ($redis && !empty($solicitudes)) {
+            $solicitudes = array_values(array_filter($solicitudes, static function (array $solicitud) use ($redis, $conductorId): bool {
+                $rideId = isset($solicitud['id']) ? (int)$solicitud['id'] : 0;
+                if ($rideId <= 0) {
+                    return false;
+                }
+
+                $rejectedDrivers = $redis->sMembers('ride:' . $rideId . ':rejected_drivers');
+                if (!is_array($rejectedDrivers)) {
+                    $rejectedDrivers = [];
+                }
+
+                $rejectedAsStrings = array_map(static fn($value) => (string)$value, $rejectedDrivers);
+                $isRejected = in_array((string)$conductorId, $rejectedAsStrings, true);
+
+                error_log('REJECTED_DRIVERS ride ' . $rideId . ': ' . json_encode(array_values($rejectedAsStrings), JSON_UNESCAPED_UNICODE));
+                error_log('DRIVER ' . $conductorId . ' filtrado: ' . ($isRejected ? 'SI' : 'NO'));
+
+                return !$isRejected;
+            }));
+        }
+    } catch (Throwable $e) {
+        // Filtro secundario; no debe romper el endpoint.
+    }
     
     // Formatear las solicitudes
     $solicitudesFormateadas = array_map(function($solicitud) use ($includeConfianza) {
-        // Usar precio_estimado de la solicitud o calcular fallback
-        $precioEstimado = isset($solicitud['precio_estimado']) && $solicitud['precio_estimado'] > 0 
-            ? (float)$solicitud['precio_estimado']
-            : 5000 + ($solicitud['distancia_estimada'] * 2000);
+        // Priorizar precio fijo canónico; fallback a fórmula base si no hay dato.
+        $precioReferencia = isset($solicitud['precio_referencia'])
+            ? (float)$solicitud['precio_referencia']
+            : 0.0;
+        if ($precioReferencia <= 0) {
+            $precioReferencia = 5000 + (((float)$solicitud['distancia_estimada']) * 2000);
+        }
+        $precioCanonico = UpfrontPricingService::normalizeCopAmount($precioReferencia, 100);
         
         $resultado = [
             'id' => (int)$solicitud['id'],
@@ -240,7 +357,9 @@ try {
             'empresa_id' => isset($solicitud['solicitud_empresa_id']) ? (int)$solicitud['solicitud_empresa_id'] : null,
             'distancia_km' => (float)$solicitud['distancia_estimada'],
             'duracion_minutos' => (int)$solicitud['tiempo_estimado'],
-            'precio_estimado' => $precioEstimado,
+            'precio_estimado' => $precioCanonico,
+            'precio_fijo' => $precioCanonico,
+            'precio_canonico' => $precioCanonico,
             'distancia_conductor_origen' => round((float)$solicitud['distancia_conductor_origen'], 2),
             'fecha_solicitud' => to_iso8601($solicitud['fecha_solicitud']),
         ];
@@ -257,6 +376,22 @@ try {
         
         return $resultado;
     }, $solicitudes);
+
+    try {
+        if (!empty($solicitudesFormateadas)) {
+            foreach ($solicitudesFormateadas as $solicitud) {
+                publishLegacyDriverViewingState(
+                    (int)($solicitud['id'] ?? 0),
+                    $conductor,
+                    isset($solicitud['distancia_conductor_origen'])
+                        ? (float)$solicitud['distancia_conductor_origen']
+                        : null
+                );
+            }
+        }
+    } catch (Throwable $e) {
+        error_log('[get_solicitudes_pendientes][viewing_cache] ' . $e->getMessage());
+    }
     
     echo json_encode([
         'success' => true,

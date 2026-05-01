@@ -9,8 +9,29 @@
 
 require_once '../config/database.php';
 
+function hasColumn(PDO $db, string $table, string $column): bool
+{
+        $sql = "SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                            AND table_name = :table
+                            AND column_name = :column
+                        LIMIT 1";
+        $stmt = $db->prepare($sql);
+        $stmt->execute([
+                ':table' => $table,
+                ':column' => $column,
+        ]);
+        return (bool) $stmt->fetchColumn();
+}
+
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
+$viaxOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$viaxAllowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
+if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $viaxOrigin);
+    header('Vary: Origin');
+}
 header('Access-Control-Allow-Methods: GET, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 
@@ -31,6 +52,11 @@ try {
     
     $database = new Database();
     $db = $database->getConnection();
+    $completedStates = "'completada', 'completado', 'entregado', 'finalizada', 'finalizado'";
+    $hasCompletedAt = hasColumn($db, 'solicitudes_servicio', 'completed_at');
+    $tripDateExpr = $hasCompletedAt
+        ? "COALESCE(s.completed_at, s.completado_en, s.solicitado_en, s.fecha_creacion)"
+        : "COALESCE(s.completado_en, s.solicitado_en, s.fecha_creacion)";
 
     $stmtConductor = $db->prepare("SELECT id, empresa_id FROM usuarios WHERE id = :id AND tipo_usuario = 'conductor' LIMIT 1");
     $stmtConductor->execute([':id' => $conductorId]);
@@ -69,8 +95,8 @@ try {
             FROM solicitudes_servicio s
             INNER JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id
             LEFT JOIN viaje_resumen_tracking vrt ON s.id = vrt.solicitud_id
-            WHERE s.estado IN ('completada', 'entregado')
-              " . ($anchorTs ? "AND COALESCE(s.completado_en, s.solicitado_en) > :anchor_ts_comisiones" : "") . "
+                        WHERE LOWER(COALESCE(s.estado, '')) IN ($completedStates)
+                            " . ($anchorTs ? "AND $tripDateExpr > :anchor_ts_comisiones" : "") . "
             GROUP BY ac.conductor_id
         ) comisiones ON comisiones.conductor_id = u.id
         LEFT JOIN (
@@ -119,7 +145,7 @@ try {
             INNER JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id
             LEFT JOIN viaje_resumen_tracking vrt ON s.id = vrt.solicitud_id
             WHERE ac.conductor_id = :conductor_id_1
-            AND s.estado IN ('completada', 'entregado')
+            AND LOWER(COALESCE(s.estado, '')) IN ($completedStates)
             
             UNION ALL
             

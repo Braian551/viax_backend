@@ -18,24 +18,38 @@ class DriverGeoService
     private const LAST_CITY_PREFIX = 'drivers:last_city:';
     private const HEARTBEAT_PREFIX = 'driver:heartbeat:';
 
-    public static function upsertDriverLocation(int $driverId, float $lat, float $lng, ?float $speed = null): void
+    public static function upsertDriverLocation(
+        int $driverId,
+        float $lat,
+        float $lng,
+        ?float $speed = null,
+        ?float $heading = null,
+        ?int $timestampSec = null
+    ): void
     {
         $redis = Cache::redis();
         if (!$redis || $driverId <= 0) {
             return;
         }
 
+        $timestamp = $timestampSec ?? time();
+        $payload = [
+            'lat' => $lat,
+            'lng' => $lng,
+            'speed' => $speed,
+            'heading' => $heading,
+            'timestamp' => $timestamp,
+        ];
+
         try {
             $redis->rawCommand('GEOADD', self::GEO_KEY, (string)$lng, (string)$lat, (string)$driverId);
 
             self::updateGridMembership($redis, $driverId, $lat, $lng);
 
-            Cache::set('driver_location:' . $driverId, (string)json_encode([
-                'lat' => $lat,
-                'lng' => $lng,
-                'speed' => $speed,
-                'timestamp' => time(),
-            ]), 30);
+            $payloadJson = json_encode($payload, JSON_UNESCAPED_UNICODE);
+            Cache::set('driver_location:' . $driverId, (string)$payloadJson, 30);
+            Cache::set('driver:' . $driverId . ':location', (string)$payloadJson, 30);
+            $redis->setex('drivers:location:' . $driverId, 30, (string)$payloadJson);
             Cache::sAdd('active_drivers', (string)$driverId);
         } catch (Throwable $e) {
             error_log('[DriverGeoService] GEOADD warning: ' . $e->getMessage());

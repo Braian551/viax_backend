@@ -265,8 +265,10 @@ class ConcurrencyService {
                 ];
             }
             
-            // Verificar estado
-            if ($solicitud['estado'] !== 'pendiente') {
+            // Verificar estado: permitir recuperación de solicitudes recientes sin conductor.
+            $estadoActual = strtolower(trim((string)($solicitud['estado'] ?? '')));
+            $estadosAceptables = ['pendiente', 'sin_conductores', 'timeout', 'exhausted'];
+            if (!in_array($estadoActual, $estadosAceptables, true)) {
                 $this->db->rollBack();
                 return [
                     'success' => false,
@@ -295,13 +297,14 @@ class ConcurrencyService {
             }
             
             // Actualizar solicitud
-            $stmt = $this->db->prepare("
+            $stmt = $this->db->prepare(" 
                 UPDATE solicitudes_servicio 
                 SET estado = 'aceptada',
                     aceptado_en = NOW(),
                     last_operation_key = :idem_key,
                     last_sync_at = NOW()
-                WHERE id = :id AND estado = 'pendiente'
+                WHERE id = :id
+                  AND LOWER(TRIM(COALESCE(estado, ''))) IN ('pendiente', 'sin_conductores', 'timeout', 'exhausted')
             ");
             $stmt->execute([':id' => $solicitudId, ':idem_key' => $idempotencyKey]);
             

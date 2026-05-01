@@ -1,6 +1,11 @@
 <?php
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
+$viaxOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$viaxAllowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
+if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $viaxOrigin);
+    header('Vary: Origin');
+}
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 
@@ -12,6 +17,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 require_once '../config/database.php';
 require_once '../config/redis.php';
 require_once '../core/Cache.php';
+require_once __DIR__ . '/../services/RealtimeEventPublisher.php';
 
 try {
     $data = json_decode(file_get_contents('php://input'), true);
@@ -110,7 +116,21 @@ try {
 
     // Limpieza de cache temporal del request/candidatos.
     Cache::set('ride_request:' . $solicitudId, '{}', 1);
-    
+
+    // Publicar al gateway WebSocket
+    try {
+        $clienteId = (int)($solicitud['cliente_id'] ?? 0);
+        $conductorId = (int)($solicitud['conductor_id'] ?? 0);
+        RealtimeEventPublisher::searchStatusChanged($solicitudId, $clienteId, 'cancelada_por_usuario');
+        if ($conductorId > 0) {
+            RealtimeEventPublisher::toDriver($conductorId, 'trip.cancelled', [
+                'request_id' => $solicitudId,
+            ]);
+        }
+    } catch (\Throwable $rtErr) {
+        error_log('[RealtimePublisher] cancel_trip: ' . $rtErr->getMessage());
+    }
+
     echo json_encode([
         'success' => true,
         'message' => 'Solicitud cancelada exitosamente',

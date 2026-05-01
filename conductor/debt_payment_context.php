@@ -1,6 +1,11 @@
 <?php
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
+$viaxOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$viaxAllowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
+if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $viaxOrigin);
+    header('Vary: Origin');
+}
 header('Access-Control-Allow-Methods: GET, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Accept');
 
@@ -12,6 +17,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 require_once '../config/database.php';
 require_once '../utils/NotificationHelper.php';
 require_once '../utils/SensitiveDataCrypto.php';
+
+function hasColumn(PDO $db, string $table, string $column): bool
+{
+        $sql = "SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                            AND table_name = :table
+                            AND column_name = :column
+                        LIMIT 1";
+        $stmt = $db->prepare($sql);
+        $stmt->execute([
+                ':table' => $table,
+                ':column' => $column,
+        ]);
+        return (bool) $stmt->fetchColumn();
+}
 
 if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     http_response_code(405);
@@ -60,6 +81,12 @@ try {
         throw new Exception('El conductor no está asociado a una empresa');
     }
 
+    $completedStates = "'completada', 'completado', 'entregado', 'finalizada', 'finalizado'";
+    $hasCompletedAt = hasColumn($db, 'solicitudes_servicio', 'completed_at');
+    $tripDateExpr = $hasCompletedAt
+        ? "COALESCE(s.completed_at, s.completado_en, s.solicitado_en, s.fecha_creacion)"
+        : "COALESCE(s.completado_en, s.solicitado_en, s.fecha_creacion)";
+
     // Deuda por ciclo: viajes y pagos posteriores al último pago confirmado.
     $stmtAnchor = $db->prepare("SELECT MAX(confirmado_en) AS ultimo_pago_confirmado
         FROM pagos_comision_reportes
@@ -83,8 +110,8 @@ try {
     INNER JOIN asignaciones_conductor ac ON s.id = ac.solicitud_id
     LEFT JOIN viaje_resumen_tracking vrt ON s.id = vrt.solicitud_id
     WHERE ac.conductor_id = :conductor_id
-    AND s.estado IN ('completada', 'entregado')" . ($anchorTs ? "
-    AND COALESCE(s.completado_en, s.solicitado_en) > :anchor_ts" : "");
+    AND LOWER(COALESCE(s.estado, '')) IN ($completedStates)" . ($anchorTs ? "
+    AND $tripDateExpr > :anchor_ts" : "");
 
     $stmtTotal = $db->prepare($queryComisionTotal);
     $paramsTotal = [':conductor_id' => $conductorId];

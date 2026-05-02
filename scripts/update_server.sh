@@ -42,10 +42,10 @@ FILES=(
 )
 
 SUPERVISOR_FILES=(
-  "deploy/supervisor/dispatch_worker.conf"
-  "deploy/supervisor/zone_cache_worker.conf"
-  "deploy/supervisor/surge_pricing_worker.conf"
-  "deploy/supervisor/driver_reposition_worker.conf"
+  "infra/supervisor/dispatch_worker.conf"
+  "infra/supervisor/zone_cache_worker.conf"
+  "infra/supervisor/surge_pricing_worker.conf"
+  "infra/supervisor/driver_reposition_worker.conf"
 )
 
 echo "[1/4] Subiendo archivos..."

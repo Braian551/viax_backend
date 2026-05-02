@@ -34,6 +34,7 @@ require_once __DIR__ . '/../services/pickup_eta_service.php';
 require_once __DIR__ . '/../services/pricing_service.php';
 require_once __DIR__ . '/../services/upfront_pricing_service.php';
 require_once __DIR__ . '/../services/places_search_service.php';
+require_once __DIR__ . '/../services/DispatchServicePublisher.php';
 
 /** Valida coordenadas geográficas para evitar payloads corruptos. */
 function isValidCoordinate(float $lat, float $lng): bool
@@ -74,6 +75,7 @@ function recentPlaceNameFromAddress(string $address): string
  */
 function tripRequestColumnExists(PDO $db, string $tableName, string $columnName): bool
 {
+    /** @var array<string,bool> $cache */
     static $cache = [];
     $key = strtolower(trim($tableName)) . '.' . strtolower(trim($columnName));
     if (isset($cache[$key])) {
@@ -702,6 +704,18 @@ try {
                 $redis->setex('ride:' . $solicitudId . ':drivers_queue', 600, $payload);
             }
             $redis->setex('ride:' . $solicitudId . ':matching_status', 180, 'searching');
+
+            DispatchServicePublisher::publishTripRequested((int)$solicitudId, [
+                'user_id' => (int)$usuarioId,
+                'lat' => (float)$latOrigen,
+                'lng' => (float)$lngOrigen,
+                'vehicle_type' => (string)$tipoVehiculo,
+                'timestamp' => $createdAtIso,
+                'estimated_price' => (float)$precioEstimado,
+                'company_id' => $empresaId,
+                'candidate_driver_ids' => $driverIds,
+                'mode' => getenv('DISPATCH_MODE') ?: 'hybrid',
+            ]);
 
             $zoneKey = DriverGeoService::zoneCellKey($latOrigen, $lngOrigen);
             // Hotspots con ventana móvil de 10 minutos.

@@ -100,6 +100,89 @@ function tripRequestColumnExists(PDO $db, string $tableName, string $columnName)
     return $cache[$key];
 }
 
+/** Genera un request_id numérico compatible con el worker Node. */
+function generateNumericPricingRequestId(): int
+{
+    $milliseconds = (int)floor(microtime(true) * 1000);
+    return ($milliseconds * 1000) + random_int(1, 999);
+}
+
+/**
+ * Intenta resolver la cotización upfront usando pricing-service Node.
+ * Si el servicio no responde en 3 segundos, devuelve null para usar fallback PHP.
+ */
+function tryResolveUpfrontPricingFromNode(
+    int $userId,
+    float $distanciaKm,
+    int $duracionMinutos,
+    string $tipoVehiculo,
+    float $latOrigen,
+    float $lngOrigen
+): ?array {
+    try {
+        $redis = Cache::redis();
+        if (!$redis) {
+            return null;
+        }
+
+        $requestId = generateNumericPricingRequestId();
+        $payload = json_encode([
+            'request_id' => $requestId,
+            'trip_id' => 0,
+            'user_id' => $userId,
+            'distancia_km' => $distanciaKm,
+            'duracion_minutos' => $duracionMinutos,
+            'tipo_vehiculo' => $tipoVehiculo,
+            'lat_origen' => $latOrigen,
+            'lng_origen' => $lngOrigen,
+            'source' => 'create_trip_request',
+        ], JSON_UNESCAPED_UNICODE);
+
+        if (!is_string($payload) || $payload === '') {
+            return null;
+        }
+
+        $start = microtime(true);
+        $redis->publish('pricing:quote_queue', $payload);
+
+        $resultKey = 'pricing:quote_result:' . $requestId;
+        for ($i = 0; $i < 30; $i++) {
+            usleep(100000);
+            $raw = $redis->get($resultKey);
+            if (!is_string($raw) || trim($raw) === '') {
+                continue;
+            }
+
+            $decoded = json_decode($raw, true);
+            $redis->del($resultKey);
+
+            if (is_array($decoded) && isset($decoded['data'])) {
+                $latencyMs = (int)round((microtime(true) - $start) * 1000);
+                if (!isset($decoded['data']['latency_ms'])) {
+                    $decoded['data']['latency_ms'] = $latencyMs;
+                }
+                if (!isset($decoded['data']['source'])) {
+                    $decoded['data']['source'] = 'pricing_service';
+                }
+                if (!isset($decoded['source'])) {
+                    $decoded['source'] = 'pricing_service';
+                }
+                $decoded['fallback'] = false;
+
+                return $decoded;
+            }
+
+            break;
+        }
+
+        error_log('[create_trip_request] node timeout, usando fallback PHP');
+    } catch (Throwable $nodeError) {
+        error_log('[create_trip_request] node delegation warning: ' . $nodeError->getMessage());
+    }
+
+    return null;
+}
+
 try {
     // Leer payload de entrada.
     $input = file_get_contents('php://input');
@@ -176,6 +259,26 @@ try {
     $precioEstimadoPayload = isset($data['precio_estimado']) ? (float)$data['precio_estimado'] : (float)($data['precio'] ?? 0);
     $precioPayloadNormalizado = UpfrontPricingService::normalizeCopAmount($precioEstimadoPayload, 100);
 
+    $nodePricingResult = tryResolveUpfrontPricingFromNode(
+        (int)$usuarioId,
+        $distanciaKm,
+        $duracionMin,
+        (string)($data['tipo_vehiculo'] ?? 'moto'),
+        $latOrigen,
+        $lngOrigen
+    );
+    $nodePricingData = is_array($nodePricingResult['data'] ?? null) ? $nodePricingResult['data'] : null;
+    $precioNodoNormalizado = 0.0;
+    if (is_array($nodePricingData)) {
+        $precioNodoNormalizado = UpfrontPricingService::normalizeCopAmount(
+            (float)($nodePricingData['precio_estimado_usuario']
+                ?? $nodePricingData['total_normalizado']
+                ?? $nodePricingData['total']
+                ?? 0),
+            100
+        );
+    }
+
     $precioCalculadoServidor = 0.0;
     $precioServidorNormalizado = 0.0;
     try {
@@ -186,17 +289,19 @@ try {
         error_log('[create_trip_request] pricing server warning: ' . $pricingError->getMessage());
     }
 
-    $precioEstimado = $precioPayloadNormalizado;
+    $precioFallback = $precioPayloadNormalizado;
     if ($upfrontPricingEnabled) {
-        // En upfront, la fuente canónica es el valor ya mostrado al cliente en preview.
-        $precioEstimado = $precioPayloadNormalizado > 0
+        $precioFallback = $precioPayloadNormalizado > 0
             ? $precioPayloadNormalizado
             : $precioServidorNormalizado;
     } else {
-        $precioEstimado = $precioServidorNormalizado > 0
+        $precioFallback = $precioServidorNormalizado > 0
             ? $precioServidorNormalizado
             : $precioPayloadNormalizado;
     }
+    $precioEstimado = $precioNodoNormalizado > 0
+        ? $precioNodoNormalizado
+        : $precioFallback;
 
     // Los timestamps persistidos en BD deben ir en UTC para mantener
     // consistencia con filtros basados en NOW() del servidor.
@@ -593,6 +698,26 @@ try {
     );
 
     $pricingPreview = DynamicPricingService::calculate($pricingInput);
+    if (is_array($nodePricingData)) {
+        $pricingPreview['base_price'] = (float)($nodePricingData['subtotal_con_descuento']
+            ?? $nodePricingData['subtotal']
+            ?? $pricingPreview['base_price']
+            ?? $precioEstimado);
+        $pricingPreview['final_price'] = (float)($nodePricingData['precio_estimado_usuario']
+            ?? $nodePricingData['total_normalizado']
+            ?? $nodePricingData['total']
+            ?? $pricingPreview['final_price']
+            ?? $precioEstimado);
+        $pricingPreview['surge'] = (float)($nodePricingData['surge_multiplier']
+            ?? $pricingPreview['surge']
+            ?? 1.0);
+        $pricingPreview['zone_key'] = $nodePricingData['zone_key']
+            ?? ($pricingPreview['zone_key'] ?? null);
+        $pricingPreview['source'] = (string)($nodePricingData['source'] ?? 'pricing_service');
+        if (isset($nodePricingData['latency_ms'])) {
+            $pricingPreview['latency_ms'] = (int)$nodePricingData['latency_ms'];
+        }
+    }
     if ($upfrontPricingEnabled) {
         $pricingPreview['base_price'] = (float)$precioEstimado;
         $pricingPreview['final_price'] = (float)$precioEstimado;
@@ -609,31 +734,41 @@ try {
         }
     }
 
-    try {
-        $redis = Cache::redis();
-        if ($redis) {
-            $gridId = DriverGeoService::gridIdForCoordinates($latOrigen, $lngOrigen);
-            $surgeRaw = $redis->get('surge:grid:' . $gridId);
-            $surgePayload = is_string($surgeRaw) ? json_decode($surgeRaw, true) : null;
-            if (is_array($surgePayload) && isset($surgePayload['multiplier'])) {
-                $surgeMultiplier = max(1.0, (float)$surgePayload['multiplier']);
-                $surgeLevel = isset($surgePayload['demand_level'])
-                    ? (string)$surgePayload['demand_level']
-                    : DynamicPricingService::demandLevel($surgeMultiplier);
-                $surgeMessage = isset($surgePayload['message'])
-                    ? (string)$surgePayload['message']
-                    : DynamicPricingService::demandMessage($surgeMultiplier);
-            } else {
-                $zonePrefix = 'zone:' . $gridId;
-                $zoneMultiplierRaw = $redis->get($zonePrefix . ':surge_multiplier');
-                if (is_string($zoneMultiplierRaw) && is_numeric($zoneMultiplierRaw)) {
-                    $surgeMultiplier = max(1.0, (float)$zoneMultiplierRaw);
-                    $surgeLevel = DynamicPricingService::demandLevel($surgeMultiplier);
-                    $surgeMessage = DynamicPricingService::demandMessage($surgeMultiplier);
+    if (is_array($nodePricingData)) {
+        $surgeMultiplier = max(1.0, (float)($nodePricingData['surge_multiplier'] ?? 1.0));
+        $surgeLevel = isset($nodePricingData['surge_level'])
+            ? (string)$nodePricingData['surge_level']
+            : DynamicPricingService::demandLevel($surgeMultiplier);
+        $surgeMessage = isset($nodePricingData['surge_message'])
+            ? (string)$nodePricingData['surge_message']
+            : DynamicPricingService::demandMessage($surgeMultiplier);
+    } else {
+        try {
+            $redis = Cache::redis();
+            if ($redis) {
+                $gridId = DriverGeoService::gridIdForCoordinates($latOrigen, $lngOrigen);
+                $surgeRaw = $redis->get('surge:grid:' . $gridId);
+                $surgePayload = is_string($surgeRaw) ? json_decode($surgeRaw, true) : null;
+                if (is_array($surgePayload) && isset($surgePayload['multiplier'])) {
+                    $surgeMultiplier = max(1.0, (float)$surgePayload['multiplier']);
+                    $surgeLevel = isset($surgePayload['demand_level'])
+                        ? (string)$surgePayload['demand_level']
+                        : DynamicPricingService::demandLevel($surgeMultiplier);
+                    $surgeMessage = isset($surgePayload['message'])
+                        ? (string)$surgePayload['message']
+                        : DynamicPricingService::demandMessage($surgeMultiplier);
+                } else {
+                    $zonePrefix = 'zone:' . $gridId;
+                    $zoneMultiplierRaw = $redis->get($zonePrefix . ':surge_multiplier');
+                    if (is_string($zoneMultiplierRaw) && is_numeric($zoneMultiplierRaw)) {
+                        $surgeMultiplier = max(1.0, (float)$zoneMultiplierRaw);
+                        $surgeLevel = DynamicPricingService::demandLevel($surgeMultiplier);
+                        $surgeMessage = DynamicPricingService::demandMessage($surgeMultiplier);
+                    }
                 }
             }
-        }
-    } catch (Throwable $e) {}
+        } catch (Throwable $e) {}
+    }
     } catch (Throwable $postCommitError) {
         error_log('[create_trip_request] post-commit enrichment warning: ' . $postCommitError->getMessage());
     }
@@ -654,6 +789,7 @@ try {
         'precio_estimado' => (float)$precioEstimado,
         'precio_fijo' => (float)$precioEstimado,
         'precio_congelado' => $upfrontPricingEnabled && $hasPrecioCongeladoColumn,
+        'pricing_source' => $precioNodoNormalizado > 0 ? 'pricing_service' : 'php_fallback',
         'pricing_preview' => $pricingPreview,
     ]);
 

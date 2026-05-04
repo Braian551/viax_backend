@@ -1,5 +1,6 @@
 <?php
 require_once '../config/config.php';
+require_once __DIR__ . '/../core/Auth.php';
 
 try {
     $input = getJsonInput();
@@ -161,7 +162,28 @@ try {
         error_log("Error al registrar log de auditoría: " . $e->getMessage());
     }
 
-    sendJsonResponse(true, 'Login exitoso', ['user' => $user]);
+    $authData = ['user' => $user];
+    $accessToken = Auth::generateAccessToken();
+    $refreshToken = Auth::generateRefreshToken();
+    $accessTtl = (int)env_value('AUTH_ACCESS_TOKEN_TTL', 3600);
+    $sessionSaved = Auth::putSessionInCache($accessToken, [
+        'user_id' => (int)$user['id'],
+        'email' => $user['email'] ?? null,
+        'device_uuid' => $deviceUuid,
+        'status' => $status,
+        'user_type' => $user['tipo_usuario'] ?? null,
+        'refresh_token' => $refreshToken,
+    ], $accessTtl);
+
+    if ($sessionSaved) {
+        $authData['access_token'] = $accessToken;
+        $authData['refresh_token'] = $refreshToken;
+        $authData['expires_in'] = $accessTtl;
+    } else {
+        error_log('login.php warning: no se pudo guardar la sesion Redis para WebSocket');
+    }
+
+    sendJsonResponse(true, 'Login exitoso', $authData);
 
 } catch (Exception $e) {
     error_log('login.php error: ' . $e->getMessage());

@@ -21,6 +21,130 @@ header('Access-Control-Allow-Methods: POST');
 header('Access-Control-Allow-Headers: Content-Type');
 
 require_once '../config/database.php';
+require_once '../services/pricing_service.php';
+
+/**
+ * Resuelve el surge dinámico para la zona del origen usando la misma clave canónica
+ * que consume DynamicPricingService internamente: surge_zone:{zoneKey}.
+ *
+ * @return array{multiplier: float, level: string, message: string, zone_key: ?string}
+ */
+function resolveDynamicSurgeForQuote($lat, $lng): array
+{
+    if ($lat === null || $lng === null) {
+        return [
+            'multiplier' => 1.0,
+            'level' => 'normal',
+            'message' => '',
+            'zone_key' => null,
+        ];
+    }
+
+    try {
+        $zoneKey = DynamicPricingService::zoneKey((float)$lat, (float)$lng);
+        $cached = Cache::get('surge_zone:' . $zoneKey);
+        $multiplier = 1.0;
+
+        if (is_string($cached) && is_numeric($cached)) {
+            $multiplier = min(2.0, max(1.0, round((float)$cached, 2)));
+        }
+
+        return [
+            'multiplier' => $multiplier,
+            'level' => DynamicPricingService::demandLevel($multiplier),
+            'message' => DynamicPricingService::demandMessage($multiplier),
+            'zone_key' => $zoneKey,
+        ];
+    } catch (Throwable $surgeError) {
+        error_log('[calculate_quote] surge warning: ' . $surgeError->getMessage());
+
+        return [
+            'multiplier' => 1.0,
+            'level' => 'normal',
+            'message' => '',
+            'zone_key' => null,
+        ];
+    }
+}
+
+/**
+ * Genera un request_id numérico compatible con el worker Node.
+ */
+function generateNumericPricingRequestId(): int
+{
+    $milliseconds = (int)floor(microtime(true) * 1000);
+    return ($milliseconds * 1000) + random_int(1, 999);
+}
+
+/**
+ * Intenta resolver la cotización vía pricing-service Node.
+ * Si el servicio no responde dentro de 2 segundos, devuelve null para usar fallback PHP.
+ */
+function tryResolveQuoteFromPricingNode(array $body): ?array
+{
+    try {
+        $redis = Cache::redis();
+        if (!$redis) {
+            return null;
+        }
+
+        $requestId = generateNumericPricingRequestId();
+        $payload = json_encode([
+            'request_id' => $requestId,
+            'trip_id' => 0,
+            'user_id' => (int)($body['user_id'] ?? 0),
+            'distancia_km' => (float)($body['distancia_km'] ?? 0),
+            'duracion_minutos' => (int)($body['duracion_minutos'] ?? 0),
+            'tipo_vehiculo' => (string)($body['tipo_vehiculo'] ?? 'moto'),
+            'lat_origen' => isset($body['lat']) ? (float)$body['lat'] : (float)($body['lat_origen'] ?? 0),
+            'lng_origen' => isset($body['lng']) ? (float)$body['lng'] : (float)($body['lng_origen'] ?? 0),
+            'source' => 'calculate_quote_php',
+        ], JSON_UNESCAPED_UNICODE);
+
+        if (!is_string($payload) || $payload === '') {
+            return null;
+        }
+
+        $start = microtime(true);
+        $redis->publish('pricing:quote_queue', $payload);
+
+        $resultKey = 'pricing:quote_result:' . $requestId;
+        for ($i = 0; $i < 20; $i++) {
+            usleep(100000);
+            $raw = $redis->get($resultKey);
+            if (!is_string($raw) || trim($raw) === '') {
+                continue;
+            }
+
+            $decoded = json_decode($raw, true);
+            $redis->del($resultKey);
+
+            if (is_array($decoded) && isset($decoded['data'])) {
+                $latencyMs = (int)round((microtime(true) - $start) * 1000);
+                if (!isset($decoded['data']['latency_ms'])) {
+                    $decoded['data']['latency_ms'] = $latencyMs;
+                }
+                if (!isset($decoded['data']['source'])) {
+                    $decoded['data']['source'] = 'pricing_service';
+                }
+                if (!isset($decoded['source'])) {
+                    $decoded['source'] = 'pricing_service';
+                }
+                $decoded['fallback'] = false;
+
+                return $decoded;
+            }
+
+            break;
+        }
+
+        error_log('[calculate_quote] node timeout, usando fallback PHP');
+    } catch (Throwable $nodeError) {
+        error_log('[calculate_quote] node delegation warning: ' . $nodeError->getMessage());
+    }
+
+    return null;
+}
 
 // Solo permitir POST
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -52,6 +176,12 @@ try {
     $distancia_km = floatval($data['distancia_km']);
     $duracion_minutos = intval($data['duracion_minutos']);
     $tipo_vehiculo = $data['tipo_vehiculo'];
+    $latitud_origen = isset($data['lat'])
+        ? floatval($data['lat'])
+        : (isset($data['lat_origen']) ? floatval($data['lat_origen']) : null);
+    $longitud_origen = isset($data['lng'])
+        ? floatval($data['lng'])
+        : (isset($data['lng_origen']) ? floatval($data['lng_origen']) : null);
     
     // Validaciones
     if ($distancia_km <= 0) {
@@ -69,6 +199,13 @@ try {
             'success' => false,
             'message' => 'La duración debe ser mayor a 0'
         ]);
+        exit;
+    }
+
+    $nodeResult = tryResolveQuoteFromPricingNode($data);
+    if ($nodeResult !== null) {
+        http_response_code(200);
+        echo json_encode($nodeResult, JSON_UNESCAPED_UNICODE);
         exit;
     }
     
@@ -176,7 +313,14 @@ try {
         $recargo_precio = $subtotal_con_descuento * ($recargo_porcentaje / 100);
     }
     
-    $total = $subtotal_con_descuento + $recargo_precio;
+    $surgeInfo = resolveDynamicSurgeForQuote($latitud_origen, $longitud_origen);
+    $surge_multiplier = floatval($surgeInfo['multiplier']);
+    $surge_precio = 0.00;
+    if ($surge_multiplier > 1.0) {
+        $surge_precio = $subtotal_con_descuento * ($surge_multiplier - 1.0);
+    }
+
+    $total = $subtotal_con_descuento + $recargo_precio + $surge_precio;
     
     // ===================================================
     // APLICAR TARIFA MÍNIMA
@@ -228,6 +372,13 @@ try {
         'periodo_actual' => $periodo_actual,
         'recargo_porcentaje' => round($recargo_porcentaje, 2),
         'recargo_precio' => round($recargo_precio, 2),
+
+        // Surge dinámico por zona
+        'surge_multiplier' => round($surge_multiplier, 2),
+        'surge_precio' => round($surge_precio, 2),
+        'surge_level' => $surgeInfo['level'],
+        'surge_message' => $surgeInfo['message'],
+        'zone_key' => $surgeInfo['zone_key'],
         
         // Total
         'total' => round($total, 2),
@@ -247,7 +398,9 @@ try {
     echo json_encode([
         'success' => true,
         'data' => $cotizacion,
-        'mensaje' => 'Cotización calculada exitosamente'
+        'mensaje' => 'Cotización calculada exitosamente',
+        'source' => 'pricing_php_fallback',
+        'fallback' => true
     ]);
     
 } catch (PDOException $e) {

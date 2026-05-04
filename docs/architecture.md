@@ -146,7 +146,7 @@ Esto reduce CPU/latencia en cada ciclo de selección.
 
 ## 8) Operación con Supervisor
 
-Configs sugeridas en `deploy/supervisor/`:
+Configs sugeridas en `infra/supervisor/`:
 
 - `dispatch_worker.conf`
 - `zone_cache_worker.conf`
@@ -155,7 +155,7 @@ Comandos típicos:
 
 ```bash
 sudo apt-get update && sudo apt-get install -y supervisor
-sudo cp /var/www/viax/deploy/supervisor/*.conf /etc/supervisor/conf.d/
+sudo cp infra/supervisor/*.conf /etc/supervisor/conf.d/
 sudo supervisorctl reread
 sudo supervisorctl update
 sudo supervisorctl status
@@ -238,7 +238,7 @@ Además de los workers existentes, incluir:
 Flujo recomendado:
 
 ```bash
-sudo cp /var/www/viax/deploy/supervisor/*.conf /etc/supervisor/conf.d/
+sudo cp infra/supervisor/*.conf /etc/supervisor/conf.d/
 sudo supervisorctl reread
 sudo supervisorctl update
 sudo supervisorctl restart viax_dispatch_worker

@@ -19,7 +19,7 @@ final class SessionAccess
         }
     }
 
-    public static function createWebSession(int $userId): bool
+    public static function createWebSession(int $userId, ?callable $beforeCookie = null): bool
     {
         $token = Auth::generateAccessToken();
         $now = time();
@@ -33,7 +33,15 @@ final class SessionAccess
             return false;
         }
 
-        self::revokeCookieToken();
+        try {
+            self::revokeCookieToken();
+            if ($beforeCookie !== null) {
+                $beforeCookie();
+            }
+        } catch (Throwable $error) {
+            Cache::delete('user_session:' . $token);
+            throw $error;
+        }
         self::setCookie($token, $now + self::IDLE_SECONDS);
         return true;
     }
@@ -111,7 +119,7 @@ LUA, [$key], 1);
 
         $stmt = $db->prepare(
             "SELECT id, uuid, nombre, apellido, email, telefono, tipo_usuario, empresa_id
-             FROM usuarios WHERE id = :id AND status = 'active'"
+             FROM usuarios WHERE id = :id AND status = 'active' AND es_activo = 1"
         );
         $stmt->execute([':id' => (int)$session['user_id']]);
         $user = $stmt->fetch(PDO::FETCH_ASSOC);

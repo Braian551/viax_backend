@@ -1,103 +1,40 @@
 <?php
-/**
- * Endpoint para actualizar el número de teléfono del usuario
- * Especialmente útil después de registro con Google/Apple
- * 
- * URL: /auth/update_phone.php
- * Método: POST
- * 
- * Body:
- * {
- *   "user_id": 123,        // o "email": "user@example.com"
- *   "phone": "+573001234567"
- * }
- */
 
-require_once '../config/config.php';
+require_once __DIR__ . '/../middleware/SessionAccess.php';
+
+if (Request::method() !== 'POST') {
+    header('Allow: POST');
+    sendJsonResponse(false, 'Método no permitido.', [], 405);
+}
+if (Auth::bearerToken() === null) {
+    sendJsonResponse(false, 'Inicia sesión para completar el teléfono.', [], 401);
+}
 
 try {
+    $db = (new Database())->getConnection();
+    $user = SessionAccess::requireUser($db);
     $input = getJsonInput();
-    
-    // Validar campos requeridos
-    if (empty($input['phone'])) {
-        sendJsonResponse(false, 'El número de teléfono es requerido');
+    if (isset($input['user_id']) && filter_var($input['user_id'], FILTER_VALIDATE_INT) !== (int)$user['id']) {
+        sendJsonResponse(false, 'Acceso denegado.', [], 403);
     }
-    
-    if (empty($input['user_id']) && empty($input['email'])) {
-        sendJsonResponse(false, 'Se requiere user_id o email para identificar al usuario');
+    $phone = $input['phone'] ?? null;
+    if (!is_string($phone) || !preg_match('/^\+[1-9][0-9]{7,14}$/D', $phone)) {
+        sendJsonResponse(false, 'Ingresa un número de teléfono válido.', [], 400);
     }
-    
-    $phone = trim($input['phone']);
-    
-    // Validar formato de teléfono (mínimo 10 dígitos)
-    $phoneClean = preg_replace('/[^0-9]/', '', $phone);
-    if (strlen($phoneClean) < 10) {
-        sendJsonResponse(false, 'El número de teléfono debe tener al menos 10 dígitos');
+    $update = $db->prepare(
+        "UPDATE usuarios SET telefono = ?, fecha_actualizacion = CURRENT_TIMESTAMP
+         WHERE id = ? AND google_id IS NOT NULL AND status = 'active' AND es_activo = 1
+         AND COALESCE(trim(telefono), '') = ''
+         AND NOT EXISTS (SELECT 1 FROM usuarios WHERE telefono = ?)
+         RETURNING id, uuid, nombre, apellido, email, telefono, tipo_usuario, foto_perfil, es_verificado, empresa_id"
+    );
+    $update->execute([$phone, $user['id'], $phone]);
+    $updated = $update->fetch(PDO::FETCH_ASSOC);
+    if (!$updated) {
+        sendJsonResponse(false, 'El teléfono ya está registrado o esta cuenta no admite ese cambio.', [], 409);
     }
-    
-    // Conectar a la base de datos
-    $database = new Database();
-    $db = $database->getConnection();
-    
-    // Verificar que el teléfono no esté en uso por otro usuario
-    $checkQuery = "SELECT id FROM usuarios WHERE telefono = :phone";
-    $checkParams = [':phone' => $phone];
-    
-    // Excluir al usuario actual de la verificación
-    if (!empty($input['user_id'])) {
-        $checkQuery .= " AND id != :user_id";
-        $checkParams[':user_id'] = $input['user_id'];
-    } else if (!empty($input['email'])) {
-        $checkQuery .= " AND email != :email";
-        $checkParams[':email'] = $input['email'];
-    }
-    
-    $checkStmt = $db->prepare($checkQuery);
-    $checkStmt->execute($checkParams);
-    
-    if ($checkStmt->fetch()) {
-        sendJsonResponse(false, 'Este número de teléfono ya está registrado con otra cuenta');
-    }
-    
-    // Actualizar el teléfono del usuario
-    if (!empty($input['user_id'])) {
-        $updateQuery = "UPDATE usuarios SET telefono = :phone, fecha_actualizacion = CURRENT_TIMESTAMP WHERE id = :user_id RETURNING id, email, telefono";
-        $updateStmt = $db->prepare($updateQuery);
-        $updateStmt->execute([
-            ':phone' => $phone,
-            ':user_id' => $input['user_id']
-        ]);
-    } else {
-        $updateQuery = "UPDATE usuarios SET telefono = :phone, fecha_actualizacion = CURRENT_TIMESTAMP WHERE email = :email RETURNING id, email, telefono";
-        $updateStmt = $db->prepare($updateQuery);
-        $updateStmt->execute([
-            ':phone' => $phone,
-            ':email' => $input['email']
-        ]);
-    }
-    
-    $result = $updateStmt->fetch(PDO::FETCH_ASSOC);
-    
-    if (!$result) {
-        sendJsonResponse(false, 'Usuario no encontrado');
-    }
-    
-    // Obtener datos completos del usuario actualizado
-    $userQuery = "SELECT id, uuid, nombre, apellido, email, telefono, tipo_usuario, foto_perfil, es_verificado, empresa_id
-                  FROM usuarios WHERE id = :id";
-    $userStmt = $db->prepare($userQuery);
-    $userStmt->execute([':id' => $result['id']]);
-    $user = $userStmt->fetch(PDO::FETCH_ASSOC);
-    
-    sendJsonResponse(true, 'Número de teléfono actualizado correctamente', [
-        'user' => $user,
-        'requires_phone' => false
-    ]);
-    
-} catch (PDOException $e) {
-    error_log("Error de base de datos en update_phone: " . $e->getMessage());
-    sendJsonResponse(false, 'Error de base de datos');
-} catch (Exception $e) {
-    error_log("Error en update_phone: " . $e->getMessage());
-    sendJsonResponse(false, 'Error: ' . $e->getMessage());
+    sendJsonResponse(true, 'Teléfono actualizado.', ['user' => $updated]);
+} catch (Throwable $error) {
+    error_log('VIAX native phone update: ' . get_class($error));
+    sendJsonResponse(false, 'No se pudo guardar el teléfono.', [], 503);
 }

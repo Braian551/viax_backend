@@ -2,9 +2,9 @@
 
 final class GoogleWebAccounts
 {
-    private const PROFILE = 'id, uuid, nombre, apellido, email, telefono, tipo_usuario, empresa_id, status, es_activo';
+    private const PROFILE = 'id, uuid, nombre, apellido, email, telefono, tipo_usuario, empresa_id, foto_perfil, es_verificado, status, es_activo';
 
-    public static function resolve(PDO $db, array $verified): array
+    public static function resolve(PDO $db, array $verified, bool $allowRegistration = true): array
     {
         $email = strtolower($verified['email']);
         $lookup = $db->prepare('SELECT ' . self::PROFILE . ' FROM usuarios WHERE google_id = ?');
@@ -26,6 +26,10 @@ final class GoogleWebAccounts
                 }
             }
             return $user;
+        }
+
+        if (!$allowRegistration) {
+            throw new DomainException('Esta cuenta de Google no está vinculada a VIAX. Usa tu método de acceso habitual o regístrate desde viaxcol.online.');
         }
 
         if (!str_ends_with($email, '@gmail.com') && empty($verified['hd'])) {

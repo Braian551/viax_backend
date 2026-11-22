@@ -35,13 +35,6 @@ try {
     );
     $rows->execute($params);
     $companies = $rows->fetchAll(PDO::FETCH_ASSOC);
-    foreach ($companies as &$company) {
-        $logo = $company['logo_url'];
-        if (is_string($logo) && $logo !== '' && !str_starts_with($logo, 'https://')) {
-            $company['logo_url'] = '/api/r2_proxy.php?key=' . rawurlencode($logo);
-        }
-    }
-    unset($company);
     echo json_encode([
         'success' => true,
         'empresas' => $companies,

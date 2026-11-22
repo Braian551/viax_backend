@@ -19,6 +19,14 @@ try {
 
 $healthy = !in_array(false, $checks, true);
 http_response_code($healthy ? 200 : 503);
+// Older app builds call this exact alias; it exposes only a database status.
+if (parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH) === '/api/scripts/verify_system_json.php') {
+    echo json_encode([
+        'status' => $healthy ? 'success' : 'error',
+        'database' => $checks['postgresql'] ? 'connected' : 'unavailable',
+    ]);
+    return;
+}
 echo json_encode([
     'status' => $healthy ? 'ok' : 'error',
     'checks' => $checks,

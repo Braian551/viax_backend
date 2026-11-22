@@ -109,11 +109,14 @@ class Auth
             'revoked' => false,
         ];
 
-        Cache::set(
+        if (!Cache::set(
             'user_refresh_session:' . $session['refresh_token'],
             (string)json_encode($refreshPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
             $refreshTtl
-        );
+        )) {
+            Cache::delete('user_session:' . $token);
+            return false;
+        }
 
         return true;
     }
@@ -158,6 +161,7 @@ class Auth
         self::revokeSession($oldAccessToken, 'rotated');
 
         $sessionData = $oldSession;
+        unset($sessionData['issued_at'], $sessionData['expires_at']);
         $sessionData['refresh_token'] = $newRefreshToken;
         $sessionData['session_version'] = ((int)($oldSession['session_version'] ?? 1)) + 1;
         $sessionData['rotated_at'] = time();

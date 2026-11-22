@@ -12,6 +12,7 @@ module.exports = {
 
   realtimeEnabled: process.env.REALTIME_ENABLED !== 'false',
 
+  host: process.env.WS_HOST || '0.0.0.0',
   port: parseInt(process.env.WS_PORT || '9100', 10),
 
   ssl: {
@@ -22,7 +23,8 @@ module.exports = {
 
   redis: {
     host: process.env.REDIS_HOST || '127.0.0.1',
-    port: parseInt(process.env.REDIS_PORT || '6379', 10),
+    host: process.env.WS_HOST || '0.0.0.0',
+  port: parseInt(process.env.REDIS_PORT || '6379', 10),
     password: process.env.REDIS_PASSWORD || undefined,
     // Prefijo para buscar sesiones de usuario en Redis
     sessionPrefix: 'user_session:',

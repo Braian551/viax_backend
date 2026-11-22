@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 const http = require('http');
 const url = require('url');
@@ -345,7 +345,7 @@ const wss = new WebSocket.Server({ noServer: true, perMessageDeflate: false });
 
 httpServer.on('upgrade', async (req, socket, head) => {
   if (!config.realtimeEnabled) {
-    socket.write('HTTP/1.1 503 Service Unavailable\\r\\n\\r\\n');
+    socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
     socket.destroy();
     return;
   }
@@ -358,7 +358,7 @@ httpServer.on('upgrade', async (req, socket, head) => {
 
   const token = parsed.query?.token;
   if (!token || typeof token !== 'string') {
-    socket.write('HTTP/1.1 401 Unauthorized\\r\\n\\r\\n');
+    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
     metrics.increment('auth.rejected_no_token');
     return;
@@ -367,7 +367,7 @@ httpServer.on('upgrade', async (req, socket, head) => {
   try {
     const session = await auth.validateToken(token);
     if (!session) {
-      socket.write('HTTP/1.1 401 Unauthorized\\r\\n\\r\\n');
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       metrics.increment('auth.rejected_invalid');
       return;
@@ -391,7 +391,7 @@ httpServer.on('upgrade', async (req, socket, head) => {
     });
   } catch (err) {
     logger.error('[AUTH] Error validando token:', err.message);
-    socket.write('HTTP/1.1 500 Internal Server Error\\r\\n\\r\\n');
+    socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
     socket.destroy();
     metrics.increment('auth.error');
   }
@@ -470,7 +470,7 @@ async function start() {
     }
   }, 60_000);
 
-  httpServer.listen(config.port, () => {
+  httpServer.listen(config.port, config.host, () => {
     logger.info(`[GATEWAY] Realtime Gateway escuchando en puerto ${config.port} (engine=ws${uWS ? '+uWS-optional' : ''})`);
   });
 }

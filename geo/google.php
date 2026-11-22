@@ -94,20 +94,32 @@ try {
                 break;
             }
             if (!$validPair($coordinates)) sendJsonResponse(false, 'Coordenadas inválidas.', [], 400);
-            $query = ['language' => $lang, 'key' => $key];
-            $path = match ($operation) {
-                'reverse' => '/maps/api/geocode/json',
-                'nearby' => '/maps/api/place/nearbysearch/json',
-                'text' => '/maps/api/place/textsearch/json',
-                'landmark' => '/maps/api/place/findplacefromtext/json',
-            };
-            $query += match ($operation) {
-                'reverse' => ['latlng' => $coordinates] + (!empty($params['result_type']) ? ['result_type' => 'locality|administrative_area_level_2'] : []),
-                'nearby' => ['location' => $coordinates, 'radius' => 120],
-                'landmark' => ['input' => $coordinates, 'inputtype' => 'textquery', 'fields' => 'name,geometry,types,place_id'],
-                'text' => ['location' => $coordinates, 'radius' => 250, 'query' => is_string($params['query'] ?? null) ? mb_substr($params['query'], 0, 120) : ''],
-            };
-            $url = 'https://maps.googleapis.com' . $path . '?' . http_build_query($query);
+            if ($operation === 'reverse') {
+                $query = ['language' => $lang, 'key' => $key, 'latlng' => $coordinates];
+                if (!empty($params['result_type'])) {
+                    $query['result_type'] = 'locality|administrative_area_level_2';
+                }
+                $url = 'https://maps.googleapis.com/maps/api/geocode/json?' . http_build_query($query);
+                break;
+            }
+
+            [$latitude, $longitude] = array_map('floatval', explode(',', $coordinates));
+            $body = ['languageCode' => $lang];
+            $circle = ['center' => compact('latitude', 'longitude'), 'radius' => 120];
+            if ($operation === 'text') {
+                $url = 'https://places.googleapis.com/v1/places:searchText';
+                $input = $params['query'] ?? '';
+                if (!is_string($input) || trim($input) === '' || mb_strlen($input) > 120) {
+                    sendJsonResponse(false, 'Texto de búsqueda inválido.', [], 400);
+                }
+                $body += ['textQuery' => $input, 'locationBias' => ['circle' => $circle]];
+            } else {
+                $url = 'https://places.googleapis.com/v1/places:searchNearby';
+                $body += ['locationRestriction' => ['circle' => $circle], 'rankPreference' => 'DISTANCE'];
+            }
+            $headers[] = 'Content-Type: application/json';
+            $headers[] = 'X-Goog-Api-Key: ' . $key;
+            $headers[] = 'X-Goog-FieldMask: places.id,places.displayName,places.location,places.types';
             break;
         default:
             sendJsonResponse(false, 'Operación de ubicación inválida.', [], 400);
@@ -128,6 +140,19 @@ try {
         || !in_array($response['status'] ?? 'OK', ['OK', 'ZERO_RESULTS'], true)) {
         error_log('VIAX Google location upstream failed: ' . $operation . ' HTTP ' . $http);
         sendJsonResponse(false, 'No pudimos consultar Google Maps.', [], 502);
+    }
+    if (in_array($operation, ['nearby', 'landmark', 'text'], true)) {
+        $places = array_map(static fn (array $place): array => [
+            'place_id' => $place['id'] ?? null,
+            'name' => $place['displayName']['text'] ?? '',
+            'types' => $place['types'] ?? [],
+            'geometry' => ['location' => [
+                'lat' => $place['location']['latitude'] ?? null,
+                'lng' => $place['location']['longitude'] ?? null,
+            ]],
+        ], $response['places'] ?? []);
+        $resultKey = $operation === 'landmark' ? 'candidates' : 'results';
+        $response = ['status' => $places ? 'OK' : 'ZERO_RESULTS', $resultKey => $places];
     }
     echo json_encode((object)$response, JSON_THROW_ON_ERROR);
 } catch (Throwable $error) {

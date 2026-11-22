@@ -2,7 +2,7 @@
 -- Migration 049: Ride Engine indexes + archivado de tracking
 -- ============================================================================
 
--- Índices de viajes (tabla de negocio actual en Viax: solicitudes_servicio)
+-- ??ndices de viajes (tabla de negocio actual en Viax: solicitudes_servicio)
 CREATE INDEX IF NOT EXISTS idx_solicitudes_estado
     ON public.solicitudes_servicio(estado);
 
@@ -13,11 +13,11 @@ CREATE INDEX IF NOT EXISTS idx_solicitudes_conductor
 CREATE INDEX IF NOT EXISTS idx_solicitudes_cliente
     ON public.solicitudes_servicio(cliente_id);
 
--- Índice de tracking por viaje/tiempo
+-- ??ndice de tracking por viaje/tiempo
 CREATE INDEX IF NOT EXISTS idx_trip_tracking_points_trip_ts
     ON public.trip_tracking_points(trip_id, "timestamp" DESC);
 
--- Tabla de archivo para retención > 30 días
+-- Tabla de archivo para retenci??n > 30 d??as
 CREATE TABLE IF NOT EXISTS public.trip_tracking_points_archive (
     id BIGINT PRIMARY KEY,
     trip_id BIGINT NOT NULL,

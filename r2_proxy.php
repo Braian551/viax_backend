@@ -18,12 +18,13 @@ if (!preg_match($publicImage, $key)) {
 try {
     $file = (new R2Service())->getFile($key);
     $safeTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif'];
-    if (!$file || !in_array($file['type'], $safeTypes, true)) {
+    $type = $file ? (new finfo(FILEINFO_MIME_TYPE))->buffer($file['content']) : false;
+    if (!in_array($type, $safeTypes, true)) {
         http_response_code(404);
         exit;
     }
 
-    header('Content-Type: ' . $file['type']);
+    header('Content-Type: ' . $type);
     header('X-Content-Type-Options: nosniff');
     header('Cache-Control: public, max-age=86400');
     echo $file['content'];

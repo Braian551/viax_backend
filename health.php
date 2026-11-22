@@ -1,22 +1,25 @@
 <?php
-// Script simple de verificación para producción VPS
+
 header('Content-Type: application/json');
+header('Cache-Control: no-store');
+
+$checks = ['postgresql' => false, 'redis' => false];
+try {
+    require_once __DIR__ . '/config/app.php';
+    $checks['postgresql'] = (int)(new Database())->getConnection()->query('SELECT 1')->fetchColumn() === 1;
+} catch (Throwable $error) {
+    error_log('VIAX PostgreSQL health check failed: ' . get_class($error));
+}
 
 try {
-    $response = [
-        'status' => 'ok',
-        'message' => 'Backend is working',
-        'php_version' => phpversion(),
-        'timestamp' => date('Y-m-d H:i:s'),
-        'server' => $_SERVER['SERVER_SOFTWARE'] ?? 'unknown'
-    ];
-
-    echo json_encode($response);
-} catch (Exception $e) {
-    http_response_code(500);
-    echo json_encode([
-        'status' => 'error',
-        'message' => $e->getMessage()
-    ]);
+    $checks['redis'] = Cache::redis()?->ping() === true;
+} catch (Throwable $error) {
+    error_log('VIAX Redis health check failed: ' . get_class($error));
 }
-?>
+
+$healthy = !in_array(false, $checks, true);
+http_response_code($healthy ? 200 : 503);
+echo json_encode([
+    'status' => $healthy ? 'ok' : 'error',
+    'checks' => $checks,
+]);

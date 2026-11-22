@@ -120,7 +120,7 @@ function getMigrationRecord(PDO $db, string $filename): ?array
     ];
 }
 
-function shouldExecuteMigration(string $filename, string $currentChecksum, ?array $record): bool
+function shouldExecuteMigration(string $filename, string $currentChecksum, string $sql, ?array $record): bool
 {
     if ($record === null) {
         return true;
@@ -128,7 +128,12 @@ function shouldExecuteMigration(string $filename, string $currentChecksum, ?arra
 
     $storedChecksum = (string)($record['checksum'] ?? '');
 
-    if ($storedChecksum !== '' && !hash_equals($storedChecksum, $currentChecksum)) {
+    $lfSql = str_replace("\r\n", "\n", $sql);
+    $crlfSql = str_replace("\n", "\r\n", $lfSql);
+    if ($storedChecksum !== ''
+        && !hash_equals($storedChecksum, $currentChecksum)
+        && !hash_equals($storedChecksum, hash('sha256', $lfSql))
+        && !hash_equals($storedChecksum, hash('sha256', $crlfSql))) {
         throw new RuntimeException(
             "Migration '$filename' was modified after execution. " .
             "Stored checksum: $storedChecksum | Current checksum: $currentChecksum"
@@ -247,7 +252,7 @@ function runMigrations(): int
                 continue;
             }
 
-            if (!shouldExecuteMigration($filename, $checksum, $record)) {
+            if (!shouldExecuteMigration($filename, $checksum, $sql, $record)) {
                 $status = (string)($record['status'] ?? 'applied');
                 echo "[SKIP] $filename (ya ejecutada, estado=$status)\n";
                 continue;

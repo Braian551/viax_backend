@@ -26,7 +26,12 @@ try {
     $config = require __DIR__ . '/../../config/google_oauth.php';
     try {
         // The Flutter Google SDK requests the Web client ID as serverClientId.
-        $claims = GoogleWebIdentity::verify($credential, $config['web']['client_id'], false, $config['mobile']['client_id']);
+        $claims = GoogleWebIdentity::verify(
+            $credential,
+            $config['web']['client_id'],
+            false,
+            $config['android_client_ids']
+        );
     } catch (UnexpectedValueException | InvalidArgumentException | DomainException $error) {
         sendJsonResponse(false, 'El ID token de Google es inválido o venció.', [], 401, 'INVALID_GOOGLE_TOKEN');
     }

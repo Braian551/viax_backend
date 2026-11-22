@@ -21,6 +21,33 @@ if (GoogleWebIdentity::verifyWithKeys($valid, 'web-client', $set)['sub'] !== '12
     throw new RuntimeException('Valid fixture verification failed.');
 }
 
+$config = require __DIR__ . '/../config/google_oauth.php';
+$webClientId = $config['web']['client_id'];
+$androidClientIds = $config['android_client_ids'];
+if (count($androidClientIds) < 2) {
+    throw new RuntimeException('Expected multiple registered Android clients.');
+}
+$native = array_replace($expected, ['aud' => $webClientId]);
+unset($native['nonce']);
+foreach ($androidClientIds as $presenter) {
+    $token = JWT::encode(array_replace($native, ['azp' => $presenter]), $key, 'RS256', 'fixture');
+    GoogleWebIdentity::verifyWithKeys($token, $webClientId, $set, false, $androidClientIds);
+}
+foreach ([
+    'legacy Android package' => ['azp' => $config['mobile']['client_id']],
+    'unknown presenter' => ['azp' => 'unregistered-android-client'],
+    'Android audience' => ['azp' => $androidClientIds[0], 'aud' => $androidClientIds[0]],
+] as $scenario => $override) {
+    $token = JWT::encode(array_replace($native, $override), $key, 'RS256', 'fixture');
+    try {
+        GoogleWebIdentity::verifyWithKeys($token, $webClientId, $set, false, $androidClientIds);
+    } catch (UnexpectedValueException $error) {
+        echo "Rejected {$scenario}\n";
+        continue;
+    }
+    throw new RuntimeException("Accepted invalid {$scenario}");
+}
+
 $rejections = [
     'audience' => ['aud' => 'different-client'],
     'authorized party' => ['azp' => 'different-client'],

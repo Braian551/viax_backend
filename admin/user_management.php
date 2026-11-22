@@ -4,7 +4,7 @@
  * CRUD de usuarios para administradores
  */
 
-require_once '../config/config.php';
+require_once __DIR__ . '/../middleware/SessionAccess.php';
 
 $viaxOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
 $viaxAllowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
@@ -21,85 +21,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 try {
-    $database = new Database();
-    $db = $database->getConnection();
-    $method = $_SERVER['REQUEST_METHOD'];
-
-    // Obtener datos según el método
-    if ($method === 'GET') {
-        $input = $_GET;
-    } else {
-        $input = getJsonInput();
+    $db = (new Database())->getConnection();
+    SessionAccess::requireAdmin($db);
+    if (Request::method() !== 'GET') {
+        header('Allow: GET');
+        sendJsonResponse(false, 'Operación no disponible.', [], 405);
     }
+    $input = $_GET;
 
-    // Log para debug
-    error_log("user_management.php - Método: $method");
-    error_log("user_management.php - Input: " . json_encode($input));
-
-    // Verificar autenticación de administrador
-    if (empty($input['admin_id'])) {
-        error_log("user_management.php - Error: admin_id vacío");
-        sendJsonResponse(false, 'ID de administrador requerido');
-        exit();
-    }
-
-    $checkAdmin = "SELECT tipo_usuario FROM usuarios WHERE id = ? AND tipo_usuario = 'administrador'";
-    $stmtCheck = $db->prepare($checkAdmin);
-    $stmtCheck->execute([$input['admin_id']]);
-    
-    $adminUser = $stmtCheck->fetch(PDO::FETCH_ASSOC);
-    
-    if (!$adminUser) {
-        error_log("user_management.php - Error: Usuario no es administrador");
-        sendJsonResponse(false, 'Acceso denegado. Usuario no es administrador.');
-        exit();
-    }
-
-    error_log("user_management.php - Admin verificado, ejecutando método: $method");
-
-    switch ($method) {
-        case 'GET':
-            handleGetUsers($db, $input);
-            break;
-        
-        case 'POST':
-            handleCreateUser($db, $input);
-            break;
-        
-        case 'PUT':
-            handleUpdateUser($db, $input);
-            break;
-        
-        case 'DELETE':
-            handleDeleteUser($db, $input);
-            break;
-        
-        default:
-            sendJsonResponse(false, 'Método no permitido');
-            exit();
-    }
-
-} catch (Exception $e) {
-    error_log("Error en user_management: " . $e->getMessage());
-    error_log("Stack trace: " . $e->getTraceAsString());
-    http_response_code(500);
-    sendJsonResponse(false, 'Error del servidor: ' . $e->getMessage());
-    exit();
+    handleGetUsers($db, $input);
+} catch (Throwable $error) {
+    error_log('VIAX users listing: ' . get_class($error));
+    sendJsonResponse(false, 'No se pudo cargar la lista de usuarios.', [], 500);
 }
 
 function handleGetUsers($db, $input) {
     try {
-        error_log("handleGetUsers - Iniciando...");
-        
-        $page = isset($input['page']) ? (int)$input['page'] : 1;
-        $perPage = isset($input['per_page']) ? (int)$input['per_page'] : 20;
+
+
+        $page = isset($input['page']) ? max(1, min(10000, (int)$input['page'])) : 1;
+        $perPage = isset($input['per_page']) ? max(1, min(100, (int)$input['per_page'])) : 20;
         $offset = ($page - 1) * $perPage;
-        
+
         $search = isset($input['search']) ? '%' . $input['search'] . '%' : null;
         $tipoUsuario = isset($input['tipo_usuario']) ? $input['tipo_usuario'] : null;
         $esActivo = isset($input['es_activo']) ? (int)$input['es_activo'] : null;
 
-        error_log("handleGetUsers - Filtros: search=$search, tipo=$tipoUsuario, activo=$esActivo");
 
         // Construir query con filtros
         $whereConditions = [];
@@ -127,14 +74,13 @@ function handleGetUsers($db, $input) {
 
         // Contar total
         $countQuery = "SELECT COUNT(*) as total FROM usuarios u $whereClause";
-        error_log("handleGetUsers - Query count: $countQuery");
-        error_log("handleGetUsers - Params count: " . json_encode($params));
-        
+
+
+
         $stmtCount = $db->prepare($countQuery);
         $stmtCount->execute($params);
         $total = $stmtCount->fetch(PDO::FETCH_ASSOC)['total'];
-        
-        error_log("handleGetUsers - Total usuarios: $total");
+
 
         // Obtener usuarios
         // Update query to include company info
@@ -148,17 +94,15 @@ function handleGetUsers($db, $input) {
         $whereClause
         ORDER BY u.fecha_registro DESC
         LIMIT $perPage OFFSET $offset";
-        
-        error_log("handleGetUsers - Query: $query");
-        error_log("handleGetUsers - Params: " . json_encode($params));
-        
+
+
+
         $stmt = $db->prepare($query);
         $stmt->execute($params);
         $usuarios = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        
-        error_log("handleGetUsers - Usuarios obtenidos: " . count($usuarios));
+
         if (!empty($usuarios)) {
-            error_log("handleGetUsers - Keys primer usuario: " . json_encode(array_keys($usuarios[0])));
+
         }
 
         sendJsonResponse(true, 'Usuarios obtenidos exitosamente', [
@@ -170,11 +114,11 @@ function handleGetUsers($db, $input) {
                 'total_pages' => ceil($total / $perPage)
             ]
         ]);
-        
+
     } catch (Exception $e) {
-        error_log("handleGetUsers - Error: " . $e->getMessage());
-        error_log("handleGetUsers - Stack: " . $e->getTraceAsString());
-        sendJsonResponse(false, 'Error al obtener usuarios: ' . $e->getMessage());
+
+
+        throw $e;
     }
 }
 

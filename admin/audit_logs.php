@@ -4,7 +4,7 @@
  * Obtiene logs de auditoría del sistema
  */
 
-require_once '../config/config.php';
+require_once __DIR__ . '/../middleware/SessionAccess.php';
 
 $viaxOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
 $viaxAllowedOrigins = ['https://viaxcol.online', 'https://www.viaxcol.online'];
@@ -21,27 +21,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 try {
+    $db = (new Database())->getConnection();
+    SessionAccess::requireAdmin($db);
+    if (Request::method() !== 'GET') {
+        header('Allow: GET');
+        sendJsonResponse(false, 'Operación no disponible.', [], 405);
+    }
     $input = $_GET;
 
-    // Verificar autenticación de administrador
-    if (empty($input['admin_id'])) {
-        sendJsonResponse(false, 'ID de administrador requerido');
-    }
-
-    $database = new Database();
-    $db = $database->getConnection();
-
-    $checkAdmin = "SELECT tipo_usuario FROM usuarios WHERE id = ? AND tipo_usuario = 'administrador'";
-    $stmtCheck = $db->prepare($checkAdmin);
-    $stmtCheck->execute([$input['admin_id']]);
-    
-    if (!$stmtCheck->fetch()) {
-        sendJsonResponse(false, 'Acceso denegado');
-    }
-
     // Parámetros de paginación y filtros
-    $page = isset($input['page']) ? (int)$input['page'] : 1;
-    $perPage = isset($input['per_page']) ? (int)$input['per_page'] : 50;
+    $page = isset($input['page']) ? max(1, min(10000, (int)$input['page'])) : 1;
+    $perPage = isset($input['per_page']) ? max(1, min(100, (int)$input['per_page'])) : 50;
     $offset = ($page - 1) * $perPage;
     
     $accion = isset($input['accion']) ? $input['accion'] : null;
@@ -135,6 +125,5 @@ try {
 
 } catch (Exception $e) {
     error_log("Error en audit_logs: " . $e->getMessage());
-    http_response_code(500);
-    sendJsonResponse(false, 'Error al obtener logs: ' . $e->getMessage());
+    sendJsonResponse(false, 'No se pudo cargar la auditoría.', [], 500);
 }

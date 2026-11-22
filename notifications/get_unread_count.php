@@ -5,7 +5,6 @@
  * Endpoint optimizado para llamadas frecuentes
  * 
  * Parámetros GET:
- * - usuario_id: (requerido) ID del usuario
  */
 
 $viaxOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
@@ -26,22 +25,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
-require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../middleware/SessionAccess.php';
+
+if (Request::method() !== 'GET') {
+    header('Allow: GET');
+    sendJsonResponse(false, 'Método no permitido.', [], 405);
+}
 
 try {
     $database = new Database();
     $conn = $database->getConnection();
     
-    $usuario_id = isset($_GET['usuario_id']) ? intval($_GET['usuario_id']) : 0;
+    $user = SessionAccess::requireUser($conn);
+    $usuario_id = (int)$user['id'];
+    SessionAccess::requireOwner($_GET, $usuario_id);
     
-    if ($usuario_id <= 0) {
-        http_response_code(400);
-        echo json_encode([
-            'success' => false,
-            'error' => 'usuario_id es requerido'
-        ]);
-        exit;
-    }
     
     // Usar la función optimizada de la BD
     $query = "SELECT contar_notificaciones_no_leidas(:usuario_id) as count";
@@ -66,7 +64,7 @@ try {
     http_response_code(500);
     echo json_encode([
         'success' => false,
-        'error' => $e->getMessage(),
+        'error' => 'No se pudo gestionar la notificación',
         'count' => 0
     ]);
 }

@@ -15,9 +15,11 @@ class AuthMiddleware
         }
 
         $session = Auth::getSessionFromCache($token);
-        $identity = is_array($session) && isset($session['user_id'])
-            ? (string)$session['user_id']
-            : (string)($_SERVER['REMOTE_ADDR'] ?? 'unknown');
+        if (!$session || empty($session['user_id']) || !empty($session['web_only'])) {
+            Response::error('No autorizado', 401, 'UNAUTHORIZED');
+            return;
+        }
+        $identity = (string)$session['user_id'];
 
         if (class_exists('RateLimiter') && !RateLimiter::check($identity, 100, 60, 'auth_middleware')) {
             Response::error('Demasiadas solicitudes', 429, 'RATE_LIMIT_EXCEEDED');

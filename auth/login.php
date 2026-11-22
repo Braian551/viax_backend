@@ -1,9 +1,17 @@
 <?php
-require_once '../config/config.php';
+require_once __DIR__ . '/../config/config.php';
 require_once __DIR__ . '/../core/Auth.php';
 
 try {
     $input = getJsonInput();
+    $web = defined('VIAX_WEB_LOGIN');
+    if ($web) {
+        if (!is_string($input['email'] ?? null) || !is_string($input['password'] ?? null)
+            || strlen($input['email']) > 254 || strlen($input['password']) > 4096) {
+            sendJsonResponse(false, 'Correo o contraseña inválidos.', [], 400, 'VALIDATION_ERROR');
+        }
+        unset($input['device_uuid']);
+    }
 
     if (empty($input['email']) || empty($input['password'])) {
         sendJsonResponse(false, 'Email y password son requeridos', [], 400, 'VALIDATION_ERROR');
@@ -23,6 +31,11 @@ try {
     $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$user) {
+        if ($web) {
+            // Keep the same response and perform a password check even for unknown accounts.
+            password_verify($password, '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2uheWG/igi.');
+            sendJsonResponse(false, 'Correo o contraseña incorrectos.', [], 401, 'INVALID_CREDENTIALS');
+        }
         sendJsonResponse(false, 'Usuario no encontrado');
     }
 
@@ -74,6 +87,9 @@ try {
 
     // Verificar contraseña
     if (!password_verify($password, $user['hash_contrasena'])) {
+        if ($web) {
+            sendJsonResponse(false, 'Correo o contraseña incorrectos.', [], 401, 'INVALID_CREDENTIALS');
+        }
         // Incrementar intentos fallidos si hay deviceUuid
         if ($deviceUuid && isset($device['id'])) {
             $failAttempts = (int)$device['fail_attempts'] + 1;
@@ -160,6 +176,13 @@ try {
     } catch (Exception $e) {
         // No detener el login si falla el log
         error_log("Error al registrar log de auditoría: " . $e->getMessage());
+    }
+
+    if ($web) {
+        if (!SessionAccess::createWebSession((int)$user['id'])) {
+            sendJsonResponse(false, 'El servicio de sesión no está disponible.', [], 503, 'SESSION_UNAVAILABLE');
+        }
+        sendJsonResponse(true, 'Login exitoso', ['user' => $user]);
     }
 
     $authData = ['user' => $user];

@@ -4,7 +4,6 @@
  * Actualiza la configuración de notificaciones de un usuario
  * 
  * POST Body (JSON):
- * - usuario_id: (requerido) ID del usuario
  * - push_enabled: Notificaciones push habilitadas
  * - email_enabled: Notificaciones por email habilitadas
  * - sms_enabled: Notificaciones SMS habilitadas
@@ -38,25 +37,19 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST' && $_SERVER['REQUEST_METHOD'] !== 'PUT
     exit();
 }
 
-require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../middleware/SessionAccess.php';
 
 try {
     $database = new Database();
     $conn = $database->getConnection();
     
     // Obtener datos del body
-    $input = json_decode(file_get_contents('php://input'), true);
+    $input = getJsonInput();
     
-    $usuario_id = isset($input['usuario_id']) ? intval($input['usuario_id']) : 0;
+    $user = SessionAccess::requireUser($conn);
+    $usuario_id = (int)$user['id'];
+    SessionAccess::requireOwner($input, $usuario_id);
     
-    if ($usuario_id <= 0) {
-        http_response_code(400);
-        echo json_encode([
-            'success' => false,
-            'error' => 'usuario_id es requerido'
-        ]);
-        exit;
-    }
     
     // Verificar si existe configuración
     $checkQuery = "SELECT id FROM configuracion_notificaciones_usuario WHERE usuario_id = :usuario_id";
@@ -160,13 +153,12 @@ try {
     http_response_code(500);
     echo json_encode([
         'success' => false,
-        'error' => 'Error de base de datos',
-        'details' => $e->getMessage()
+        'error' => 'Error de base de datos'
     ]);
 } catch (Exception $e) {
     http_response_code(500);
     echo json_encode([
         'success' => false,
-        'error' => $e->getMessage()
+        'error' => 'No se pudo gestionar la notificación'
     ]);
 }

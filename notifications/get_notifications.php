@@ -4,7 +4,6 @@
  * Obtiene las notificaciones de un usuario con paginación y filtros
  * 
  * Parámetros GET:
- * - usuario_id: (requerido) ID del usuario
  * - page: Número de página (default: 1)
  * - limit: Cantidad por página (default: 20, max: 50)
  * - solo_no_leidas: Filtrar solo no leídas (default: false)
@@ -26,27 +25,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
-require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../middleware/SessionAccess.php';
+
+if (Request::method() !== 'GET') {
+    header('Allow: GET');
+    sendJsonResponse(false, 'Método no permitido.', [], 405);
+}
 
 try {
     $database = new Database();
     $conn = $database->getConnection();
     
     // Obtener parámetros
-    $usuario_id = isset($_GET['usuario_id']) ? intval($_GET['usuario_id']) : 0;
+    $user = SessionAccess::requireUser($conn);
+    $usuario_id = (int)$user['id'];
+    SessionAccess::requireOwner($_GET, $usuario_id);
     $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
     $limit = isset($_GET['limit']) ? min(50, max(1, intval($_GET['limit']))) : 20;
     $solo_no_leidas = isset($_GET['solo_no_leidas']) && $_GET['solo_no_leidas'] === 'true';
-    $tipo = isset($_GET['tipo']) ? trim($_GET['tipo']) : null;
+    $tipo = isset($_GET['tipo']) ? trim((string)$_GET['tipo']) : null;
     
-    if ($usuario_id <= 0) {
-        http_response_code(400);
-        echo json_encode([
-            'success' => false,
-            'error' => 'usuario_id es requerido'
-        ]);
-        exit;
-    }
     
     $offset = ($page - 1) * $limit;
     
@@ -141,13 +139,12 @@ try {
     http_response_code(500);
     echo json_encode([
         'success' => false,
-        'error' => 'Error de base de datos',
-        'details' => $e->getMessage()
+        'error' => 'Error de base de datos'
     ]);
 } catch (Exception $e) {
     http_response_code(500);
     echo json_encode([
         'success' => false,
-        'error' => $e->getMessage()
+        'error' => 'No se pudo gestionar la notificación'
     ]);
 }

@@ -6,6 +6,8 @@
  * los métodos fallan en silencio controlado para no romper el flujo principal.
  */
 
+require_once __DIR__ . '/../config/redis.php';
+
 class Cache
 {
     private static ?object $redis = null;
@@ -23,12 +25,10 @@ class Cache
             return null;
         }
 
-        $cfg = function_exists('getRedisConfig') ? getRedisConfig() : [
-            'host' => '127.0.0.1',
-            'port' => 6379,
-            'timeout' => 0.15,
-            'password' => null,
-        ];
+        $cfg = getRedisConfig();
+        if ($cfg === null) {
+            return null;
+        }
 
         try {
             $redisClass = 'Redis';

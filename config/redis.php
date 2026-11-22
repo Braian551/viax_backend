@@ -1,33 +1,27 @@
 <?php
-/**
- * Configuración central de Redis para el backend.
- *
- * Esta capa permite activar Redis como cache sin volverlo obligatorio.
- * Si Redis no está instalado o falla, la aplicación sigue operando con BD.
- */
 
-if (!function_exists('getRedisConfig')) {
-    /**
-     * Obtiene la configuración de Redis desde variables de entorno.
-     *
-     * Variables soportadas:
-     * - REDIS_HOST (default: 127.0.0.1)
-     * - REDIS_PORT (default: 6379)
-     * - REDIS_TIMEOUT (default: 0.15 segundos)
-     * - REDIS_PASSWORD (opcional)
-     */
-    function getRedisConfig(): array
-    {
-        $host = getenv('REDIS_HOST') ?: '127.0.0.1';
-        $port = (int) (getenv('REDIS_PORT') ?: 6379);
-        $timeout = (float) (getenv('REDIS_TIMEOUT') ?: 0.15);
-        $password = getenv('REDIS_PASSWORD');
+require_once __DIR__ . '/bootstrap.php';
 
-        return [
-            'host' => $host,
-            'port' => $port,
-            'timeout' => $timeout,
-            'password' => $password !== false ? (string) $password : null,
-        ];
+/** Resolve Redis from the VIAX environment. Local defaults apply to development. */
+function getRedisConfig(): ?array
+{
+    $production = strtolower((string)env_value('APP_ENV', 'development')) === 'production';
+    $host = env_value('REDIS_HOST', $production ? null : '127.0.0.1');
+    $port = filter_var(
+        env_value('REDIS_PORT', $production ? null : '6379'),
+        FILTER_VALIDATE_INT,
+        ['options' => ['min_range' => 1, 'max_range' => 65535]]
+    );
+    $password = env_value('REDIS_PASSWORD');
+
+    if (!$host || $port === false || ($production && !$password)) {
+        return null;
     }
+
+    return [
+        'host' => (string)$host,
+        'port' => $port,
+        'timeout' => (float)env_value('REDIS_TIMEOUT', '0.15'),
+        'password' => $password === null ? null : (string)$password,
+    ];
 }

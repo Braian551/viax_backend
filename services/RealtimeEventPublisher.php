@@ -32,6 +32,8 @@
  * @author Viax Platform
  */
 
+require_once __DIR__ . '/../config/redis.php';
+
 class RealtimeEventPublisher
 {
     /** Prefijo de canal para el gateway */
@@ -296,13 +298,11 @@ class RealtimeEventPublisher
         }
 
         try {
-            $hostDefault = defined('REDIS_HOST') ? (string) constant('REDIS_HOST') : '127.0.0.1';
-            $portDefault = defined('REDIS_PORT') ? (int) constant('REDIS_PORT') : 6379;
-            $passwordDefault = defined('REDIS_PASSWORD') ? (string) constant('REDIS_PASSWORD') : null;
-
-            $host = getenv('REDIS_HOST') ?: $hostDefault;
-            $port = (int) (getenv('REDIS_PORT') ?: $portDefault);
-            $password = getenv('REDIS_PASSWORD') ?: $passwordDefault;
+            $config = getRedisConfig();
+            if ($config === null) {
+                self::$disabled = true;
+                return null;
+            }
 
             if (!class_exists('Redis')) {
                 self::$disabled = true;
@@ -312,15 +312,16 @@ class RealtimeEventPublisher
 
             $redisClass = 'Redis';
             $redis = new $redisClass();
-            $connected = $redis->connect($host, $port, 0.5); // timeout 500ms
+            $connected = $redis->connect($config['host'], $config['port'], 0.5); // timeout 500ms
 
             if (!$connected) {
                 self::$disabled = true;
                 return null;
             }
 
-            if ($password) {
-                $redis->auth($password);
+            if ($config['password'] !== null && !$redis->auth($config['password'])) {
+                self::$disabled = true;
+                return null;
             }
 
             self::$redis = $redis;

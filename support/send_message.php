@@ -37,21 +37,21 @@ try {
     $database = new Database();
     $conn = $database->getConnection();
     
-    $data = json_decode(file_get_contents("php://input"), true);
+    $data = getJsonInput();
     
     $ticket_id = isset($data['ticket_id']) ? intval($data['ticket_id']) : 0;
-    $usuario_id = supportResolveActorId($data);
+    $actor = supportRequireActor($conn);
+    $usuario_id = (int)$actor['id'];
     $mensaje = isset($data['mensaje']) ? trim($data['mensaje']) : '';
     
     if ($ticket_id <= 0 || $usuario_id <= 0) {
-        supportJsonError('ticket_id y usuario_id/agente_id son requeridos', 400);
+        supportJsonError('ticket_id es requerido', 400);
     }
     
     if (empty($mensaje)) {
         supportJsonError('mensaje es requerido', 400);
     }
 
-    $actor = supportGetActor($conn, $usuario_id);
     if (!$actor) {
         supportJsonError('Actor no encontrado', 404);
     }
@@ -203,6 +203,6 @@ try {
     http_response_code(500);
     echo json_encode([
         'success' => false,
-        'error' => 'Error al enviar mensaje: ' . $e->getMessage()
+        'error' => 'Error al enviar mensaje: ' . 'No se pudo completar la operación de soporte.'
     ]);
 }

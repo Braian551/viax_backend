@@ -25,15 +25,18 @@ require_once __DIR__ . '/_support_auth.php';
 try {
     $database = new Database();
     $conn = $database->getConnection();
-
-    $ticketId = isset($_GET['ticket_id']) ? (int) $_GET['ticket_id'] : 0;
-    $actorId = supportResolveActorId($_GET);
-
-    if ($ticketId <= 0 || $actorId <= 0) {
-        supportJsonError('ticket_id y agente_id son requeridos', 400);
+    if (!in_array(Request::method(), ['GET'], true)) {
+        supportJsonError('Método no permitido.', 405);
     }
 
-    $actor = supportGetActor($conn, $actorId);
+    $ticketId = isset($_GET['ticket_id']) ? (int) $_GET['ticket_id'] : 0;
+    $actor = supportRequireActor($conn);
+    $actorId = (int)$actor['id'];
+
+    if ($ticketId <= 0 || $actorId <= 0) {
+        supportJsonError('ticket_id es requerido', 400);
+    }
+
     if (!$actor || !$actor['es_agente_soporte']) {
         supportJsonError('Solo agentes de soporte pueden consultar historial', 403);
     }
@@ -72,6 +75,6 @@ try {
     http_response_code(500);
     echo json_encode([
         'success' => false,
-        'error' => 'Error al consultar historial: ' . $e->getMessage(),
+        'error' => 'Error al consultar historial: ' . 'No se pudo completar la operación de soporte.',
     ]);
 }

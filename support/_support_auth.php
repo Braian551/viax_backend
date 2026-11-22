@@ -1,6 +1,14 @@
 <?php
 
 require_once __DIR__ . '/../utils/NotificationHelper.php';
+require_once __DIR__ . '/../middleware/SessionAccess.php';
+
+function supportRequireActor(PDO $conn): array
+{
+    $actor = SessionAccess::requireUser($conn);
+    $actor['es_agente_soporte'] = supportIsAgentRole($actor['tipo_usuario']);
+    return $actor;
+}
 
 function supportJsonError(string $message, int $httpStatus = 400): void
 {
@@ -11,7 +19,7 @@ function supportJsonError(string $message, int $httpStatus = 400): void
 
 function supportIsAgentRole(?string $role): bool
 {
-    return in_array((string) $role, ['administrador', 'soporte_tecnico'], true);
+    return in_array((string) $role, ['admin', 'administrador', 'soporte_tecnico'], true);
 }
 
 function supportResolveActorId(array $payload): int
@@ -29,7 +37,7 @@ function supportGetActor(PDO $conn, int $actorId): ?array
         return null;
     }
 
-    $stmt = $conn->prepare('SELECT id, tipo_usuario, nombre, apellido, email FROM usuarios WHERE id = :id LIMIT 1');
+    $stmt = $conn->prepare("SELECT id, tipo_usuario, nombre, apellido, email FROM usuarios WHERE id = :id AND status = 'active' AND es_activo = 1 LIMIT 1");
     $stmt->bindValue(':id', $actorId, PDO::PARAM_INT);
     $stmt->execute();
 

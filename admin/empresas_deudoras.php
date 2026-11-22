@@ -25,11 +25,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
-require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../middleware/SessionAccess.php';
 
 try {
     $database = new Database();
     $db = $database->getConnection();
+    if (Request::method() !== 'GET') {
+        header('Allow: GET');
+        sendJsonResponse(false, 'Operación financiera no disponible.', [], 405);
+    }
+    SessionAccess::requireAdmin($db);
     // En COP los saldos se manejan como enteros; residuos sub-peso se tratan como cero.
     $debtEpsilon = 1.0;
 
@@ -103,5 +108,5 @@ try {
 
 } catch (Exception $e) {
     http_response_code(500);
-    echo json_encode(['success' => false, 'message' => 'Error del servidor: ' . $e->getMessage()]);
+    echo json_encode(['success' => false, 'message' => 'No se pudo cargar la información financiera.']);
 }

@@ -33,14 +33,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
-require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../middleware/SessionAccess.php';
 
 try {
     $database = new Database();
     $db = $database->getConnection();
+    if (Request::method() !== 'GET') {
+        header('Allow: GET');
+        sendJsonResponse(false, 'Operación financiera no disponible.', [], 405);
+    }
+    $user = SessionAccess::requireUser($db);
+    $isAdmin = in_array($user['tipo_usuario'], ['admin', 'administrador'], true);
+    if (!$isAdmin && ($user['tipo_usuario'] !== 'empresa' || empty($user['empresa_id']))) {
+        sendJsonResponse(false, 'Acceso denegado.', [], 403);
+    }
 
     $tipo = trim($_GET['tipo'] ?? '');
     $empresaId = isset($_GET['empresa_id']) ? intval($_GET['empresa_id']) : 0;
+    if (!$isAdmin) {
+        if ($empresaId > 0 && $empresaId !== (int)$user['empresa_id']) {
+            sendJsonResponse(false, 'Acceso denegado.', [], 403);
+        }
+        $empresaId = (int)$user['empresa_id'];
+    }
     $fechaDesde = trim($_GET['fecha_desde'] ?? '');
     $fechaHasta = trim($_GET['fecha_hasta'] ?? '');
     $limit = min(max(intval($_GET['limit'] ?? 50), 1), 200);
@@ -103,18 +118,17 @@ try {
     $facturas = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     // Agregar URL del PDF si existe
-    $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
 
-    $facturas = array_map(function ($f) use ($protocol, $host) {
+    $facturas = array_map(function ($f) use ($isAdmin) {
         $montoNormalizado = floatval($f['total'] ?? $f['subtotal'] ?? 0);
         $f['monto'] = $montoNormalizado;
 
-        if (!empty($f['pdf_ruta'])) {
-            $f['pdf_url'] = "$protocol://$host/r2_proxy.php?key=" . urlencode($f['pdf_ruta']);
+        if ($isAdmin && !empty($f['pdf_ruta'])) {
+            $f['pdf_url'] = "/api/admin/financial_document.php?tipo=factura&id=" . (int)$f['id'];
         } else {
             $f['pdf_url'] = null;
         }
+        unset($f['pdf_ruta']);
         return $f;
     }, $facturas);
 
@@ -145,5 +159,5 @@ try {
 
 } catch (Exception $e) {
     http_response_code(500);
-    echo json_encode(['success' => false, 'message' => 'Error del servidor: ' . $e->getMessage()]);
+    echo json_encode(['success' => false, 'message' => 'No se pudo cargar la información financiera.']);
 }

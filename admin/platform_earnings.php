@@ -28,13 +28,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit;
 }
 
-require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../middleware/SessionAccess.php';
 
 date_default_timezone_set('America/Bogota');
 
 try {
     $database = new Database();
     $db = $database->getConnection();
+    if (Request::method() !== 'GET') {
+        header('Allow: GET');
+        sendJsonResponse(false, 'Operación financiera no disponible.', [], 405);
+    }
+    SessionAccess::requireAdmin($db);
 
     $periodo = isset($_GET['periodo']) ? $_GET['periodo'] : 'mes';
     
@@ -204,7 +209,7 @@ try {
     http_response_code(500);
     echo json_encode([
         'success' => false,
-        'message' => 'Error del servidor: ' . $e->getMessage()
+        'message' => 'No se pudo cargar la información financiera.'
     ]);
 }
 ?>

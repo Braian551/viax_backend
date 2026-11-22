@@ -31,9 +31,11 @@ require_once __DIR__ . '/_support_auth.php';
 try {
     $database = new Database();
     $conn = $database->getConnection();
+    if (!in_array(Request::method(), ['GET'], true)) {
+        supportJsonError('Método no permitido.', 405);
+    }
 
     $usuario_id = isset($_GET['usuario_id']) ? intval($_GET['usuario_id']) : 0;
-    $agente_id = isset($_GET['agente_id']) ? intval($_GET['agente_id']) : 0;
     $estado = isset($_GET['estado']) ? trim($_GET['estado']) : null;
     $prioridad = isset($_GET['prioridad']) ? trim($_GET['prioridad']) : null;
     $asignado_a = isset($_GET['asignado_a']) ? trim((string) $_GET['asignado_a']) : null;
@@ -41,17 +43,14 @@ try {
     $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
     $limit = isset($_GET['limit']) ? min(50, max(1, intval($_GET['limit']))) : 20;
 
-    $actorId = $agente_id > 0 ? $agente_id : $usuario_id;
-    $actor = supportGetActor($conn, $actorId);
-    if (!$actor) {
-        supportJsonError('Actor no encontrado', 404);
+    $actor = supportRequireActor($conn);
+    $actorId = (int)$actor['id'];
+    $isAgent = (bool)$actor['es_agente_soporte'];
+    if (!$isAgent) {
+        SessionAccess::requireOwner($_GET, $actorId);
+        $usuario_id = $actorId;
     }
 
-    $isAgent = (bool) $actor['es_agente_soporte'];
-    if (!$isAgent && $usuario_id <= 0) {
-        supportJsonError('usuario_id es requerido', 400);
-    }
-    
     $offset = ($page - 1) * $limit;
 
     $conditions = [];
@@ -182,6 +181,6 @@ try {
     http_response_code(500);
     echo json_encode([
         'success' => false,
-        'error' => $e->getMessage()
+        'error' => 'No se pudo completar la operación de soporte.'
     ]);
 }

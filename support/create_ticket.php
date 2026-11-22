@@ -40,13 +40,18 @@ try {
     $conn = $database->getConnection();
     
     // Obtener datos del body
-    $data = json_decode(file_get_contents("php://input"), true);
+    $data = getJsonInput();
     
-    $usuario_id = isset($data['usuario_id']) ? intval($data['usuario_id']) : 0;
+    $actor = supportRequireActor($conn);
+    $usuario_id = (int)$actor['id'];
+    SessionAccess::requireOwner($data, $usuario_id);
     $categoria_id = isset($data['categoria_id']) ? intval($data['categoria_id']) : 0;
     $asunto = isset($data['asunto']) ? trim($data['asunto']) : '';
     $descripcion = isset($data['descripcion']) ? trim($data['descripcion']) : null;
     $viaje_id = isset($data['viaje_id']) ? intval($data['viaje_id']) : null;
+    if ($viaje_id !== null) {
+        supportJsonError('El vínculo con un viaje no está disponible para este formulario.', 403);
+    }
     $prioridad = isset($data['prioridad']) ? trim((string) $data['prioridad']) : 'normal';
     
     // Validaciones
@@ -67,7 +72,6 @@ try {
         supportJsonError('prioridad no válida', 400);
     }
 
-    $actor = supportGetActor($conn, $usuario_id);
     if (!$actor) {
         supportJsonError('Usuario no encontrado', 404);
     }
@@ -177,6 +181,6 @@ try {
     http_response_code(500);
     echo json_encode([
         'success' => false,
-        'error' => 'Error al crear ticket: ' . $e->getMessage()
+        'error' => 'Error al crear ticket: ' . 'No se pudo completar la operación de soporte.'
     ]);
 }

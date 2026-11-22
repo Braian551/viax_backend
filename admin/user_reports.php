@@ -22,7 +22,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
     exit();
 }
 
-require_once __DIR__ . '/../config/config.php';
+require_once __DIR__ . '/../middleware/SessionAccess.php';
 
 function isSupportAgentRole(?string $role): bool
 {
@@ -35,17 +35,9 @@ try {
     $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
     $input = $method === 'GET' ? $_GET : getJsonInput();
-    $actorId = isset($input['actor_id']) ? (int)$input['actor_id'] : 0;
-
-    if ($actorId <= 0) {
-        sendJsonResponse(false, 'actor_id es requerido', [], 400);
-    }
-
-    $stmtActor = $db->prepare('SELECT id, tipo_usuario, nombre, apellido FROM usuarios WHERE id = :id LIMIT 1');
-    $stmtActor->execute([':id' => $actorId]);
-    $actor = $stmtActor->fetch(PDO::FETCH_ASSOC);
-
-    if (!$actor || !isSupportAgentRole($actor['tipo_usuario'] ?? null)) {
+    $actor = SessionAccess::requireUser($db);
+    $actorId = (int)$actor['id'];
+    if (!isSupportAgentRole($actor['tipo_usuario'] ?? null)) {
         sendJsonResponse(false, 'Acceso denegado. Solo admin/soporte.', [], 403);
     }
 
@@ -199,5 +191,5 @@ try {
 
     sendJsonResponse(false, 'Método no permitido', [], 405);
 } catch (Exception $e) {
-    sendJsonResponse(false, 'Error: ' . $e->getMessage(), [], 500);
+    sendJsonResponse(false, 'No se pudo gestionar el reporte.', [], 500);
 }

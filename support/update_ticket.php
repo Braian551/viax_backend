@@ -32,22 +32,22 @@ require_once __DIR__ . '/_support_auth.php';
 try {
     $database = new Database();
     $conn = $database->getConnection();
-    $data = json_decode(file_get_contents('php://input'), true);
+    $data = getJsonInput();
     if (!is_array($data)) {
         supportJsonError('Payload JSON invalido', 400);
     }
 
     $ticketId = isset($data['ticket_id']) ? (int) $data['ticket_id'] : 0;
-    $actorId = supportResolveActorId($data);
+    $actor = supportRequireActor($conn);
+    $actorId = (int)$actor['id'];
     $newStatus = isset($data['estado']) ? trim((string) $data['estado']) : null;
     $newPriority = isset($data['prioridad']) ? trim((string) $data['prioridad']) : null;
     $assignedTo = array_key_exists('asignado_a', $data) ? $data['asignado_a'] : null;
 
     if ($ticketId <= 0 || $actorId <= 0) {
-        supportJsonError('ticket_id y agente_id son requeridos', 400);
+        supportJsonError('ticket_id es requerido', 400);
     }
 
-    $actor = supportGetActor($conn, $actorId);
     if (!$actor || !$actor['es_agente_soporte']) {
         supportJsonError('Solo agentes de soporte pueden gestionar tickets', 403);
     }
@@ -214,6 +214,6 @@ try {
     http_response_code(500);
     echo json_encode([
         'success' => false,
-        'error' => 'Error al actualizar ticket: ' . $e->getMessage(),
+        'error' => 'Error al actualizar ticket: ' . 'No se pudo completar la operación de soporte.',
     ]);
 }

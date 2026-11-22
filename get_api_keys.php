@@ -77,7 +77,8 @@ try {
         'data' => [
             'mapbox_public_token' => $mapboxToken,
             'tomtom_api_key' => $tomtomApiKey,
-            'google_places_api_key' => $googlePlacesApiKey,
+            'google_places_api_key' => '',
+            'google_places_available' => $googlePlacesApiKey !== '',
             'nominatim_user_agent' => $nominatimUserAgent,
             'nominatim_email' => $nominatimEmail,
             // Quota limits (can also be configured via env)

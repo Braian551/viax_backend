@@ -10,7 +10,7 @@
 require_once __DIR__ . '/../config/app.php';
 require_once __DIR__ . '/../core/Request.php';
 require_once __DIR__ . '/../core/RateLimiter.php';
-require_once __DIR__ . '/../core/Auth.php';
+
 
 header('Content-Type: application/json');
 $origin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
@@ -46,7 +46,6 @@ try {
 
     $email = strtolower(trim((string) $input['email']));
     $deviceUuid = trim((string) $input['device_uuid']);
-    $sessionToken = isset($input['token']) ? trim((string) $input['token']) : null;
 
     if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
         sendJsonResponse(false, 'Email inválido');
@@ -74,7 +73,7 @@ try {
     $db = $database->getConnection();
 
     // Buscar usuario por email
-    $stmt = $db->prepare('SELECT id, tipo_usuario FROM usuarios WHERE email = ? LIMIT 1');
+    $stmt = $db->prepare('SELECT id, tipo_usuario, status, es_activo FROM usuarios WHERE lower(email) = ? LIMIT 1');
     $stmt->execute([$email]);
     $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
@@ -86,6 +85,14 @@ try {
     }
 
     $userId = (int)$user['id'];
+
+    if ($userId === (int)env_value('PLAY_REVIEW_USER_ID', 0)
+        && $user['tipo_usuario'] === 'cliente' && $user['status'] === 'active' && (int)$user['es_activo'] === 1) {
+        // The client opens the password screen. Only login.php can issue a session.
+        sendJsonResponse(true, 'Continúa con tu contraseña.', [
+            'exists' => true, 'status' => 'trusted', 'user_type' => 'cliente',
+        ]);
+    }
 
     // Asegurar tabla user_devices existe (en caso de entornos sin migración ejecutada)
     try {
@@ -143,18 +150,6 @@ try {
             'status' => $status,
             'user_type' => $user['tipo_usuario'],
         ]), 60);
-    }
-
-    // Si el cliente envía token, guardamos sesión mínima Redis user_session:{token}.
-    if ($sessionToken && Auth::isPlausibleToken($sessionToken)) {
-        Auth::putSessionInCache($sessionToken, [
-            'user_id' => $userId,
-            'email' => $email,
-            'device_uuid' => $deviceUuid,
-            'status' => $status,
-            'user_type' => $user['tipo_usuario'],
-            'ts' => time(),
-        ], 3600);
     }
 
     sendJsonResponse(true, 'Estado de dispositivo obtenido', $responseData);

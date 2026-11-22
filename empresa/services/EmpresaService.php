@@ -450,7 +450,7 @@ class EmpresaService {
         return $pgArray;
     }
     
-    private function uploadLogo() {
+    private function uploadLogo(bool $requireSuccess = false) {
         if (!isset($_FILES['logo']) || $_FILES['logo']['error'] !== UPLOAD_ERR_OK) {
             return null;
         }
@@ -471,6 +471,7 @@ class EmpresaService {
             
         } catch (Exception $e) {
             error_log("Error uploading logo to R2: " . $e->getMessage());
+            if ($requireSuccess) throw new RuntimeException("No se pudo subir el logo.", 0, $e);
             return null;
         }
     }
@@ -580,7 +581,7 @@ class EmpresaService {
         }
         
         // Handle logo upload if present
-        $newLogoUrl = $this->uploadLogo();
+        $newLogoUrl = $this->uploadLogo(true);
         if ($newLogoUrl) {
             $data['logo_url'] = $newLogoUrl;
         }

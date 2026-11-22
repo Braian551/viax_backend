@@ -16,8 +16,10 @@ $reads = [
 if (!str_starts_with((string)$path, '/api/') || !in_array($route, $reads, true)) {
     sendJsonResponse(false, 'Ruta no encontrada.', [], 404);
 }
-if (Request::method() !== 'GET') {
-    header('Allow: GET');
+$canWrite = in_array($route, ['empresa/profile', 'empresa/settings'], true);
+$method = Request::method();
+if ($method !== 'GET' && !($canWrite && $method === 'POST')) {
+    header($canWrite ? 'Allow: GET, POST' : 'Allow: GET');
     sendJsonResponse(false, 'Método no permitido.', [], 405);
 }
 
@@ -31,6 +33,11 @@ foreach (['empresa_id', 'id'] as $key) {
     if (isset($_GET[$key]) && filter_var($_GET[$key], FILTER_VALIDATE_INT) !== $companyId) {
         sendJsonResponse(false, 'Acceso denegado.', [], 403);
     }
+}
+
+if ($method === 'POST') {
+    require __DIR__ . '/../empresa/panel_update.php';
+    exit;
 }
 
 $_GET['empresa_id'] = (string)$companyId;

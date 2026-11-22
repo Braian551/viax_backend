@@ -406,10 +406,18 @@ class EmpresaRepository {
         $result = $stmt->fetch(PDO::FETCH_ASSOC);
         
         // If no settings exist yet, return defaults
+        $locations = $this->db->prepare(
+            'SELECT departamento, municipio, es_principal FROM empresa_municipios_operacion
+             WHERE empresa_id = ? ORDER BY es_principal DESC, departamento, municipio'
+        );
+        $locations->execute([$empresaId]);
+        $municipios = $locations->fetchAll(PDO::FETCH_ASSOC);
+
         if (!$result) {
             return [
                 'notificaciones_email' => true,
                 'notificaciones_push' => true,
+                'municipios_operacion' => $municipios,
                 'has_transfer_account' => false,
                 'banco_codigo' => null,
                 'banco_nombre' => null,
@@ -432,6 +440,7 @@ class EmpresaRepository {
         return [
             'notificaciones_email' => $result['notificaciones_email'] === true || $result['notificaciones_email'] === 't',
             'notificaciones_push' => $result['notificaciones_push'] === true || $result['notificaciones_push'] === 't',
+            'municipios_operacion' => $municipios,
             'has_transfer_account' => $hasTransferAccount,
             'banco_codigo' => $result['banco_codigo'] ?? null,
             'banco_nombre' => $result['banco_nombre'] ?? null,
@@ -450,15 +459,11 @@ class EmpresaRepository {
     public function updateCompanySettings($empresaId, $data) {
         require_once __DIR__ . '/../../utils/SensitiveDataCrypto.php';
 
-        // First ensure record exists
-        $check = $this->db->prepare("SELECT id FROM empresas_configuracion WHERE empresa_id = ?");
-        $check->execute([$empresaId]);
-        
-        if (!$check->fetch()) {
-            $init = $this->db->prepare("INSERT INTO empresas_configuracion (empresa_id) VALUES (?)");
-            $init->execute([$empresaId]);
-        }
-        
+        $init = $this->db->prepare(
+            'INSERT INTO empresas_configuracion (empresa_id) VALUES (?) ON CONFLICT (empresa_id) DO NOTHING'
+        );
+        $init->execute([$empresaId]);
+
         $fields = [];
         $params = [];
         

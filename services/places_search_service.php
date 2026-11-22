@@ -287,6 +287,8 @@ class PlacesSearchService
 
         $db->beginTransaction();
         try {
+            $lock = $db->prepare("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))");
+            $lock->execute(["viax:recent-searches:{$userId}"]);
             // Evitar duplicados inmediatos de misma ubicación.
             $deleteDup = $db->prepare(
                 "DELETE FROM recent_searches
@@ -323,7 +325,7 @@ class PlacesSearchService
                    AND id NOT IN (
                        SELECT id FROM recent_searches
                        WHERE user_id = :user_id
-                       ORDER BY created_at DESC
+                       ORDER BY created_at DESC, id DESC
                        LIMIT 10
                    )"
             );

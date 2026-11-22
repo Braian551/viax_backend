@@ -247,182 +247,57 @@ class CompanyService {
     }
 
     private function findOperatingCompanies($municipio, $search = '') {
-        $searchQuery = "";
-        if (!empty($search)) {
-            $searchQuery = " AND (e.nombre ILIKE :search OR e.id::text ILIKE :search) ";
-        }
+        $municipality = $this->normalizeMunicipio($municipio);
+        $normalize = static fn (string $column): string =>
+            "translate(lower(trim($column)), 'áéíóúüñ', 'aeiouun')";
+        $coverage = $normalize('m.municipio');
+        $headquarters = $normalize('e.municipio');
+        $contact = $normalize('ec.municipio');
+        $legacy = $normalize('zona');
+        $searchSql = $search !== '' ? ' AND (e.nombre ILIKE :name_search OR e.id::text ILIKE :id_search)' : '';
 
-        // Normalizar municipio para búsqueda (quitar tildes y convertir a minúsculas)
-        $municipioNormalizado = $this->normalizeMunicipio($municipio);
-        
-        // Log para debug
-        error_log("CompanyService: Buscando empresas para municipio: '$municipio' (normalizado: '$municipioNormalizado')");
-
-        // Buscar por empresas_contacto.municipio O empresas_configuracion.zona_operacion
-        // Usamos ILIKE para búsqueda parcial y tolerancia a tildes
         $query = "
-            SELECT DISTINCT
-                e.id,
-                e.nombre,
-                e.logo_url,
-                e.verificada,
-                ec.municipio,
-                COALESCE(ecf.zona_operacion, ARRAY[]::TEXT[]) as zona_operacion,
-                (
-                    SELECT COALESCE(AVG(cal.calificacion), 0)
-                    FROM calificaciones cal
-                    JOIN usuarios u ON cal.usuario_calificado_id = u.id
-                    WHERE u.empresa_id = e.id
-                ) as calificacion_promedio
+            SELECT DISTINCT e.id, e.nombre, e.logo_url, e.verificada,
+                COALESCE(NULLIF(e.municipio, ''), ec.municipio) AS municipio,
+                COALESCE(ecf.zona_operacion, ARRAY[]::TEXT[]) AS zona_operacion,
+                (SELECT COALESCE(AVG(cal.calificacion), 0)
+                 FROM calificaciones cal JOIN usuarios u ON cal.usuario_calificado_id = u.id
+                 WHERE u.empresa_id = e.id) AS calificacion_promedio
             FROM empresas_transporte e
             LEFT JOIN empresas_contacto ec ON e.id = ec.empresa_id
             LEFT JOIN empresas_configuracion ecf ON e.id = ecf.empresa_id
-            WHERE e.estado = 'activo'
-            AND e.verificada = true
-            AND (
-                -- Comparación exacta case-insensitive
-                LOWER(ec.municipio) = LOWER(:municipio)
-                -- O comparación parcial con ILIKE
-                OR ec.municipio ILIKE :municipio_like
-                -- O normalizado sin tildes
-                OR LOWER(unaccent(ec.municipio)) = LOWER(unaccent(:municipio))
-                -- O el municipio está en la zona de operación
-                OR LOWER(:municipio) = ANY(SELECT LOWER(unnest(ecf.zona_operacion)))
-                -- O búsqueda parcial en zona de operación
-                OR EXISTS (
-                    SELECT 1 FROM unnest(ecf.zona_operacion) AS zona 
-                    WHERE LOWER(zona) LIKE LOWER(:municipio_partial)
-                    OR LOWER(unaccent(zona)) LIKE LOWER(unaccent(:municipio_partial))
-                )
-            )
-            $searchQuery
-        ";
-        
+            WHERE e.estado = 'activo' AND e.verificada = true
+              AND (
+                  EXISTS (SELECT 1 FROM empresa_municipios_operacion m
+                          WHERE m.empresa_id = e.id AND $coverage = :coverage)
+                  OR (
+                      NOT EXISTS (SELECT 1 FROM empresa_municipios_operacion m WHERE m.empresa_id = e.id)
+                      AND ($headquarters = :headquarters OR $contact = :contact
+                          OR EXISTS (SELECT 1 FROM unnest(ecf.zona_operacion) AS zona WHERE $legacy = :legacy))
+                  )
+              )
+              $searchSql";
+        $parameters = [
+            ':coverage' => $municipality, ':headquarters' => $municipality,
+            ':contact' => $municipality, ':legacy' => $municipality,
+        ];
+        if ($search !== '') {
+            $parameters[':name_search'] = '%' . $search . '%';
+            $parameters[':id_search'] = '%' . $search . '%';
+        }
         $stmt = $this->conn->prepare($query);
-        $municipioLike = '%' . $municipio . '%';
-        $municipioPartial = '%' . $municipioNormalizado . '%';
-        
-        $stmt->bindParam(':municipio', $municipio);
-        $stmt->bindParam(':municipio_like', $municipioLike);
-        $stmt->bindParam(':municipio_partial', $municipioPartial);
-        
-        if (!empty($search)) {
-            $searchTerm = "%$search%";
-            $stmt->bindParam(':search', $searchTerm);
-        }
-        
-        try {
-            $stmt->execute();
-            $empresas = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        } catch (PDOException $e) {
-            // Si falla (ej: unaccent no instalado), usar consulta simplificada
-            error_log("CompanyService: Error en consulta avanzada: " . $e->getMessage());
-            $empresas = $this->findOperatingCompaniesSimple($municipio, $search);
-        }
-
-        error_log("CompanyService: Empresas encontradas con match exacto: " . count($empresas));
-
-        // Política de negocio: no devolver empresas de cobertura regional si no
-        // hay match por municipio/zona. Evita mostrar empresas muy lejanas.
-
-        // Solo usar fallback si está en modo desarrollo y no hay ninguna empresa
-        if (empty($empresas) && $this->isDevMode()) {
-            error_log("CompanyService: FALLBACK - Modo desarrollo, mostrando todas las empresas");
-            $queryFallback = "
-                SELECT e.id, e.nombre, e.logo_url, e.verificada, ec.municipio,
-                       COALESCE(ecf.zona_operacion, ARRAY[]::TEXT[]) as zona_operacion,
-                       (
-                           SELECT COALESCE(AVG(cal.calificacion), 0)
-                           FROM calificaciones cal
-                           JOIN usuarios u ON cal.usuario_calificado_id = u.id
-                           WHERE u.empresa_id = e.id
-                       ) as calificacion_promedio
-                FROM empresas_transporte e
-                LEFT JOIN empresas_contacto ec ON e.id = ec.empresa_id
-                LEFT JOIN empresas_configuracion ecf ON e.id = ecf.empresa_id
-                WHERE e.estado = 'activo' AND e.verificada = true
-                LIMIT 10
-            ";
-            $stmt = $this->conn->prepare($queryFallback);
-            $stmt->execute();
-            $empresas = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        }
-        
-        return $empresas;
-    }
-    
-    /**
-     * Búsqueda simplificada sin unaccent (fallback)
-     */
-    private function findOperatingCompaniesSimple($municipio, $search = '') {
-        $searchQuery = "";
-        if (!empty($search)) {
-            $searchQuery = " AND (e.nombre ILIKE :search OR e.id::text ILIKE :search) ";
-        }
-        
-        $query = "
-            SELECT DISTINCT
-                e.id, e.nombre, e.logo_url, e.verificada, ec.municipio,
-                COALESCE(ecf.zona_operacion, ARRAY[]::TEXT[]) as zona_operacion,
-                (
-                    SELECT COALESCE(AVG(cal.calificacion), 0)
-                    FROM calificaciones cal
-                    JOIN usuarios u ON cal.usuario_calificado_id = u.id
-                    WHERE u.empresa_id = e.id
-                ) as calificacion_promedio
-            FROM empresas_transporte e
-            LEFT JOIN empresas_contacto ec ON e.id = ec.empresa_id
-            LEFT JOIN empresas_configuracion ecf ON e.id = ecf.empresa_id
-            WHERE e.estado = 'activo'
-            AND e.verificada = true
-            AND (
-                LOWER(ec.municipio) = LOWER(:municipio)
-                OR ec.municipio ILIKE :municipio_like
-                OR LOWER(:municipio) = ANY(SELECT LOWER(unnest(ecf.zona_operacion)))
-            )
-            $searchQuery
-        ";
-        
-        $stmt = $this->conn->prepare($query);
-        $municipioLike = '%' . $municipio . '%';
-        $stmt->bindParam(':municipio', $municipio);
-        $stmt->bindParam(':municipio_like', $municipioLike);
-        
-        if (!empty($search)) {
-            $searchTerm = "%$search%";
-            $stmt->bindParam(':search', $searchTerm);
-        }
-        
-        $stmt->execute();
+        $stmt->execute($parameters);
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
-    
+
     /**
      * Normaliza el nombre del municipio (quita tildes, espacios extra, etc.)
      */
-    private function normalizeMunicipio($municipio) {
-        // Quitar tildes manualmente
-        $tildes = ['á'=>'a', 'é'=>'e', 'í'=>'i', 'ó'=>'o', 'ú'=>'u', 
-                   'Á'=>'A', 'É'=>'E', 'Í'=>'I', 'Ó'=>'O', 'Ú'=>'U',
-                   'ñ'=>'n', 'Ñ'=>'N'];
-        $normalizado = strtr($municipio, $tildes);
-        $normalizado = trim($normalizado);
-        return $normalizado;
-    }
-    
-    /**
-     * Verifica si estamos en modo desarrollo
-     */
-    private function isDevMode() {
-        $env = getenv('APP_ENV');
-        if ($env === 'development' || $env === 'dev') {
-            return true;
-        }
-        // Solo verificar constante si está definida
-        if (defined('APP_ENV')) {
-            return constant('APP_ENV') === 'development';
-        }
-        return false;
+    private function normalizeMunicipio(string $municipio): string {
+        return strtr(mb_strtolower(trim($municipio), 'UTF-8'), [
+            'á' => 'a', 'é' => 'e', 'í' => 'i', 'ó' => 'o', 'ú' => 'u',
+            'ü' => 'u', 'ñ' => 'n',
+        ]);
     }
 
     private function getVehicleTypesByCompanies($empresaIds) {

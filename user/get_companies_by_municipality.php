@@ -12,49 +12,58 @@ if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
     header('Vary: Origin');
 }
 header('Access-Control-Allow-Methods: POST, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type');
+header('Access-Control-Allow-Headers: Content-Type, Accept, Authorization');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit();
 }
 
+require_once __DIR__ . '/../middleware/SessionAccess.php';
+require_once __DIR__ . '/../core/RateLimiter.php';
 require_once __DIR__ . '/services/CompanyService.php';
 
+if (Request::method() !== 'POST') {
+    header('Allow: POST');
+    sendJsonResponse(false, 'Método no permitido.', [], 405);
+}
+
 try {
-    $data = json_decode(file_get_contents('php://input'), true);
-    
-    // Validar datos requeridos
-    if (!isset($data['latitud']) || !isset($data['longitud']) || !isset($data['municipio'])) {
-        throw new Exception('Datos requeridos: latitud, longitud, municipio');
+    $user = SessionAccess::requireUser((new Database())->getConnection());
+    if (!RateLimiter::check((int)$user['id'], 60, 60, 'company_quote')) {
+        sendJsonResponse(false, 'Demasiadas consultas.', [], 429);
     }
-    
-    $latitud = floatval($data['latitud']);
-    $longitud = floatval($data['longitud']);
-    $municipio = trim($data['municipio']);
-    $radioKm = floatval($data['radio_km'] ?? 10.0);
-    $distanciaKm = floatval($data['distancia_km'] ?? 0);
-    $duracionMinutos = intval($data['duracion_minutos'] ?? 0);
-    $search = trim($data['search'] ?? '');
-    
+    $data = getJsonInput();
+
+    $latitud = filter_var($data['latitud'] ?? null, FILTER_VALIDATE_FLOAT);
+    $longitud = filter_var($data['longitud'] ?? null, FILTER_VALIDATE_FLOAT);
+    $municipio = is_string($data['municipio'] ?? null) ? trim($data['municipio']) : '';
+    $radioKm = filter_var($data['radio_km'] ?? 10, FILTER_VALIDATE_FLOAT);
+    $distanciaKm = filter_var($data['distancia_km'] ?? 0, FILTER_VALIDATE_FLOAT);
+    $duracionMinutos = filter_var($data['duracion_minutos'] ?? 0, FILTER_VALIDATE_INT);
+    $search = is_string($data['search'] ?? null) ? trim($data['search']) : '';
+    if ($latitud === false || abs($latitud) > 90 || $longitud === false || abs($longitud) > 180
+        || $municipio === '' || mb_strlen($municipio) > 100 || mb_strlen($search) > 100
+        || $radioKm === false || $radioKm < 1 || $radioKm > 60
+        || $distanciaKm === false || $distanciaKm < 0 || $distanciaKm > 10000
+        || $duracionMinutos === false || $duracionMinutos < 0 || $duracionMinutos > 10080) {
+        sendJsonResponse(false, 'Datos de cotización inválidos.', [], 400);
+    }
+
     $service = new CompanyService();
     $response = $service->getCompaniesByMunicipality(
-        $municipio, 
-        $latitud, 
-        $longitud, 
-        $distanciaKm, 
-        $duracionMinutos, 
+        $municipio,
+        $latitud,
+        $longitud,
+        $distanciaKm,
+        $duracionMinutos,
         $radioKm,
         $search
     );
-    
+
     echo json_encode($response);
-    
-} catch (Exception $e) {
-    http_response_code(400);
-    echo json_encode([
-        'success' => false,
-        'message' => $e->getMessage()
-    ]);
+
+} catch (Throwable $error) {
+    error_log('VIAX coverage: ' . get_class($error));
+    sendJsonResponse(false, 'No pudimos consultar la disponibilidad.', [], 503);
 }
-?>

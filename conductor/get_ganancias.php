@@ -19,7 +19,7 @@ if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
 header('Access-Control-Allow-Methods: GET');
 header('Access-Control-Allow-Headers: Content-Type, Accept');
 
-require_once '../config/database.php';
+require_once __DIR__ . '/../middleware/ConductorAccess.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     http_response_code(405);
@@ -90,14 +90,11 @@ try {
     $database = new Database();
     $db = $database->getConnection();
 
-    $conductor_id = isset($_GET['conductor_id']) ? intval($_GET['conductor_id']) : 0;
+    $conductor_id = ConductorAccess::requireOwnId($db);
     $todayBogota = (new DateTimeImmutable('now', new DateTimeZone('America/Bogota')))->format('Y-m-d');
     $fecha_inicio = isset($_GET['fecha_inicio']) ? trim((string) $_GET['fecha_inicio']) : $todayBogota;
     $fecha_fin = isset($_GET['fecha_fin']) ? trim((string) $_GET['fecha_fin']) : $todayBogota;
 
-    if ($conductor_id <= 0) {
-        throw new Exception('ID de conductor inválido');
-    }
 
     $dateRange = buildBogotaRangeUtc($fecha_inicio, $fecha_fin);
     $completedStates = "'completada', 'completado', 'entregado', 'finalizada', 'finalizado'";
@@ -300,7 +297,7 @@ try {
     http_response_code(500);
     echo json_encode([
         'success' => false,
-        'message' => $e->getMessage()
+        'message' => 'No pudimos completar la consulta del conductor.'
     ]);
 }
 ?>

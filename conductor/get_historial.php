@@ -19,7 +19,7 @@ if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
 header('Access-Control-Allow-Methods: GET');
 header('Access-Control-Allow-Headers: Content-Type, Accept');
 
-require_once '../config/database.php';
+require_once __DIR__ . '/../middleware/ConductorAccess.php';
 
 $canonicalGuardPath = __DIR__ . '/../services/canonical_pricing_guard.php';
 if (is_file($canonicalGuardPath)) {
@@ -143,9 +143,9 @@ try {
     $database = new Database();
     $db = $database->getConnection();
 
-    $conductor_id = isset($_GET['conductor_id']) ? intval($_GET['conductor_id']) : 0;
-    $page = isset($_GET['page']) ? intval($_GET['page']) : 1;
-    $limit = isset($_GET['limit']) ? intval($_GET['limit']) : 20;
+    $conductor_id = ConductorAccess::requireOwnId($db);
+    $page = max(1, (int)($_GET['page'] ?? 1));
+    $limit = max(1, min(100, (int)($_GET['limit'] ?? $_GET['per_page'] ?? 20)));
     $offset = ($page - 1) * $limit;
 
     $hasPrecioFijo = hasColumn($db, 'solicitudes_servicio', 'precio_fijo');
@@ -166,9 +166,6 @@ try {
         ? 's.price_final_canonical,'
         : 'NULL::numeric AS price_final_canonical,';
 
-    if ($conductor_id <= 0) {
-        throw new Exception('ID de conductor inválido');
-    }
 
     // Contar total de viajes
     $query_count = "SELECT COUNT(*) as total
@@ -450,7 +447,7 @@ try {
     http_response_code(500);
     echo json_encode([
         'success' => false,
-        'message' => $e->getMessage(),
+        'message' => 'No pudimos completar la consulta del conductor.',
         'viajes' => []
     ]);
 }

@@ -9,7 +9,7 @@ if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
 header('Access-Control-Allow-Methods: GET');
 header('Access-Control-Allow-Headers: Content-Type, Accept');
 
-require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../middleware/ConductorAccess.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     http_response_code(405);
@@ -65,11 +65,8 @@ try {
     $database = new Database();
     $db = $database->getConnection();
 
-    $conductor_id = isset($_GET['conductor_id']) ? intval($_GET['conductor_id']) : 0;
+    $conductor_id = ConductorAccess::requireOwnId($db);
 
-    if ($conductor_id <= 0) {
-        throw new Exception('ID de conductor inválido');
-    }
 
     // Estadísticas del día actual
     $range = buildBogotaTodayUtcRange();
@@ -228,7 +225,7 @@ try {
     http_response_code(500);
     echo json_encode([
         'success' => false,
-        'message' => $e->getMessage()
+        'message' => 'No pudimos completar la consulta del conductor.'
     ]);
 }
 ?>

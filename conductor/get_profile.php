@@ -9,7 +9,7 @@ if ($viaxOrigin !== '' && in_array($viaxOrigin, $viaxAllowedOrigins, true)) {
 header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Accept');
 
-require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../middleware/ConductorAccess.php';
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
@@ -26,11 +26,8 @@ try {
     $database = new Database();
     $db = $database->getConnection();
 
-    $conductor_id = isset($_GET['conductor_id']) ? intval($_GET['conductor_id']) : 0;
+    $conductor_id = ConductorAccess::requireOwnId($db);
 
-    if ($conductor_id <= 0) {
-        throw new Exception('ID de conductor inválido');
-    }
 
     // Obtener información completa del conductor
     $query = "SELECT 
@@ -75,7 +72,7 @@ try {
                 et.id as empresa_id,
                 et.nombre as empresa_nombre
               FROM usuarios u
-              INNER JOIN detalles_conductor dc ON u.id = dc.usuario_id
+              LEFT JOIN detalles_conductor dc ON u.id = dc.usuario_id
               LEFT JOIN empresas_transporte et ON u.empresa_id = et.id
               WHERE u.id = :conductor_id";
     
@@ -214,7 +211,7 @@ try {
     http_response_code(500);
     echo json_encode([
         'success' => false,
-        'message' => $e->getMessage()
+        'message' => 'No pudimos completar la consulta del conductor.'
     ]);
 }
 ?>

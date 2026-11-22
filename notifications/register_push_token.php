@@ -26,7 +26,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 try {
-    require_once __DIR__ . '/../config/database.php';
+    require_once __DIR__ . '/../middleware/SessionAccess.php';
 
     $database = new Database();
     $conn = $database->getConnection();
@@ -37,8 +37,10 @@ try {
         $input = [];
     }
 
-    $usuarioId = isset($input['usuario_id']) ? intval($input['usuario_id']) : 0;
-    $token = isset($input['token']) ? trim($input['token']) : '';
+    $user = SessionAccess::requireUser($conn);
+    $usuarioId = (int)$user['id'];
+    SessionAccess::requireOwner($input, $usuarioId);
+    $token = is_string($input['token'] ?? null) ? trim($input['token']) : '';
     $plataforma = isset($input['plataforma']) ? strtolower(trim($input['plataforma'])) : 'android';
     $deviceId = isset($input['device_id']) ? trim((string) $input['device_id']) : null;
     $deviceName = isset($input['device_name']) ? trim((string) $input['device_name']) : null;
@@ -60,56 +62,17 @@ try {
         $plataforma = 'android';
     }
 
-    // Asegurar existencia de tabla para evitar fallos por migraciones faltantes
-    $conn->exec("
-        CREATE TABLE IF NOT EXISTS tokens_push_usuario (
-            id SERIAL PRIMARY KEY,
-            usuario_id INTEGER NOT NULL,
-            token TEXT NOT NULL,
-            plataforma VARCHAR(20) NOT NULL DEFAULT 'android',
-            device_id VARCHAR(255),
-            device_name VARCHAR(255),
-            activo BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(usuario_id, token)
-        )
-    ");
-
-    // Upsert compatible (evita depender de ON CONFLICT cuando hay drift de esquema)
-    $updateStmt = $conn->prepare('
-        UPDATE tokens_push_usuario
-        SET plataforma = :plataforma,
-            device_id = :device_id,
-            device_name = :device_name,
-            activo = TRUE,
-            updated_at = NOW()
-        WHERE usuario_id = :usuario_id AND token = :token
-        RETURNING id
-    ');
-
-    $params = [
-        ':usuario_id' => $usuarioId,
-        ':token' => $token,
-        ':plataforma' => $plataforma,
-        ':device_id' => $deviceId,
-        ':device_name' => $deviceName,
-    ];
-
-    $updateStmt->execute($params);
-    $updatedRow = $updateStmt->fetch(PDO::FETCH_ASSOC);
-
-    if ($updatedRow && isset($updatedRow['id'])) {
-        $id = (int)$updatedRow['id'];
-    } else {
-        $insertStmt = $conn->prepare('
-            INSERT INTO tokens_push_usuario (usuario_id, token, plataforma, device_id, device_name, activo)
-            VALUES (:usuario_id, :token, :plataforma, :device_id, :device_name, TRUE)
-            RETURNING id
-        ');
-        $insertStmt->execute($params);
-        $id = (int)($insertStmt->fetch(PDO::FETCH_ASSOC)['id'] ?? 0);
-    }
+    $stmt = $conn->prepare(
+        'INSERT INTO tokens_push_usuario
+         (usuario_id, token, plataforma, device_id, device_name, activo)
+         VALUES (?, ?, ?, ?, ?, TRUE)
+         ON CONFLICT (usuario_id, token) DO UPDATE
+         SET plataforma = EXCLUDED.plataforma, device_id = EXCLUDED.device_id,
+             device_name = EXCLUDED.device_name, activo = TRUE, updated_at = NOW()
+         RETURNING id'
+    );
+    $stmt->execute([$usuarioId, $token, $plataforma, $deviceId, $deviceName]);
+    $id = (int)$stmt->fetchColumn();
 
     echo json_encode([
         'success' => true,
@@ -121,6 +84,5 @@ try {
     echo json_encode([
         'success' => false,
         'error' => 'Error registrando token push',
-        'details' => $e->getMessage(),
     ]);
 }

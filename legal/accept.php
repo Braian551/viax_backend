@@ -1,76 +1,37 @@
 <?php
-header('Content-Type: application/json');
-require_once __DIR__ . '/../config/app.php';
+
+require_once __DIR__ . '/../services/LegalAcceptance.php';
+
+if (Request::method() !== 'POST') {
+    header('Allow: POST');
+    sendJsonResponse(false, 'Método no permitido.', [], 405);
+}
 
 try {
-    $input = file_get_contents('php://input');
-    $data = json_decode($input, true);
-    
-    $required = ['user_id', 'role', 'version', 'device_id'];
-    foreach ($required as $field) {
-        if (empty($data[$field])) throw new Exception("Required field: $field");
+    $db = (new Database())->getConnection();
+    $user = SessionAccess::requireUser($db);
+    $data = getJsonInput();
+    $userId = (int)$user['id'];
+    $role = LegalAcceptance::role($user['tipo_usuario']);
+    if (filter_var($data['user_id'] ?? null, FILTER_VALIDATE_INT) !== $userId
+        || $role === null || LegalAcceptance::role($data['role'] ?? null) !== $role) {
+        sendJsonResponse(false, 'Acceso denegado.', [], 403);
     }
-    
-    $userId = (int) $data['user_id'];
-    $role = $data['role'];
-    if ($role === 'admin') {
-        $role = 'administrador';
-    }
-    $version = $data['version'];
-    $deviceId = $data['device_id'];
-    $ipAddress = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
-    $timestamp = time();
-    
-    $database = new Database();
-    $db = $database->getConnection();
-    
-    // Validar version
-    $stmt = $db->prepare("SELECT content_hash FROM legal_documents WHERE role = ? AND version = ? AND is_active = true");
-    $stmt->execute([$role, $version]);
-    $doc = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    $contentHash = null;
-    if ($doc && !empty($doc['content_hash'])) {
-        $contentHash = (string)$doc['content_hash'];
-    } else {
-        // Compatibilidad: si no hay documento activo cargado en DB, permitimos
-        // aceptación de la versión enviada para no bloquear onboarding.
-        $stmtRoleHasDocs = $db->prepare("SELECT COUNT(*) FROM legal_documents WHERE role = ? AND is_active = true");
-        $stmtRoleHasDocs->execute([$role]);
-        $activeDocsCount = (int)$stmtRoleHasDocs->fetchColumn();
-
-        if ($activeDocsCount > 0) {
-            throw new Exception("Versión legal inválida o inactiva.");
-        }
-
-        $contentHash = hash('sha256', "fallback_legal|{$role}|{$version}");
+    $version = $data['version'] ?? null;
+    $deviceId = $data['device_id'] ?? null;
+    if (!is_string($version) || $version === '' || strlen($version) > 20
+        || !is_string($deviceId) || !preg_match('/^[A-Za-z0-9_-]{1,100}$/D', $deviceId)
+        || $deviceId === 'system_migration') {
+        sendJsonResponse(false, 'Versión o dispositivo inválido.', [], 400);
     }
-    
-    // SHA-256 inmutable
-    $secretSalt = getenv('LEGAL_HASH_SECRET') ?: 'viax_default_secret_9988';
-    $rawData = "{$userId}|{$role}|{$deviceId}|{$ipAddress}|{$version}|{$contentHash}|{$timestamp}|{$secretSalt}";
-    $acceptanceHash = hash('sha256', $rawData);
-    
-    $stmt = $db->prepare("
-        INSERT INTO legal_acceptance_logs 
-        (user_id, role, accepted_version, document_hash, ip_address, device_id, acceptance_hash, accepted_at) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, to_timestamp(?))
-    ");
-    $stmt->execute([$userId, $role, $version, $contentHash, $ipAddress, $deviceId, $acceptanceHash, $timestamp]);
-    
-    if (class_exists('Cache')) {
-        $redis = Cache::redis();
-        if ($redis) {
-            $redis->set("legal_accepted:{$role}:{$userId}", $version);
-        }
+    if (!LegalAcceptance::record($db, $userId, $role, $version, $deviceId)) {
+        sendJsonResponse(false, 'Los términos cambiaron. Consulta y acepta la versión vigente.', [], 409, 'LEGAL_VERSION_EXPIRED');
     }
-    
-    echo json_encode([
-        'success' => true,
-        'accepted' => true,
-        'acceptance_hash' => $acceptanceHash
-    ]);
-} catch (Exception $e) {
-    http_response_code(400);
-    echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+
+    header('Content-Type: application/json; charset=UTF-8');
+    echo json_encode(['success' => true, 'accepted' => true], JSON_THROW_ON_ERROR);
+} catch (Throwable $error) {
+    error_log('VIAX legal acceptance: ' . get_class($error));
+    sendJsonResponse(false, 'No pudimos registrar la aceptación.', [], 503);
 }

@@ -1,44 +1,40 @@
 <?php
-header('Content-Type: application/json');
-require_once __DIR__ . '/../config/app.php';
+
+require_once __DIR__ . '/../services/LegalAcceptance.php';
+
+header('Cache-Control: no-store');
+if (Request::method() !== 'GET') {
+    header('Allow: GET');
+    sendJsonResponse(false, 'Método no permitido.', [], 405);
+}
 
 try {
-    $role = $_GET['role'] ?? 'cliente';
-    if ($role === 'admin') {
-        $role = 'administrador';
+    $role = LegalAcceptance::role($_GET['role'] ?? 'cliente');
+    if ($role === null) {
+        sendJsonResponse(false, 'Rol inválido.', [], 400);
     }
-    
-    // Validate rol
-    if (!in_array($role, ['cliente', 'conductor', 'empresa', 'soporte_tecnico', 'administrador'], true)) {
-        throw new Exception('Invalid role specified');
+
+    $db = (new Database())->getConnection();
+    $hasSession = Request::header('Authorization') !== null || isset($_COOKIE['__Host-viax-session']);
+    $user = $hasSession ? SessionAccess::requireUser($db) : null;
+    if ($user !== null && isset($_GET['user_id'])) {
+        if (filter_var($_GET['user_id'], FILTER_VALIDATE_INT) !== (int)$user['id']
+            || $role !== LegalAcceptance::role($user['tipo_usuario'])) {
+            sendJsonResponse(false, 'Acceso denegado.', [], 403);
+        }
     }
-    
-    $database = new Database();
-    $db = $database->getConnection();
-    
-    $stmt = $db->prepare("SELECT version, content_hash FROM legal_documents WHERE role = ? AND is_active = true ORDER BY published_at DESC LIMIT 1");
-    $stmt->execute([$role]);
-    $doc = $stmt->fetch(PDO::FETCH_ASSOC);
-    
-    if ($doc) {
-        echo json_encode([
-            'success' => true,
-            'role' => $role,
-            'current_version' => $doc['version'],
-            'content_hash' => $doc['content_hash']
-        ]);
-    } else {
-        echo json_encode([
-            'success' => true,
-            'role' => $role,
-            'current_version' => 'v1.0',
-            'content_hash' => ''
-        ]);
+
+    $document = LegalAcceptance::current($db, $role);
+    $result = [
+        'success' => true, 'role' => $role, 'current_version' => $document['version'],
+        'content_hash' => $document['content_hash'],
+    ];
+    if ($user !== null && isset($_GET['user_id'])) {
+        $result += LegalAcceptance::status($db, (int)$user['id'], $role, $document);
     }
-} catch (Exception $e) {
-    http_response_code(400);
-    echo json_encode([
-        'success' => false,
-        'message' => $e->getMessage()
-    ]);
+    header('Content-Type: application/json; charset=UTF-8');
+    echo json_encode($result, JSON_THROW_ON_ERROR);
+} catch (Throwable $error) {
+    error_log('VIAX legal status: ' . get_class($error));
+    sendJsonResponse(false, 'No pudimos consultar los términos vigentes.', [], 503);
 }

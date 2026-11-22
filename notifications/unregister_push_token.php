@@ -26,7 +26,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 try {
-    require_once __DIR__ . '/../config/database.php';
+    require_once __DIR__ . '/../middleware/SessionAccess.php';
 
     $database = new Database();
     $conn = $database->getConnection();
@@ -37,30 +37,16 @@ try {
         $input = [];
     }
 
-    $usuarioId = isset($input['usuario_id']) ? intval($input['usuario_id']) : 0;
-    $token = isset($input['token']) ? trim($input['token']) : '';
+    $user = SessionAccess::requireUser($conn);
+    $usuarioId = (int)$user['id'];
+    SessionAccess::requireOwner($input, $usuarioId);
+    $token = is_string($input['token'] ?? null) ? trim($input['token']) : '';
 
     if ($usuarioId <= 0 || $token === '') {
         http_response_code(400);
         echo json_encode(['success' => false, 'error' => 'usuario_id y token son requeridos']);
         exit();
     }
-
-    // Asegurar existencia de tabla para evitar fallos por migraciones faltantes
-    $conn->exec("
-        CREATE TABLE IF NOT EXISTS tokens_push_usuario (
-            id SERIAL PRIMARY KEY,
-            usuario_id INTEGER NOT NULL,
-            token TEXT NOT NULL,
-            plataforma VARCHAR(20) NOT NULL DEFAULT 'android',
-            device_id VARCHAR(255),
-            device_name VARCHAR(255),
-            activo BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(usuario_id, token)
-        )
-    ");
 
     $stmt = $conn->prepare('
         UPDATE tokens_push_usuario
@@ -83,6 +69,5 @@ try {
     echo json_encode([
         'success' => false,
         'error' => 'Error desactivando token push',
-        'details' => $e->getMessage(),
     ]);
 }

@@ -1,27 +1,28 @@
 <?php
-require_once '../config/config.php';
+require_once __DIR__ . '/../middleware/SessionAccess.php';
+
+if (Request::method() !== 'GET') {
+    header('Allow: GET');
+    sendJsonResponse(false, 'Método no permitido.', [], 405);
+}
 
 try {
     $database = new Database();
     $db = $database->getConnection();
 
-    // Obtener parámetros (GET)
-    $userId = isset($_GET['userId']) ? intval($_GET['userId']) : null;
-    $email = isset($_GET['email']) ? trim($_GET['email']) : null;
-
-    if (!$userId && !$email) {
-        sendJsonResponse(false, 'Se requiere userId o email');
+    $sessionUser = SessionAccess::requireUser($db);
+    $userId = (int)$sessionUser['id'];
+    if ((isset($_GET['userId']) && filter_var($_GET['userId'], FILTER_VALIDATE_INT) !== $userId)
+        || (isset($_GET['email']) && (!is_string($_GET['email']) || strcasecmp($_GET['email'], $sessionUser['email']) !== 0))) {
+        sendJsonResponse(false, 'Acceso denegado.', [], 403);
     }
 
-    if ($userId) {
-        $q = "SELECT id, uuid, nombre, apellido, email, telefono, tipo_usuario, empresa_id, foto_perfil, calificacion_promedio, fecha_registro as creado_en FROM usuarios WHERE id = ? LIMIT 1";
-        $stmt = $db->prepare($q);
-        $stmt->execute([$userId]);
-    } else {
-        $q = "SELECT id, uuid, nombre, apellido, email, telefono, tipo_usuario, empresa_id, foto_perfil, calificacion_promedio, fecha_registro as creado_en FROM usuarios WHERE email = ? LIMIT 1";
-        $stmt = $db->prepare($q);
-        $stmt->execute([$email]);
-    }
+    $stmt = $db->prepare(
+        'SELECT id, uuid, nombre, apellido, email, telefono, tipo_usuario, empresa_id,
+                foto_perfil, calificacion_promedio, fecha_registro AS creado_en
+         FROM usuarios WHERE id = ?'
+    );
+    $stmt->execute([$userId]);
 
     $user = $stmt->fetch(PDO::FETCH_ASSOC);
     if (!$user) {
@@ -37,8 +38,6 @@ try {
     sendJsonResponse(true, 'Perfil obtenido', ['user' => $user, 'location' => $location]);
 
 } catch (Exception $e) {
-    http_response_code(500);
-    sendJsonResponse(false, 'Error: ' . $e->getMessage());
+    error_log('VIAX profile: ' . get_class($e));
+    sendJsonResponse(false, 'No pudimos consultar el perfil.', [], 500);
 }
-
-?>
